@@ -8,11 +8,14 @@ mod config;
 mod conn;
 mod ctl;
 mod feature;
+mod lockproc;
+mod logind;
 mod mpris;
 mod notify;
 mod pair;
 mod presence;
 mod state;
+mod wlidle;
 
 use anyhow::Context;
 use feature::{Feature, Hub};

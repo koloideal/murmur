@@ -33,6 +33,11 @@ pub struct Config {
     /// (password-manager markers like x-kde-passwordManagerHint).
     #[serde(default = "default_mime_deny")]
     pub clipboard_mime_deny: Vec<String>,
+    /// Process names that mean "the session is locked". Needed because
+    /// wlroots lockers (hyprlock, swaylock) don't expose lock state to
+    /// observers — presence watches for the process itself.
+    #[serde(default = "default_lock_procs")]
+    pub lock_procs: Vec<String>,
 }
 
 fn default_idle() -> u64 {
@@ -43,6 +48,15 @@ fn default_mime_deny() -> Vec<String> {
     vec!["x-kde-passwordManagerHint".into()]
 }
 
+fn default_lock_procs() -> Vec<String> {
+    [
+        "hyprlock", "swaylock", "gtklock", "waylock", "i3lock", "slock",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -50,6 +64,7 @@ impl Default for Config {
             name: String::new(),
             idle_timeout_secs: default_idle(),
             clipboard_mime_deny: default_mime_deny(),
+            lock_procs: default_lock_procs(),
         }
     }
 }
