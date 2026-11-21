@@ -22,6 +22,11 @@ class Secrets(context: Context) {
     private val prefs = context.getSharedPreferences("murmur", Context.MODE_PRIVATE)
     private val cipher = KeystoneCipher()
 
+    init {
+        // Cold start already provisioned → dashboard may show immediately.
+        if (provisioned) settledFlow.value = true
+    }
+
     val provisioned: Boolean
         get() = prefs.contains(KEY_FAMILY) && prefs.contains(KEY_TOKEN) &&
             prefs.contains(KEY_DEVICE)
@@ -59,12 +64,18 @@ class Secrets(context: Context) {
         prefs.edit { putString(KEY_FAMILY, cipher.seal(newKey)) }
     }
 
-    private companion object {
-        const val KEY_DEVICE = "device_id"
-        const val KEY_TOKEN = "auth_token_enc"
-        const val KEY_FAMILY = "family_key_enc"
-        const val KEY_URL = "server_url"
-        const val KEY_ALLOW = "notif_allowlist"
+    companion object {
+        /** UI gate: true once the dashboard may be shown. Set on cold
+         *  start when already provisioned, or by the pairing card when
+         *  its welcome animation finishes — not by [save] itself, so the
+         *  burst gets its moment before the swap. */
+        val settledFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+        private const val KEY_DEVICE = "device_id"
+        private const val KEY_TOKEN = "auth_token_enc"
+        private const val KEY_FAMILY = "family_key_enc"
+        private const val KEY_URL = "server_url"
+        private const val KEY_ALLOW = "notif_allowlist"
     }
 }
 

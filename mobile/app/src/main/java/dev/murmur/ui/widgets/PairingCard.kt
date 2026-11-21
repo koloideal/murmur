@@ -5,13 +5,18 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -24,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,8 +37,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -46,32 +55,40 @@ import dev.murmur.core.pair
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 
-private val SHORT_CODE = Regex("[0-9A-Za-z]{4}-?[0-9A-Za-z]{4}")
-
 /**
  * Guided pairing: QR is the primary path, the typeable XXXX-XXXX code is
  * the manual fallback. Both converge on the six-digit SAS comparison.
+ * Once the phone is provisioned and the welcome burst has played, this
+ * card folds away and the dashboard takes over.
  */
 @Composable
 fun PairingCard() {
     val ctx = LocalContext.current
     val secrets = remember { Secrets(ctx) }
     val scope = rememberCoroutineScope()
+    val settled by Secrets.settledFlow.collectAsState()
 
-    var phase by remember { mutableStateOf(if (secrets.provisioned) "done" else "idle") }
+    var phase by remember { mutableStateOf("idle") }
     var manual by remember { mutableStateOf(false) }
-    var code by remember { mutableStateOf("") }
+    var inviteMode by remember { mutableStateOf(false) }
+    var codeA by remember { mutableStateOf("") }
+    var codeB by remember { mutableStateOf("") }
+    var invite by remember { mutableStateOf("") }
     var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "ws://" }) }
     var sas by remember { mutableStateOf("") }
     var sasAnswer by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var celebrated by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    var celebrating by remember { mutableStateOf(false) }
 
-    val isShortCode = code.trim().matches(SHORT_CODE)
+    val code = codeA + codeB
+    val codeReady = code.length == 8
+    val focusB = remember { FocusRequester() }
 
     fun runPairing(input: String, short: Boolean = false) {
         phase = "connecting"
         error = null
+        hint = null
         scope.launch {
             try {
                 val prov = pair(
@@ -86,13 +103,15 @@ fun PairingCard() {
                 }
                 secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl)
                 phase = "done"
-                celebrated = true
+                celebrating = true
                 MurmurService.start(ctx)
             } catch (e: PairingException) {
                 error = e.message
+                if (short) hint = "check the code and the server address, then try again"
                 phase = "idle"
             } catch (e: Exception) {
                 error = e.message ?: "pairing failed"
+                if (short) hint = "can't reach the server — is the address right and the port open?"
                 phase = "idle"
             }
         }
@@ -105,6 +124,10 @@ fun PairingCard() {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) scanner.launch(qrOptions())
+        else {
+            manual = true
+            hint = "no camera access — enter the code manually instead"
+        }
     }
     fun scan() {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA)
@@ -116,125 +139,243 @@ fun PairingCard() {
         }
     }
 
-    FeatureCard("pair this phone", Icons.Outlined.QrCodeScanner) {
-        when (phase) {
-            "done" -> Column(
-                Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                if (celebrated) {
-                    PairDoneBurst()
-                    Spacer(Modifier.height(4.dp))
+    AnimatedVisibility(
+        visible = !settled,
+        exit = fadeOut() + shrinkVertically(),
+        enter = fadeIn() + expandVertically(),
+    ) {
+        FeatureCard("pair this phone", Icons.Outlined.QrCodeScanner) {
+            when {
+                celebrating -> Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    PairDoneBurst(onFinished = {
+                        celebrating = false
+                        Secrets.settledFlow.value = true
+                    })
+                }
+
+                phase == "connecting" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.size(12.dp))
                     Text(
-                        "welcome to the family",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                } else {
-                    Text(
-                        "this phone is part of the family",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.primary,
+                        "contacting the inviter…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            }
 
-            "connecting" -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.size(12.dp))
-                Text(
-                    "contacting the inviter…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            "sas" -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "does this match the code on the laptop?",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialTheme.shapes.medium,
+                phase == "sas" -> Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        sas.chunked(3).joinToString(" "),
-                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp),
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        "does this match the code on the laptop?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(12.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(86.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                sas.chunked(3).joinToString(" "),
+                                style = MaterialTheme.typography.displaySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = {
+                            phase = "connecting"
+                            sasAnswer?.complete(true)
+                        }) { Text("match") }
+                        TextButton(onClick = {
+                            phase = "idle"
+                            sasAnswer?.complete(false)
+                        }) { Text("reject") }
+                    }
                 }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = {
-                        phase = "connecting"
-                        sasAnswer?.complete(true)
-                    }) { Text("match") }
-                    TextButton(onClick = {
-                        phase = "idle"
-                        sasAnswer?.complete(false)
-                    }) { Text("reject") }
-                }
-            }
 
-            else -> {
-                Text(
-                    "run  murmurctl invite  on a laptop",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = ::scan, modifier = Modifier.fillMaxWidth()) {
-                    Text("scan QR code", textAlign = TextAlign.Center)
-                }
-                TextButton(
-                    onClick = { manual = !manual },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("enter code manually") }
-                if (manual) {
-                    OutlinedTextField(
-                        value = code,
-                        onValueChange = { code = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("invite or short code") },
-                        placeholder = { Text("K7Q2-J4MN") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                else -> {
+                    Text(
+                        "run  murmurctl invite  on a laptop",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (isShortCode) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = server,
-                            onValueChange = { server = it },
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = ::scan, modifier = Modifier.fillMaxWidth()) {
+                        Text("scan QR code", textAlign = TextAlign.Center)
+                    }
+                    TextButton(
+                        onClick = { manual = !manual },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("enter code manually") }
+                    if (manual) {
+                        if (inviteMode) {
+                            OutlinedTextField(
+                                value = invite,
+                                onValueChange = { invite = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("full invite") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                            )
+                            TextButton(
+                                onClick = { inviteMode = false },
+                                modifier = Modifier.align(Alignment.End),
+                            ) { Text("have a short code?") }
+                        } else {
+                            ShortCodeField(
+                                a = codeA,
+                                b = codeB,
+                                onA = { v ->
+                                    val clean = v.filter(Char::isLetterOrDigit)
+                                        .uppercase().take(8)
+                                    if (clean.length > 4) {
+                                        codeA = clean.take(4)
+                                        codeB = clean.drop(4).take(4)
+                                        focusB.requestFocus()
+                                    } else {
+                                        codeA = clean
+                                        if (clean.length == 4) focusB.requestFocus()
+                                    }
+                                },
+                                onB = { v ->
+                                    codeB = v.filter(Char::isLetterOrDigit)
+                                        .uppercase().take(4)
+                                },
+                                focusB = focusB,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = server,
+                                onValueChange = { server = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("server") },
+                                placeholder = { Text("ws://192.168.0.1:8770") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            )
+                            TextButton(
+                                onClick = { inviteMode = true },
+                                modifier = Modifier.align(Alignment.End),
+                            ) { Text("paste a full invite instead") }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        val ready = if (inviteMode) invite.isNotBlank()
+                        else codeReady && server.isNotBlank()
+                        Button(
+                            onClick = {
+                                if (inviteMode) runPairing(invite.trim())
+                                else runPairing("$codeA-$codeB", short = true)
+                            },
+                            enabled = ready,
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text("server") },
-                            placeholder = { Text("ws://192.168.0.1:8770") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        ) { Text("pair") }
+                    }
+                    error?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { runPairing(code.trim(), isShortCode) },
-                        enabled = code.isNotBlank() && (!isShortCode || server.isNotBlank()),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("pair") }
-                }
-                error?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    hint?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/** Two four-character boxes with the dash fixed between them — the
+ *  XXXX-XXXX shape is the hint, no formatting left to the user. */
+@Composable
+private fun ShortCodeField(
+    a: String,
+    b: String,
+    onA: (String) -> Unit,
+    onB: (String) -> Unit,
+    focusB: FocusRequester,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        OutlinedTextField(
+            value = a,
+            onValueChange = onA,
+            modifier = Modifier.weight(1f),
+            textStyle = MaterialTheme.typography.headlineSmall.copy(
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+            ),
+            placeholder = {
+                Text(
+                    "K7Q2",
+                    Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Characters,
+                keyboardType = KeyboardType.Ascii,
+            ),
+        )
+        Text(
+            "–",
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = b,
+            onValueChange = onB,
+            modifier = Modifier
+                .weight(1f)
+                .focusRequester(focusB),
+            textStyle = MaterialTheme.typography.headlineSmall.copy(
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+            ),
+            placeholder = {
+                Text(
+                    "J4MN",
+                    Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Characters,
+                keyboardType = KeyboardType.Ascii,
+            ),
+        )
     }
 }
 

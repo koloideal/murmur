@@ -50,6 +50,7 @@ suspend fun pair(
     } else {
         session = sessionFromCode(inviteCode.trim())
         url = serverUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { if ("://" in it) it else "ws://$it" }
             ?: throw PairingException("short codes need a server address")
     }
     val sodium = LazySodiumAndroid(SodiumAndroid())
@@ -154,7 +155,10 @@ suspend fun pair(
                 deviceId = blob.device_id,
                 tokenHex = blob.token_hex,
                 familyKey = Base64.decode(blob.family_key_b64, Base64.NO_WRAP),
-                serverUrl = blob.server_url,
+                // The address that actually carried the pairing wins —
+                // the inviter's advertised URL may be unreachable from
+                // this network (e.g. a LAN IP behind a firewall).
+                serverUrl = url,
             )
         }
     } finally {
