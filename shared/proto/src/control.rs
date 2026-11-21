@@ -23,9 +23,15 @@ pub enum Control {
         reason: String,
     },
 
-    /// Pairing handshake. New (unpaired) device → the inviter named in the
-    /// invite code. `from` is the session id the joiner claimed as its
-    /// conn id; the inviter replies with `to = session`.
+    /// Authed device → @server: "I issued an invite for this session —
+    /// forward any `PairHello` arriving from it to me". Lets a joiner
+    /// reach the inviter without knowing its device id (short-code path).
+    PairOpen {
+        session: DeviceId,
+    },
+    /// Joiner → @server (forwarded to the inviter). `from` is the session
+    /// id the joiner claimed as its conn id; the inviter replies with
+    /// `to = session`.
     PairHello {
         pubkey_b64: String,
         /// Name the new device wants to be registered under.

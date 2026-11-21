@@ -121,8 +121,13 @@ fn main() -> anyhow::Result<()> {
         Cmd::Invite => {
             let res = request(serde_json::json!({"cmd": "invite"}))?;
             let code = res["data"]["code"].as_str().unwrap_or_default().to_owned();
+            let short = res["data"]["short"].as_str().unwrap_or_default();
             print_qr(&code);
-            println!("invite code (on the new device: `murmurd pair --code …`):");
+            if !short.is_empty() {
+                println!("typeable code (on the phone, or `murmurd pair --code … --server URL`):");
+                println!("{short}");
+            }
+            println!("full invite (`murmurd pair --code …`):");
             println!("{code}");
             return Ok(());
         }

@@ -60,6 +60,9 @@ struct Shared {
     devices: Mutex<HashMap<DeviceId, DeviceRec>>,
     /// Live connections.
     conns: Mutex<HashMap<DeviceId, Conn>>,
+    /// Open pair sessions: session → inviter. Lets a joiner reach the
+    /// inviter through @server without knowing its device id.
+    open_pairs: Mutex<HashMap<DeviceId, DeviceId>>,
 }
 
 impl Shared {
@@ -73,6 +76,7 @@ impl Shared {
             devices_path: path,
             devices: Mutex::new(devices),
             conns: Mutex::new(HashMap::new()),
+            open_pairs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -157,11 +161,13 @@ impl Shared {
         }
     }
 
-    /// Remove the conn from the registry and signal its reader loop to exit.
+    /// Remove the conn from the registry, close it, and drop any pair
+    /// sessions this conn had opened.
     fn drop_conn(&self, id: &DeviceId) {
         if let Some(c) = self.conns.lock().unwrap().remove(id) {
             let _ = c.close.try_send(());
         }
+        self.open_pairs.lock().unwrap().retain(|_, inv| inv != id);
     }
 
     /// Like drop_conn, but only if the entry still belongs to the conn
@@ -173,6 +179,8 @@ impl Shared {
             if let Some(c) = conns.remove(id) {
                 let _ = c.close.try_send(());
             }
+            drop(conns);
+            self.open_pairs.lock().unwrap().retain(|_, inv| inv != id);
         }
     }
 }
@@ -623,26 +631,12 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
             env.from = device_id; // never trust the client's claim
 
             if pairing {
-                // Pairing conns may only exchange cleartext Pair* frames,
-                // unicast to the inviter/from the inviter. No broadcast,
-                // no server ops, no pair↔pair chatter (the inviter is
-                // always authed — a pair→pair frame is never legitimate).
-                let dst_authed = match &env.to {
-                    Route::Device(d) => shared
-                        .conns
-                        .lock()
-                        .unwrap()
-                        .get(d)
-                        .is_some_and(|c| !c.pairing),
-                    _ => false,
-                };
-                let ok = dst_authed
-                    && matches!(
-                        env.control_payload(),
-                        Ok(Control::PairHello { .. })
-                            | Ok(Control::PairAccept { .. })
-                            | Ok(Control::PairData { .. })
-                    );
+                // A pairing conn may send exactly one thing: a cleartext
+                // PairHello to @server, which forwards it to the inviter
+                // that opened the session. No broadcast, no unicast,
+                // no other server ops.
+                let ok = matches!(env.to, Route::Server)
+                    && matches!(env.control_payload(), Ok(Control::PairHello { .. }));
                 if !ok {
                     warn!("{device_id}: pairing conn sent a non-pair frame");
                     continue;
@@ -684,11 +678,24 @@ async fn handle_control(
             return Ok(());
         }
     };
-    if pairing {
-        warn!("{from}: pairing conn sent server op");
-        return Ok(());
-    }
     match ctl {
+        // A pairing conn's only @server op: the inviter registered this
+        // session via PairOpen — forward the hello to it (env.from is
+        // already the session id).
+        Control::PairHello { .. } if pairing => {
+            let inviter = shared.open_pairs.lock().unwrap().get(&from).copied();
+            match inviter {
+                Some(inv) => shared.send_to(&inv, env),
+                None => warn!("{from}: PairHello for an unknown/expired session"),
+            }
+        }
+        _ if pairing => {
+            warn!("{from}: pairing conn sent server op");
+        }
+        Control::PairOpen { session } => {
+            shared.open_pairs.lock().unwrap().insert(session, from);
+            debug!("{from} opened pair session {session}");
+        }
         Control::RegisterDevice {
             device_id,
             name,

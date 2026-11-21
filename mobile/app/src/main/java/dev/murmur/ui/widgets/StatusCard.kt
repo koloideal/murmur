@@ -23,12 +23,15 @@ import dev.murmur.MurmurService
 import dev.murmur.core.Relay
 import dev.murmur.core.Secrets
 
-/** Connection + identity at a glance. */
+/** Connection + identity at a glance. Hidden until the phone is paired —
+ *  before that there's nothing to report and the pairing card leads. */
 @Composable
 fun StatusCard() {
     val ctx = LocalContext.current
     val secrets = remember { Secrets(ctx) }
     val status by MurmurService.status.collectAsState()
+
+    if (secrets.deviceId == null) return
 
     FeatureCard("connection", Icons.Outlined.Hub) {
         Row(verticalAlignment = Alignment.CenterVertically) {

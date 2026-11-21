@@ -92,13 +92,15 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
             .and_then(|i| args.get(i + 1))
             .map(String::as_str)
     }
-    let code = flag(args, "--code").context("usage: murmurd pair --code CODE [--name NAME]")?;
+    let code = flag(args, "--code")
+        .context("usage: murmurd pair --code CODE [--server URL] [--name NAME]")?;
+    let server = flag(args, "--server").map(str::to_owned);
     let name = flag(args, "--name")
         .map(str::to_owned)
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "murmur-laptop".into());
 
-    let paired = pair::join(code, &name).await?;
+    let paired = pair::join(code, &name, server.as_deref()).await?;
     let cfg = config::Config {
         server_url: paired.server_url,
         name,

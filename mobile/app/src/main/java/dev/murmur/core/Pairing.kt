@@ -36,15 +36,29 @@ class PairingException(message: String) : Exception(message)
 suspend fun pair(
     inviteCode: String,
     deviceName: String,
+    serverUrl: String? = null,
     onSas: suspend (code: String) -> Boolean,
 ): Provisioning {
+    // Full invite carries server+session; a typeable XXXX-XXXX code
+    // derives the session locally and needs the server passed in.
     val invite = Invite.decode(inviteCode)
-        ?: throw PairingException("bad invite code")
+    val session: String
+    val url: String
+    if (invite != null) {
+        session = invite.session
+        url = invite.serverUrl
+    } else {
+        session = sessionFromCode(inviteCode.trim())
+        url = serverUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw PairingException("short codes need a server address")
+    }
     val sodium = LazySodiumAndroid(SodiumAndroid())
     val pairKey = PairKey(sodium)
     var seq = 1L
 
-    val frames = Channel<Control>(Channel.UNLIMITED)
+    // (envelope-from, control) — `from` carries the inviter id the SAS
+    // needs on the short-code path.
+    val frames = Channel<Pair<String, Control>>(Channel.UNLIMITED)
     val failure = CompletableDeferred<PairingException>()
     lateinit var ws: WebSocket
 
@@ -54,7 +68,7 @@ suspend fun pair(
                 protoJson.encodeToString(
                     Control.serializer(),
                     Control.Hello(
-                        device_id = invite.session,
+                        device_id = session,
                         name = deviceName,
                         role = "pair",
                     ),
@@ -66,12 +80,12 @@ suspend fun pair(
             // First frame is a raw Control (HelloOk/Err); after auth it's
             // envelopes carrying cleartext Control in the payload.
             runCatching { protoJson.decodeFromString<Control>(text) }.getOrNull()?.let {
-                frames.trySend(it)
+                frames.trySend("" to it)
                 return
             }
-            runCatching { Envelope.fromJson(text) }.getOrNull()
-                ?.controlPayload()
-                ?.let { frames.trySend(it) }
+            runCatching { Envelope.fromJson(text) }.getOrNull()?.let { env ->
+                env.controlPayload()?.let { frames.trySend(env.from to it) }
+            }
         }
 
         private fun fail(msg: String) {
@@ -85,25 +99,27 @@ suspend fun pair(
             fail(t.message ?: "connection failed")
     }
 
-    ws = OkHttpClient().newWebSocket(Request.Builder().url(invite.serverUrl).build(), listener)
+    ws = OkHttpClient().newWebSocket(Request.Builder().url(url).build(), listener)
     try {
-        suspend fun next(): Control =
+        suspend fun next(): Pair<String, Control> =
             kotlinx.coroutines.selects.select {
                 frames.onReceive { it }
                 failure.onAwait { throw it }
             }
 
         return withTimeout(TIMEOUT_MS) {
-            when (val first = next()) {
+            when (val first = next().second) {
                 is Control.HelloOk -> Unit
                 is Control.HelloErr -> throw PairingException("server: ${first.reason}")
                 else -> throw PairingException("expected hello_ok")
             }
 
+            // PairHello → @server, which forwards it to the inviter that
+            // PairOpen'd this session — the joiner needs no inviter id.
             ws.send(
                 Envelope.wrap(
-                    from = invite.session,
-                    to = invite.inviter,
+                    from = session,
+                    to = Envelope.SERVER,
                     seq = seq++,
                     ctl = Control.PairHello(
                         pubkey_b64 = pairKey.publicB64,
@@ -112,22 +128,23 @@ suspend fun pair(
                 ).toJson(),
             )
 
-            val accept = next() as? Control.PairAccept
+            val (inviter, frame) = next()
+            val accept = frame as? Control.PairAccept
                 ?: throw PairingException("expected pair_accept")
             val peerPub = Base64.decode(accept.pubkey_b64, Base64.NO_WRAP)
             val dh = pairKey.dh(peerPub)
             val sas = sasCode(
                 pairKey.public,
                 peerPub,
-                hexToBytes(invite.session),
-                hexToBytes(invite.inviter),
+                hexToBytes(session),
+                hexToBytes(inviter),
             )
             if (!onSas(sas)) {
                 throw PairingException("rejected — codes didn't match")
             }
 
             // The inviter sends PairData only after *their* confirmation.
-            val data = next() as? Control.PairData
+            val data = next().second as? Control.PairData
                 ?: throw PairingException("expected pair_data")
             val blobBytes = Base64.decode(data.blob_b64, Base64.NO_WRAP)
             val blob = protoJson.decodeFromString<PairBlob>(

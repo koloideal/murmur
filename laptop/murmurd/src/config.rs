@@ -103,10 +103,6 @@ impl Secrets {
         Ok(self.device_id.parse()?)
     }
 
-    pub fn auth_token(&self) -> anyhow::Result<AuthToken> {
-        AuthToken::from_hex(&self.auth_token_hex)
-    }
-
     pub fn family_key(&self) -> anyhow::Result<FamilyKey> {
         let b = hex::decode(&self.family_key_hex)?;
         let arr: [u8; 32] = b

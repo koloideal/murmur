@@ -157,6 +157,7 @@ data class Invite(
     @SerialName("s") val serverUrl: String,
     @SerialName("i") val inviter: String,
     @SerialName("p") val session: String,
+    @SerialName("c") val code: String = "",
 ) {
     companion object {
         fun decode(code: String): Invite? = runCatching {

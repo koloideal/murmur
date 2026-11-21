@@ -106,6 +106,12 @@ impl Shared {
                 created: Instant::now(),
             },
         );
+        // Register the session with the server so joiners can reach us
+        // without knowing our device id (short-code path). Queued if we
+        // happen to be offline — flushed on reconnect.
+        let _ = self.send_control(&Control::PairOpen {
+            session: invite.session,
+        });
         invite
     }
 
@@ -189,18 +195,30 @@ pub struct Paired {
     pub family_key_hex: String,
 }
 
-/// `murmurd pair --code <invite>`: claim the session, exchange pubkeys,
-/// show the SAS, wait for the inviter to ship `PairData`.
-pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
-    let invite = Invite::decode(code).context("bad invite code")?;
+/// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
+/// session, exchange pubkeys, show the SAS, wait for `PairData`.
+/// A full invite carries server+session; a short code derives the
+/// session and needs `--server`.
+pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Result<Paired> {
+    let (session, server_url) = match Invite::decode(code) {
+        Ok(inv) => (inv.session, inv.server_url),
+        Err(_) => {
+            // Not a bundle — try the typeable XXXX-XXXX form.
+            let session = DeviceId::from_code(code.trim());
+            let server_url = server
+                .map(str::to_owned)
+                .context("short invite codes need --server ws(s)://…")?;
+            (session, server_url)
+        }
+    };
     let key = PairKey::generate();
 
-    let (ws, _) = tokio_tungstenite::connect_async(&invite.server_url).await?;
+    let (ws, _) = tokio_tungstenite::connect_async(&server_url).await?;
     let (mut sink, mut source) = ws.split();
 
     sink.send(Ws::Text(
         serde_json::to_string(&Control::Hello {
-            device_id: invite.session,
+            device_id: session,
             name: name.into(),
             role: HelloRole::Pair,
             token_hex: None,
@@ -216,14 +234,13 @@ pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
         },
         _ => bail!("no hello reply"),
     }
-    eprintln!(
-        "connected to {} as pair session {}",
-        invite.server_url, invite.session
-    );
+    eprintln!("connected to {server_url} as pair session {session}");
 
+    // PairHello goes to @server — it forwards to whoever PairOpen'd
+    // this session, so the joiner never needs the inviter's id.
     let hello = Envelope::control(
-        invite.session,
-        Route::Device(invite.inviter),
+        session,
+        Route::Server,
         1,
         &Control::PairHello {
             pubkey_b64: key.public_b64(),
@@ -231,10 +248,7 @@ pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
         },
     )?;
     sink.send(Ws::Text(hello.to_json().into())).await?;
-    eprintln!(
-        "waiting for {} to accept — `murmurctl pair` there",
-        invite.inviter
-    );
+    eprintln!("waiting for the inviter to accept — `murmurctl pair` there");
 
     tokio::time::timeout(JOIN_TIMEOUT, async {
         let mut dh_key: Option<FamilyKey> = None;
@@ -245,7 +259,10 @@ pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
                 Control::PairAccept { pubkey_b64 } => {
                     let peer = PairKey::public_from_b64(&pubkey_b64)?;
                     dh_key = Some(FamilyKey::from_raw(key.dh(&peer)));
-                    let sas = sas_code(&key.public, &peer, &invite.session, &invite.inviter);
+                    // env.from is the inviter's device id (stamped by
+                    // the server) — the SAS needs it, and on the
+                    // short-code path it's the only way to learn it.
+                    let sas = sas_code(&key.public, &peer, &session, &env.from);
                     eprintln!("verification code: {sas}");
                     eprintln!("confirm it matches on the inviter, it will then complete pairing");
                 }

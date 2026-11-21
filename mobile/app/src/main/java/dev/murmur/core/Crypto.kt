@@ -94,6 +94,16 @@ fun sasCode(pubA: ByteArray, pubB: ByteArray, idA: ByteArray, idB: ByteArray): S
 fun hexToBytes(hex: String): ByteArray =
     hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
+/** Pair session id from a typed `XXXX-XXXX` code — byte-for-byte
+ *  murmur_proto::DeviceId::from_code (SHA-256 of the normalized code,
+ *  first 8 bytes, hex). */
+fun sessionFromCode(code: String): String {
+    val norm = code.replace("-", "").uppercase()
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(norm.toByteArray(Charsets.UTF_8))
+    return digest.take(8).joinToString("") { "%02x".format(it) }
+}
+
 private fun ByteArray.contentCompareTo(other: ByteArray): Int {
     for (i in 0 until minOf(size, other.size)) {
         val d = (this[i].toInt() and 0xFF) - (other[i].toInt() and 0xFF)

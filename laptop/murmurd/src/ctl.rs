@@ -170,6 +170,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             let invite = shared.invite();
             Res::ok(serde_json::json!({
                 "code": invite.encode(),
+                "short": invite.code,
                 "session": invite.session.to_string(),
             }))
         }

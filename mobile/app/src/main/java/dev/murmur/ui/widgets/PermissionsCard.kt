@@ -1,20 +1,13 @@
 package dev.murmur.ui.widgets
 
-import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.Key
-import androidx.compose.material.icons.outlined.WarningAmber
-import androidx.compose.material3.Icon
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -29,91 +22,72 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
-/** The two system permissions the agent can't grant itself. */
 @Composable
 fun PermissionsCard() {
     val ctx = LocalContext.current
-    var notif by remember { mutableStateOf(hasNotificationAccess(ctx)) }
-    var battery by remember { mutableStateOf(ignoresBattery(ctx)) }
+    var notif by remember { mutableStateOf(false) }
+    var battery by remember { mutableStateOf(false) }
 
-    // Re-check when the user comes back from a settings screen.
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    DisposableEffect(lifecycle) {
+    fun recheck() {
+        notif = NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
+        val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        battery = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+    // Re-check whenever the user returns from a settings screen.
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
         val obs = LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_RESUME) {
-                notif = hasNotificationAccess(ctx)
-                battery = ignoresBattery(ctx)
-            }
+            if (e == Lifecycle.Event.ON_RESUME) recheck()
         }
-        lifecycle.addObserver(obs)
-        onDispose { lifecycle.removeObserver(obs) }
+        owner.lifecycle.addObserver(obs)
+        recheck()
+        onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
-    FeatureCard("permissions", Icons.Outlined.Key) {
-        PermissionRow(
-            granted = notif,
-            label = "notification access",
-            hint = "notifications & media",
-        ) {
-            ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+    if (notif && battery) return
+
+    FeatureCard("permissions", Icons.Outlined.Shield) {
+        if (!notif) {
+            PermRow(
+                title = "notification access",
+                hint = "mirrors your notifications and media to laptops",
+            ) {
+                ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }
         }
-        PermissionRow(
-            granted = battery,
-            label = "battery exemption",
-            hint = "stay connected in background",
-        ) {
-            ctx.startActivity(
-                Intent(
-                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    Uri.parse("package:${ctx.packageName}"),
-                ),
-            )
+        if (!battery) {
+            PermRow(
+                title = "battery exemption",
+                hint = "keeps murmur connected in the background",
+            ) {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(android.net.Uri.parse("package:${ctx.packageName}")),
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun PermissionRow(
-    granted: Boolean,
-    label: String,
-    hint: String,
-    onFix: () -> Unit,
-) {
+private fun PermRow(title: String, hint: String, onGrant: () -> Unit) {
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                if (granted) Icons.Outlined.CheckCircle else Icons.Outlined.WarningAmber,
-                contentDescription = null,
-                tint = if (granted) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.error,
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.width(10.dp))
-            Text(label, style = MaterialTheme.typography.bodyMedium)
         }
-        if (!granted) {
-            TextButton(onClick = onFix) { Text("grant") }
-        } else {
-            Text(hint, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        TextButton(onClick = onGrant) { Text("grant") }
     }
 }
-
-private fun hasNotificationAccess(ctx: Context): Boolean {
-    val enabled = Settings.Secure.getString(
-        ctx.contentResolver,
-        "enabled_notification_listeners",
-    ) ?: return false
-    return enabled.contains(ctx.packageName)
-}
-
-private fun ignoresBattery(ctx: Context): Boolean =
-    ctx.getSystemService(PowerManager::class.java)
-        .isIgnoringBatteryOptimizations(ctx.packageName)

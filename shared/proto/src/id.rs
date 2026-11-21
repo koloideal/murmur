@@ -13,6 +13,36 @@ impl DeviceId {
         rand::rng().fill_bytes(&mut b);
         Self(b)
     }
+
+    /// Pairing session id derived from a short typed code:
+    /// `SHA-256(normalized code)[0..8]`. Lets a joiner claim the same
+    /// session an inviter opened, knowing only the code.
+    pub fn from_code(code: &str) -> Self {
+        use sha2::Digest;
+        let norm: String = code
+            .chars()
+            .filter(|c| *c != '-')
+            .flat_map(|c| c.to_uppercase())
+            .collect();
+        let digest = sha2::Sha256::digest(norm.as_bytes());
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&digest[..8]);
+        Self(b)
+    }
+}
+
+/// Crockford-ish alphabet — no 0/O/1/I/L confusions.
+const CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+/// A typeable pairing code, `XXXX-XXXX` (~40 bits).
+pub fn pair_code() -> String {
+    let mut b = [0u8; 8];
+    rand::rng().fill_bytes(&mut b);
+    let chars: Vec<char> = b
+        .iter()
+        .map(|v| CODE_ALPHABET[(*v % 31) as usize] as char)
+        .collect();
+    format!("{}{}{}{}-{}{}{}{}", chars[0], chars[1], chars[2], chars[3], chars[4], chars[5], chars[6], chars[7])
 }
 
 impl fmt::Display for DeviceId {
