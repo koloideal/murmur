@@ -142,18 +142,25 @@ murmurd вычисляет локальное состояние:
 - Телефон: foreground service + `POST_NOTIFICATIONS` + исключение из
   battery optimization (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`).
 
-## Управление на ноутах — только терминал
+## Управление — только терминал
 
-- Конфиг: `~/.config/murmur/config.toml` (server url, device name,
+Один паттерн везде: у каждого демона — unix-сокет админки с
+newline-JSON, CLI ходит туда. Файлы конфигурации/реестров — только
+persistence, а не шов (один писатель — сам демон).
+
+- `murmur-server`: `add-device --name X` (bootstrap первого устройства —
+  выдаёт device_id+token), `list-devices`, `revoke --id X`. Сокет:
+  `$XDG_RUNTIME_DIR/murmur-server.sock` (`MURMUR_ADMIN_SOCK` для override).
+  Revoke убивает живой коннект мгновенно.
+- `murmurd init --server … --name … --device-id … --token …` — провижининг
+  ноута: пишет config.toml + secrets.toml (0600), семейный ключ генерится
+  локально и никогда не покидает устройства.
+- `murmurctl` → `$XDG_RUNTIME_DIR/murmur.sock`: `status`, `devices`,
+  `revoke`, `pair`, `send`.
+- Конфиг ноута: `~/.config/murmur/config.toml` (server url, device name,
   пороги idle, denylist MIME, allowlist-политики).
-- Секреты (family key, auth token): `~/.local/share/murmur/secrets`,
-  mode 0600.
-- CLI `murmurctl` ходит к `murmurd` по unix-сокету
-  `$XDG_RUNTIME_DIR/murmur.sock`:
-  - `murmurctl pair` — принять pending-устройство, сверить SAS-код;
-  - `murmurctl status` — соединение, presence-таблица, активный узел;
-  - `murmurctl devices` / `murmurctl revoke <id>`;
-  - `murmurctl send <file|->` — ручной пуш в общий буфер (дебаг).
+- Секреты ноута (family key, auth token):
+  `~/.local/share/murmur/secrets.toml`, mode 0600.
 
 ## Ограничения v1 / осознанные упрощения
 

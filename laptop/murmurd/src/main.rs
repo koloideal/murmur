@@ -39,9 +39,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // `murmurd init` — one-shot provisioning, doesn't start the daemon.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("init") {
+        return config::init(&args[1..]);
+    }
+
     let cfg = config::Config::load().context("load config")?;
     let secrets = config::Secrets::load().context(
-        "load secrets — run `murmurd pair` (TODO: pairing mode) to provision this device",
+        "load secrets — run `murmurd init` (bootstrap) or pair this device first",
     )?;
     tracing::info!(
         "murmurd {} ({}) → {}",

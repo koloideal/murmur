@@ -1,23 +1,35 @@
 //! murmur-server: dumb authenticated relay.
 //!
 //! - Every device connects outbound with WS and says `Control::Hello` first.
-//! - `role=auth`: token hash checked against `devices.json`, conn bound to id.
+//! - `role=auth`: token hash checked against the registry, conn bound to id.
 //! - `role=pair`: pending pairing conn; may only exchange Pair* frames until
 //!   an authed device registers it.
 //! - Frames are routed by `to`: `"*"` fans out, `"<id>"` unicast,
-//!   `"@server"` is the control plane (registry ops).
+//!   `"@server"` is the device control plane (registry ops from devices).
 //! - `from` is always overwritten with the authenticated id.
 //! - No queues, no storage of payloads. Live-only.
+//!
+//! Admin ops go through a unix socket (newline-JSON, same protocol shape as
+//! murmurctl → murmurd). devices.json is write-only output: loaded once at
+//! startup, persisted on every mutation. The socket is the only seam.
+//!
+//! Commands (same binary):
+//!   murmur-server                    — run the relay
+//!   murmur-server add-device --name X
+//!   murmur-server list-devices
+//!   murmur-server revoke --id ID
 
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use murmur_proto::{Control, DeviceId, Envelope, Route, control::DeviceInfo, control::HelloRole};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as Ws;
 use tracing::{debug, info, warn};
@@ -32,12 +44,14 @@ struct DeviceRec {
 
 struct Conn {
     tx: mpsc::UnboundedSender<String>,
+    /// Fire to make the reader loop exit (revocation, shutdown).
+    close: mpsc::Sender<()>,
     pairing: bool,
 }
 
 struct Shared {
     devices_path: PathBuf,
-    /// Persistent registry, mirrored to devices.json.
+    /// Persistent registry, mirrored to devices.json on mutation.
     devices: Mutex<HashMap<DeviceId, DeviceRec>>,
     /// Live connections.
     conns: Mutex<HashMap<DeviceId, Conn>>,
@@ -72,6 +86,50 @@ impl Shared {
         }
     }
 
+    fn register(&self, id: DeviceId, name: String, token_hash_hex: String) {
+        self.devices.lock().unwrap().insert(
+            id,
+            DeviceRec {
+                name,
+                token_hash_hex,
+                revoked: false,
+            },
+        );
+        self.persist();
+    }
+
+    fn revoke(&self, id: &DeviceId) -> bool {
+        let mut devices = self.devices.lock().unwrap();
+        match devices.get_mut(id) {
+            Some(rec) => {
+                rec.revoked = true;
+                drop(devices);
+                self.persist();
+                self.drop_conn(id); // live conn dies immediately
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn device_list(&self) -> Vec<DeviceInfo> {
+        let devs = self.devices.lock().unwrap();
+        let conns = self.conns.lock().unwrap();
+        devs.iter()
+            .map(|(id, r)| DeviceInfo {
+                device_id: *id,
+                name: r.name.clone(),
+                revoked: r.revoked,
+                online: conns.contains_key(id),
+            })
+            .collect()
+    }
+
+    fn check_auth(&self, id: &DeviceId, token_hash_hex: &str) -> bool {
+        let devices = self.devices.lock().unwrap();
+        matches!(devices.get(id), Some(r) if !r.revoked && r.token_hash_hex == token_hash_hex)
+    }
+
     fn send_to(&self, id: &DeviceId, env: &Envelope) {
         let tx = self.conns.lock().unwrap().get(id).map(|c| c.tx.clone());
         if let Some(tx) = tx {
@@ -94,10 +152,93 @@ impl Shared {
         }
     }
 
+    /// Remove the conn from the registry and signal its reader loop to exit.
     fn drop_conn(&self, id: &DeviceId) {
-        self.conns.lock().unwrap().remove(id);
+        if let Some(c) = self.conns.lock().unwrap().remove(id) {
+            let _ = c.close.try_send(());
+        }
     }
 }
+
+// ---------- admin socket (CLI ↔ running server) ----------
+
+fn devices_path() -> PathBuf {
+    PathBuf::from(std::env::var("MURMUR_DEVICES").unwrap_or_else(|_| "devices.json".into()))
+}
+
+fn admin_sock_path() -> PathBuf {
+    std::env::var_os("MURMUR_ADMIN_SOCK")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .map(|p| p.join("murmur-server.sock"))
+        })
+        .unwrap_or_else(|| PathBuf::from("/tmp/murmur-server.sock"))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+enum AdminReq {
+    AddDevice { name: String },
+    ListDevices,
+    Revoke { device_id: DeviceId },
+}
+
+/// One roundtrip against the running server's admin socket.
+fn admin_req(req: &AdminReq) -> anyhow::Result<serde_json::Value> {
+    let path = admin_sock_path();
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(&path).with_context(|| {
+            format!("connect {} — is murmur-server running?", path.display())
+        })?;
+    stream.write_all(serde_json::to_string(req)?.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    Ok(serde_json::from_str(line.trim())?)
+}
+
+/// Admin task: same ops as the CLI, performed against live state.
+async fn handle_admin(stream: UnixStream, shared: Arc<Shared>) -> anyhow::Result<()> {
+    let (r, mut w) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(r).lines();
+    while let Some(line) = lines.next_line().await? {
+        let res = match serde_json::from_str::<AdminReq>(&line) {
+            Ok(req) => admin_dispatch(&shared, req),
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        w.write_all(serde_json::to_string(&res)?.as_bytes()).await?;
+        w.write_all(b"\n").await?;
+    }
+    Ok(())
+}
+
+fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
+    match req {
+        AdminReq::AddDevice { name } => {
+            let id = DeviceId::random();
+            let token = murmur_proto::AuthToken::random();
+            shared.register(id, name, token.hash_hex());
+            serde_json::json!({
+                "ok": true,
+                "data": {"device_id": id.to_string(), "token": token.to_hex()}
+            })
+        }
+        AdminReq::ListDevices => {
+            serde_json::json!({"ok": true, "data": shared.device_list()})
+        }
+        AdminReq::Revoke { device_id } => {
+            if shared.revoke(&device_id) {
+                serde_json::json!({"ok": true})
+            } else {
+                serde_json::json!({"ok": false, "error": format!("no such device: {device_id}")})
+            }
+        }
+    }
+}
+
+// ---------- CLI ----------
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -107,28 +248,98 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => serve().await,
+        Some("add-device") => {
+            let name = flag_value(&args[1..], "--name")
+                .or_else(|| args.get(1).cloned())
+                .context("usage: murmur-server add-device --name NAME")?;
+            let res = admin_req(&AdminReq::AddDevice { name })?;
+            let d = &res["data"];
+            println!("device_id: {}", d["device_id"].as_str().unwrap());
+            println!("token: {}", d["token"].as_str().unwrap());
+            eprintln!("(token is shown once — store it in secrets.toml on the device)");
+            Ok(())
+        }
+        Some("list-devices") => {
+            let res = admin_req(&AdminReq::ListDevices)?;
+            for d in res["data"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {}  {}  {}",
+                    d["device_id"].as_str().unwrap_or("?"),
+                    d["name"].as_str().unwrap_or("?"),
+                    if d["revoked"].as_bool() == Some(true) { "revoked" } else { "active" },
+                    if d["online"].as_bool() == Some(true) { "online" } else { "offline" },
+                );
+            }
+            Ok(())
+        }
+        Some("revoke") => {
+            let id: DeviceId = flag_value(&args[1..], "--id")
+                .or_else(|| args.get(1).cloned())
+                .context("usage: murmur-server revoke --id DEVICE_ID")?
+                .parse()?;
+            let res = admin_req(&AdminReq::Revoke { device_id: id })?;
+            match res["ok"].as_bool() {
+                Some(true) => println!("{id} revoked — live connection dropped"),
+                _ => bail!("{}", res["error"].as_str().unwrap_or("failed")),
+            }
+            Ok(())
+        }
+        Some(other) => bail!(
+            "unknown command {other:?} — usage: murmur-server [add-device|list-devices|revoke]"
+        ),
+    }
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+// ---------- relay ----------
+
+async fn serve() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("MURMUR_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8770".into())
         .parse()
         .context("MURMUR_ADDR")?;
-    let devices_path =
-        PathBuf::from(std::env::var("MURMUR_DEVICES").unwrap_or_else(|_| "devices.json".into()));
-    let shared = Arc::new(Shared::load(devices_path.clone())?);
+    let shared = Arc::new(Shared::load(devices_path())?);
 
     let listener = TcpListener::bind(addr).await?;
+    let admin_path = admin_sock_path();
+    let _ = std::fs::remove_file(&admin_path);
+    let admin_listener = UnixListener::bind(&admin_path)?;
     info!(
-        "murmur-server on {addr}, registry {}",
-        devices_path.display()
+        "murmur-server on {addr}, registry {}, admin {}",
+        shared.devices_path.display(),
+        admin_path.display()
     );
 
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let shared = shared.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, shared).await {
-                debug!("conn {peer}: {e:#}");
+        tokio::select! {
+            acc = listener.accept() => {
+                let (stream, peer) = acc?;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(stream, shared).await {
+                        debug!("conn {peer}: {e:#}");
+                    }
+                });
             }
-        });
+            acc = admin_listener.accept() => {
+                let (stream, _) = acc?;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_admin(stream, shared).await {
+                        warn!("admin conn: {e:#}");
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -136,7 +347,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut sink, mut source) = ws.split();
 
-    // First message must be a Hello envelope.
+    // First message must be a Hello.
     let hello = match source.next().await {
         Some(Ok(Ws::Text(t))) => {
             serde_json::from_str::<Control>(&t).context("first message must be Control::Hello")?
@@ -155,11 +366,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 let token = token_hex
                     .and_then(|h| murmur_proto::AuthToken::from_hex(&h).ok())
                     .context("missing token")?;
-                let ok = {
-                    let devices = shared.devices.lock().unwrap();
-                    matches!(devices.get(&device_id), Some(r) if !r.revoked && r.token_hash_hex == token.hash_hex())
-                };
-                if !ok {
+                if !shared.check_auth(&device_id, &token.hash_hex()) {
                     send_ctl(
                         &mut sink,
                         &Control::HelloErr {
@@ -182,11 +389,15 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
     send_ctl(&mut sink, &Control::HelloOk).await?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    shared
-        .conns
-        .lock()
-        .unwrap()
-        .insert(device_id, Conn { tx, pairing });
+    let (close_tx, mut close_rx) = mpsc::channel::<()>(1);
+    shared.conns.lock().unwrap().insert(
+        device_id,
+        Conn {
+            tx,
+            close: close_tx,
+            pairing,
+        },
+    );
 
     // Writer: everything queued for this conn goes out as text frames.
     let writer = tokio::spawn(async move {
@@ -197,9 +408,19 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
         }
     });
 
-    // Reader: route by `to`.
+    // Reader: route by `to`; exits on close signal (revocation) or EOF.
     let read_res = async {
-        while let Some(msg) = source.next().await {
+        loop {
+            let msg = tokio::select! {
+                _ = close_rx.recv() => {
+                    info!("{device_id}: conn closed by server");
+                    break;
+                }
+                msg = source.next() => {
+                    let Some(msg) = msg else { break };
+                    msg
+                }
+            };
             let Ws::Text(t) = msg? else { continue };
             let mut env = match Envelope::from_json(&t) {
                 Ok(e) => e,
@@ -262,42 +483,20 @@ async fn handle_control(
             token_hash_hex,
         } => {
             info!("{from} registered device {device_id} ({name})");
-            shared.devices.lock().unwrap().insert(
-                device_id,
-                DeviceRec {
-                    name,
-                    token_hash_hex,
-                    revoked: false,
-                },
-            );
-            shared.persist();
+            shared.register(device_id, name, token_hash_hex);
         }
         Control::RevokeDevice { device_id } => {
             info!("{from} revoked device {device_id}");
-            if let Some(rec) = shared.devices.lock().unwrap().get_mut(&device_id) {
-                rec.revoked = true;
-            }
-            shared.persist();
-            shared.drop_conn(&device_id); // live conn dies immediately
+            shared.revoke(&device_id);
         }
         Control::ListDevices => {
-            let devices = {
-                let devs = shared.devices.lock().unwrap();
-                let conns = shared.conns.lock().unwrap();
-                devs.iter()
-                    .map(|(id, r)| DeviceInfo {
-                        device_id: *id,
-                        name: r.name.clone(),
-                        revoked: r.revoked,
-                        online: conns.contains_key(id),
-                    })
-                    .collect()
-            };
             let reply = Envelope::control(
                 DeviceId([0; 8]),
                 Route::device(from),
                 0,
-                &Control::Devices { devices },
+                &Control::Devices {
+                    devices: shared.device_list(),
+                },
             )?;
             shared.send_to(&from, &reply);
         }

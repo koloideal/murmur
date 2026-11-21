@@ -84,3 +84,73 @@ impl Secrets {
         Ok(FamilyKey(arr))
     }
 }
+
+/// `murmurd init` — provision this laptop from credentials printed by
+/// `murmur-server add-device`. Writes config.toml + secrets.toml (0600) and
+/// generates the family key locally — it never touches the server.
+pub fn init(args: &[String]) -> anyhow::Result<()> {
+    fn flag<'a>(args: &'a [String], name: &str) -> anyhow::Result<&'a str> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing {name}"))
+    }
+    let server_url = flag(args, "--server")?;
+    let name = flag(args, "--name")?;
+    let device_id = flag(args, "--device-id")?;
+    let token_hex = flag(args, "--token")?;
+
+    // Fail early on typos — better here than at first connect.
+    let id: DeviceId = device_id.parse()?;
+    AuthToken::from_hex(token_hex)?;
+
+    let cfg = Config {
+        server_url: server_url.into(),
+        name: name.into(),
+        idle_timeout_secs: default_idle(),
+        clipboard_mime_deny: default_mime_deny(),
+    };
+    let secrets = Secrets {
+        device_id: id.to_string(),
+        auth_token_hex: token_hex.into(),
+        family_key_hex: hex::encode(FamilyKey::random().0),
+    };
+
+    let cfg_dir = config_dir();
+    let data_dir = data_dir();
+    std::fs::create_dir_all(&cfg_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    write_new(&cfg_dir.join("config.toml"), &toml::to_string_pretty(&cfg)?, 0o600)?;
+    write_new(
+        &data_dir.join("secrets.toml"),
+        &toml::to_string_pretty(&secrets)?,
+        0o600,
+    )?;
+
+    eprintln!("wrote {}", cfg_dir.join("config.toml").display());
+    eprintln!("wrote {} (mode 0600)", data_dir.join("secrets.toml").display());
+    eprintln!("device {id} provisioned — start murmurd");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_new(path: &std::path::Path, contents: &str, mode: u32) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("create {}: {e} (already exists?)", path.display()))?;
+    f.write_all(contents.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_new(path: &std::path::Path, contents: &str, _mode: u32) -> anyhow::Result<()> {
+    std::fs::write(path, contents)
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))
+}

@@ -11,6 +11,11 @@
 
 use crate::feature::{Feature, FeatureCtx};
 use murmur_proto::{Message, PresenceState};
+use std::time::Duration;
+
+/// How often we re-announce presence — peers that missed a broadcast
+/// (they were offline; live-only delivery) converge within one interval.
+const HEARTBEAT: Duration = Duration::from_secs(60);
 
 pub fn feature() -> Feature {
     Feature::new(
@@ -22,14 +27,21 @@ pub fn feature() -> Feature {
 
 async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let mut inbox = ctx.inbox.expect("feature declares wants");
+    let mut tick = tokio::time::interval(HEARTBEAT);
+    tick.tick().await; // the first tick fires immediately — skip it
 
     // TODO(wayland+zbus): replace this optimistic `Active` with real
     // lock/idle wiring; the select! will gain two more branches then.
     ctx.shared.set_local_state(PresenceState::Active);
 
-    while let Some((from, msg)) = inbox.recv().await {
-        let Message::Presence { state, ts } = msg else { continue };
-        ctx.shared.note_presence(from, state, ts);
+    loop {
+        tokio::select! {
+            m = inbox.recv() => {
+                let Some((from, msg)) = m else { return Ok(()) };
+                let Message::Presence { state, ts } = msg else { continue };
+                ctx.shared.note_presence(from, state, ts);
+            }
+            _ = tick.tick() => ctx.shared.broadcast_presence(),
+        }
     }
-    Ok(())
 }
