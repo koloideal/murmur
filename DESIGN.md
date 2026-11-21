@@ -41,18 +41,25 @@ Arch/Hyprland через домашний сервер-релей. Без общ
   на оставшихся (повторная раздача по pairwise-каналу… упрощение v1: ручная
   смена ключа на оставшихся устройствах; автоматическую ротацию делаем позже).
 
-## Пейринг (код + подтверждение)
+## Пейринг (invite-код + SAS)
 
-1. Новое устройство подключается в режиме `pair` (без auth), генерирует
-   эфемерный X25519-ключ, отправляет `PairHello{pair_id, pubkey}` — сервер
-   регистрирует pending-сессию и рассылает уведомление authed-устройствам.
-2. Существующее устройство принимает pending (`PairAccept{pair_id, pubkey}`).
-3. Обе стороны считают `DH`, выводят `SAS = first6(H(pkA‖pkB‖pair_id))` —
-   человек сверяет код на двух экранах. Сервер, подменивший ключи, даст
-   разные коды.
-4. Существующее устройство генерирует `AuthToken`, шлёт серверу
-   `RegisterDevice{device_id, name, token_hash}` и новому устройству —
-   `PairDone{device_id, auth_token, family_key}` зашифрованное DH-ключом.
+1. На существующем устройстве `murmurctl invite` генерирует session id и
+   эфемерный X25519-ключ, выводит invite-бандл `{server_url, inviter_id,
+   session}` — QR или строка. Сервер сессий не знает: матчмейкинга нет.
+2. Новое устройство (`murmurd pair --code …` или скан в приложении)
+   подключается `role=pair`, заявляя session как свой conn-id, генерирует
+   свой эфемерный ключ и шлёт `PairHello{pubkey, name}` → inviter'у.
+   Pair-коннекты изолированы: только Pair*-фреймы, только unicast.
+3. `murmurctl pair` показывает pending + `SAS = 6 цифр из
+   H(sorted pkA‖pkB ‖ sorted inviter‖session)` — симметричен, обе стороны
+   считают одинаково. `pair accept` шлёт `PairAccept{pubkey}` — теперь код
+   виден и на новом устройстве; человек сверяет два экрана. Сервер,
+   подменивший ключи, даст разные коды.
+4. `pair confirm`: inviter генерирует `device_id` + `AuthToken`, шлёт
+   серверу `RegisterDevice{device_id, name, token_hash}`, а новому
+   устройству — `PairData{blob}`: `{device_id, token, family_key,
+   server_url}` под XChaCha20-Poly1305 от DH-ключа. Новое устройство
+   само пишет config+secrets и переподключается уже authed.
 
 ## Wire protocol
 
@@ -156,7 +163,8 @@ persistence, а не шов (один писатель — сам демон).
   ноута: пишет config.toml + secrets.toml (0600), семейный ключ генерится
   локально и никогда не покидает устройства.
 - `murmurctl` → `$XDG_RUNTIME_DIR/murmur.sock`: `status`, `devices`,
-  `revoke`, `pair`, `send`.
+  `revoke`, `invite` (QR + код), `pair` / `pair accept` / `pair confirm`,
+  `send`.
 - Конфиг ноута: `~/.config/murmur/config.toml` (server url, device name,
   пороги idle, denylist MIME, allowlist-политики).
 - Секреты ноута (family key, auth token):

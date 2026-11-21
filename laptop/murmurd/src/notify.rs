@@ -13,7 +13,12 @@ use tracing::debug;
 pub fn feature() -> Feature {
     Feature::new(
         "notify",
-        Some(|m| matches!(m, Message::Notification { .. } | Message::NotificationDismiss { .. })),
+        Some(|m| {
+            matches!(
+                m,
+                Message::Notification { .. } | Message::NotificationDismiss { .. }
+            )
+        }),
         |ctx| Box::pin(run(ctx)),
     )
 }

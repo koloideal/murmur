@@ -188,10 +188,8 @@ enum AdminReq {
 /// One roundtrip against the running server's admin socket.
 fn admin_req(req: &AdminReq) -> anyhow::Result<serde_json::Value> {
     let path = admin_sock_path();
-    let mut stream =
-        std::os::unix::net::UnixStream::connect(&path).with_context(|| {
-            format!("connect {} — is murmur-server running?", path.display())
-        })?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("connect {} — is murmur-server running?", path.display()))?;
     stream.write_all(serde_json::to_string(req)?.as_bytes())?;
     stream.write_all(b"\n")?;
     let mut line = String::new();
@@ -269,8 +267,16 @@ async fn main() -> anyhow::Result<()> {
                     "{}  {}  {}  {}",
                     d["device_id"].as_str().unwrap_or("?"),
                     d["name"].as_str().unwrap_or("?"),
-                    if d["revoked"].as_bool() == Some(true) { "revoked" } else { "active" },
-                    if d["online"].as_bool() == Some(true) { "online" } else { "offline" },
+                    if d["revoked"].as_bool() == Some(true) {
+                        "revoked"
+                    } else {
+                        "active"
+                    },
+                    if d["online"].as_bool() == Some(true) {
+                        "online"
+                    } else {
+                        "offline"
+                    },
                 );
             }
             Ok(())
@@ -313,6 +319,12 @@ async fn serve() -> anyhow::Result<()> {
     let admin_path = admin_sock_path();
     let _ = std::fs::remove_file(&admin_path);
     let admin_listener = UnixListener::bind(&admin_path)?;
+    // The socket grants full registry control — owner only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&admin_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     info!(
         "murmur-server on {addr}, registry {}, admin {}",
         shared.devices_path.display(),
@@ -390,14 +402,22 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (close_tx, mut close_rx) = mpsc::channel::<()>(1);
-    shared.conns.lock().unwrap().insert(
-        device_id,
-        Conn {
-            tx,
-            close: close_tx,
-            pairing,
-        },
-    );
+    {
+        let mut conns = shared.conns.lock().unwrap();
+        if let Some(old) = conns.remove(&device_id) {
+            // Same conn id claimed twice (duplicate login or reused pair
+            // session): newest wins, the stale conn is terminated.
+            let _ = old.close.try_send(());
+        }
+        conns.insert(
+            device_id,
+            Conn {
+                tx,
+                close: close_tx,
+                pairing,
+            },
+        );
+    }
 
     // Writer: everything queued for this conn goes out as text frames.
     let writer = tokio::spawn(async move {
@@ -431,18 +451,28 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
             };
             env.from = device_id; // never trust the client's claim
 
+            if pairing {
+                // Pairing conns may only exchange cleartext Pair* frames,
+                // unicast to the inviter/from the inviter. No broadcast,
+                // no server ops.
+                let ok = matches!(
+                    env.control_payload(),
+                    Ok(Control::PairHello { .. })
+                        | Ok(Control::PairAccept { .. })
+                        | Ok(Control::PairData { .. })
+                ) && matches!(env.to, Route::Device(_));
+                if !ok {
+                    warn!("{device_id}: pairing conn sent a non-pair frame");
+                    continue;
+                }
+            }
+
             match &env.to {
                 Route::Server => handle_control(&shared, device_id, pairing, &env).await?,
                 Route::Device(dst) => shared.send_to(dst, &env),
                 Route::All => {
                     if pairing {
-                        // Pairing conns may only broadcast cleartext pair frames.
-                        match env.control_payload() {
-                            Ok(Control::PairHello { .. }) | Ok(Control::PairData { .. }) => {
-                                shared.broadcast(&device_id, &env, true)
-                            }
-                            _ => warn!("{device_id}: pairing conn tried non-pair broadcast"),
-                        }
+                        warn!("{device_id}: pairing conn tried broadcast");
                     } else {
                         shared.broadcast(&device_id, &env, false);
                     }

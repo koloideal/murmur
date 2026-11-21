@@ -1,0 +1,244 @@
+//! Pairing feature — brings a new device into the family.
+//!
+//! Inviter side (this daemon):
+//! - `murmurctl invite` → [`Shared::invite`]: session + ephemeral DH key,
+//!   invite code printed for the new device.
+//! - The joiner's `PairHello` arrives here via `ctl_events`; the session
+//!   moves from `invites` to `pending`.
+//! - `murmurctl pair` lists pending with SAS codes; `pair accept` sends
+//!   `PairAccept` (joiner can now show the same SAS); `pair confirm`
+//!   registers the device on the server and ships `PairData`.
+//!
+//! Joiner side (`murmurd pair --code`): one-shot [`join`] — handshake,
+//! print the SAS, wait for `PairData`, hand the secrets to provisioning.
+
+use crate::feature::{Feature, FeatureCtx};
+use crate::state::{Pending, Shared};
+use anyhow::{Context, bail};
+use futures_util::{SinkExt, StreamExt};
+use murmur_proto::control::{HelloRole, PairBlob};
+use murmur_proto::{
+    AuthToken, Control, DeviceId, Envelope, FamilyKey, Invite, PairKey, Route, sas_code,
+};
+use tokio_tungstenite::tungstenite::Message as Ws;
+use tracing::{info, warn};
+
+// ---------- inviter side ----------
+
+pub fn feature() -> Feature {
+    Feature::new("pair", None, |ctx| Box::pin(run(ctx)))
+}
+
+/// Consume inbound pair frames: a `PairHello` whose `from` matches one of
+/// our invites moves the session to `pending` (ctl takes it from there).
+/// PairAccept/PairData are answers we never get — we're the inviter.
+async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
+    let shared = ctx.shared;
+    let mut events = shared.ctl_events.subscribe();
+    loop {
+        let (from, ctl) = events.recv().await?;
+        let Control::PairHello { pubkey_b64, name } = ctl else {
+            continue;
+        };
+        let peer_pub = match PairKey::public_from_b64(&pubkey_b64) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("{from}: bad pair pubkey: {e}");
+                continue;
+            }
+        };
+        let mut pair = shared.pair.lock().unwrap();
+        match pair.invites.remove(&from) {
+            Some(key) => {
+                pair.pending.insert(
+                    from,
+                    Pending {
+                        key,
+                        peer_pub,
+                        name: name.clone(),
+                    },
+                );
+                info!("pairing pending: {from} ({name}) — `murmurctl pair` to confirm");
+            }
+            None => debug_no_invite(from),
+        }
+    }
+}
+
+fn debug_no_invite(from: DeviceId) {
+    tracing::debug!("{from}: PairHello for an unknown session, ignored");
+}
+
+impl Shared {
+    /// `murmurctl invite`: mint a session, keep our DH key, hand back the
+    /// code the new device feeds to `murmurd pair --code`.
+    pub fn invite(&self) -> Invite {
+        let invite = Invite::new(self.cfg.server_url.clone(), self.id);
+        self.pair
+            .lock()
+            .unwrap()
+            .invites
+            .insert(invite.session, PairKey::generate());
+        invite
+    }
+
+    /// Pending joiners with their SAS codes (computable once both pubkeys
+    /// are known — no need to wait for `accept`).
+    pub fn pair_pending(&self) -> Vec<serde_json::Value> {
+        self.pair
+            .lock()
+            .unwrap()
+            .pending
+            .iter()
+            .map(|(session, p)| {
+                serde_json::json!({
+                    "session": session.to_string(),
+                    "name": p.name,
+                    "sas": sas_code(&p.key.public, &p.peer_pub, &self.id, session),
+                })
+            })
+            .collect()
+    }
+
+    /// `murmurctl pair accept <session>`: send our pubkey so the joiner
+    /// can show the same SAS. Human verification happens after this.
+    pub fn pair_accept(&self, session: DeviceId) -> anyhow::Result<()> {
+        let pubkey_b64 = {
+            let pair = self.pair.lock().unwrap();
+            pair.pending
+                .get(&session)
+                .map(|p| p.key.public_b64())
+                .with_context(|| format!("no pending pairing {session}"))?
+        };
+        self.send_control_to(Route::Device(session), &Control::PairAccept { pubkey_b64 })
+    }
+
+    /// `murmurctl pair confirm <session>`: register the joiner on the
+    /// server and ship its credentials over the DH-sealed channel.
+    pub fn pair_confirm(&self, session: DeviceId) -> anyhow::Result<DeviceId> {
+        let pending = self
+            .pair
+            .lock()
+            .unwrap()
+            .pending
+            .remove(&session)
+            .with_context(|| format!("no pending pairing {session}"))?;
+
+        let device_id = DeviceId::random();
+        let token = AuthToken::random();
+        self.send_control(&Control::RegisterDevice {
+            device_id,
+            name: pending.name,
+            token_hash_hex: token.hash_hex(),
+        })?;
+
+        let blob = PairBlob {
+            device_id,
+            token_hex: token.to_hex(),
+            family_key_b64: {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(self.key.0)
+            },
+            server_url: self.cfg.server_url.clone(),
+        };
+        let dh = pending.key.dh(&pending.peer_pub);
+        let blob_b64 = {
+            use base64::Engine;
+            let sealed = FamilyKey::from_raw(dh).seal(&serde_json::to_vec(&blob)?)?;
+            base64::engine::general_purpose::STANDARD.encode(sealed)
+        };
+        self.send_control_to(Route::Device(session), &Control::PairData { blob_b64 })?;
+        Ok(device_id)
+    }
+}
+
+// ---------- joiner side ----------
+
+/// What `join` hands to provisioning.
+pub struct Paired {
+    pub server_url: String,
+    pub device_id: DeviceId,
+    pub token_hex: String,
+    pub family_key_hex: String,
+}
+
+/// `murmurd pair --code <invite>`: claim the session, exchange pubkeys,
+/// show the SAS, wait for the inviter to ship `PairData`.
+pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
+    let invite = Invite::decode(code).context("bad invite code")?;
+    let key = PairKey::generate();
+
+    let (ws, _) = tokio_tungstenite::connect_async(&invite.server_url).await?;
+    let (mut sink, mut source) = ws.split();
+
+    sink.send(Ws::Text(
+        serde_json::to_string(&Control::Hello {
+            device_id: invite.session,
+            name: name.into(),
+            role: HelloRole::Pair,
+            token_hex: None,
+        })?
+        .into(),
+    ))
+    .await?;
+    match source.next().await {
+        Some(Ok(Ws::Text(t))) => match serde_json::from_str::<Control>(&t) {
+            Ok(Control::HelloOk) => {}
+            Ok(Control::HelloErr { reason }) => bail!("pair conn rejected: {reason}"),
+            other => bail!("unexpected hello reply: {other:?}"),
+        },
+        _ => bail!("no hello reply"),
+    }
+    eprintln!(
+        "connected to {} as pair session {}",
+        invite.server_url, invite.session
+    );
+
+    let hello = Envelope::control(
+        invite.session,
+        Route::Device(invite.inviter),
+        1,
+        &Control::PairHello {
+            pubkey_b64: key.public_b64(),
+            name: name.into(),
+        },
+    )?;
+    sink.send(Ws::Text(hello.to_json().into())).await?;
+    eprintln!(
+        "waiting for {} to accept — `murmurctl pair` there",
+        invite.inviter
+    );
+
+    let mut dh_key: Option<FamilyKey> = None;
+    while let Some(msg) = source.next().await {
+        let Ws::Text(t) = msg? else { continue };
+        let env = Envelope::from_json(&t)?;
+        match env.control_payload()? {
+            Control::PairAccept { pubkey_b64 } => {
+                let peer = PairKey::public_from_b64(&pubkey_b64)?;
+                dh_key = Some(FamilyKey::from_raw(key.dh(&peer)));
+                let sas = sas_code(&key.public, &peer, &invite.session, &invite.inviter);
+                eprintln!("verification code: {sas}");
+                eprintln!("confirm it matches on the inviter, it will then complete pairing");
+            }
+            Control::PairData { blob_b64 } => {
+                use base64::Engine;
+                let dk = dh_key.context("PairData before PairAccept")?;
+                let ct = base64::engine::general_purpose::STANDARD.decode(blob_b64)?;
+                let blob: PairBlob = serde_json::from_slice(&dk.open(&ct)?)?;
+                return Ok(Paired {
+                    server_url: blob.server_url,
+                    device_id: blob.device_id,
+                    token_hex: blob.token_hex,
+                    family_key_hex: {
+                        let raw = base64::engine::general_purpose::STANDARD
+                            .decode(blob.family_key_b64)?;
+                        hex::encode(raw)
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+    bail!("connection closed before PairData")
+}

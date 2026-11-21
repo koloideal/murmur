@@ -16,7 +16,10 @@ enum Req {
     Status,
     Devices,
     Revoke { device_id: String },
+    Invite,
     Pair,
+    PairAccept { session: String },
+    PairConfirm { session: String },
     Send { data_b64: String },
 }
 
@@ -124,8 +127,29 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             },
             Err(e) => Res::err(e),
         },
-        // TODO: pair = drive PairHello/PairAccept + SAS display + confirm flow
+        Req::Invite => {
+            let invite = shared.invite();
+            Res::ok(serde_json::json!({
+                "code": invite.encode(),
+                "session": invite.session.to_string(),
+            }))
+        }
+        Req::Pair => Res::ok(serde_json::json!({"pending": shared.pair_pending()})),
+        Req::PairAccept { session } => match session.parse::<murmur_proto::DeviceId>() {
+            Ok(session) => match shared.pair_accept(session) {
+                Ok(()) => Res::ok(serde_json::json!(null)),
+                Err(e) => Res::err(e),
+            },
+            Err(e) => Res::err(e),
+        },
+        Req::PairConfirm { session } => match session.parse::<murmur_proto::DeviceId>() {
+            Ok(session) => match shared.pair_confirm(session) {
+                Ok(device_id) => Res::ok(serde_json::json!({"device_id": device_id.to_string()})),
+                Err(e) => Res::err(e),
+            },
+            Err(e) => Res::err(e),
+        },
         // TODO: send = seal Clipboard msg from stdin payload (debug path)
-        Req::Pair | Req::Send { .. } => Res::err("not implemented"),
+        Req::Send { .. } => Res::err("not implemented"),
     }
 }

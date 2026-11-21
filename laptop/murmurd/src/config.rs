@@ -43,6 +43,17 @@ fn default_mime_deny() -> Vec<String> {
     vec!["x-kde-passwordManagerHint".into()]
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            name: String::new(),
+            idle_timeout_secs: default_idle(),
+            clipboard_mime_deny: default_mime_deny(),
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let path = config_dir().join("config.toml");
@@ -108,30 +119,41 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
     let cfg = Config {
         server_url: server_url.into(),
         name: name.into(),
-        idle_timeout_secs: default_idle(),
-        clipboard_mime_deny: default_mime_deny(),
+        ..Config::default()
     };
     let secrets = Secrets {
         device_id: id.to_string(),
         auth_token_hex: token_hex.into(),
         family_key_hex: hex::encode(FamilyKey::random().0),
     };
+    provision(&cfg, &secrets)?;
+    eprintln!("device {id} provisioned — start murmurd");
+    Ok(())
+}
 
+/// Write config.toml + secrets.toml (0600, never overwritten). Shared by
+/// `init` and the pair joiner.
+pub fn provision(cfg: &Config, secrets: &Secrets) -> anyhow::Result<()> {
     let cfg_dir = config_dir();
     let data_dir = data_dir();
     std::fs::create_dir_all(&cfg_dir)?;
     std::fs::create_dir_all(&data_dir)?;
 
-    write_new(&cfg_dir.join("config.toml"), &toml::to_string_pretty(&cfg)?, 0o600)?;
     write_new(
-        &data_dir.join("secrets.toml"),
-        &toml::to_string_pretty(&secrets)?,
+        &cfg_dir.join("config.toml"),
+        &toml::to_string_pretty(cfg)?,
         0o600,
     )?;
-
+    write_new(
+        &data_dir.join("secrets.toml"),
+        &toml::to_string_pretty(secrets)?,
+        0o600,
+    )?;
     eprintln!("wrote {}", cfg_dir.join("config.toml").display());
-    eprintln!("wrote {} (mode 0600)", data_dir.join("secrets.toml").display());
-    eprintln!("device {id} provisioned — start murmurd");
+    eprintln!(
+        "wrote {} (mode 0600)",
+        data_dir.join("secrets.toml").display()
+    );
     Ok(())
 }
 
@@ -151,6 +173,5 @@ fn write_new(path: &std::path::Path, contents: &str, mode: u32) -> anyhow::Resul
 
 #[cfg(not(unix))]
 fn write_new(path: &std::path::Path, contents: &str, _mode: u32) -> anyhow::Result<()> {
-    std::fs::write(path, contents)
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))
+    std::fs::write(path, contents).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))
 }

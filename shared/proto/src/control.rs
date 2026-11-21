@@ -23,17 +23,21 @@ pub enum Control {
         reason: String,
     },
 
-    /// Pairing handshake. New device → "*" (relayed to authed conns only).
+    /// Pairing handshake. New (unpaired) device → the inviter named in the
+    /// invite code. `from` is the session id the joiner claimed as its
+    /// conn id; the inviter replies with `to = session`.
     PairHello {
         pubkey_b64: String,
+        /// Name the new device wants to be registered under.
+        name: String,
     },
-    /// Authed device → new device. After this both sides can compute DH+SAS.
+    /// Inviter → joiner (`to = session`). After this both sides have both
+    /// pubkeys and can compute DH + SAS for human verification.
     PairAccept {
         pubkey_b64: String,
     },
-    /// Either direction, only within a pairing session. `blob_b64` is
-    /// XChaCha20-Poly1305 under `FamilyKey::from_raw(dh)` of a JSON blob
-    /// `{auth_token_hex, family_key_b64}` sent by the existing device.
+    /// Inviter → joiner, only after SAS confirmation. `blob_b64` is
+    /// XChaCha20-Poly1305 under `FamilyKey::from_raw(dh)` of a [`PairBlob`].
     PairData {
         blob_b64: String,
     },
@@ -74,4 +78,14 @@ pub struct DeviceInfo {
     pub name: String,
     pub revoked: bool,
     pub online: bool,
+}
+
+/// The DH-sealed payload inside `Control::PairData`: everything the new
+/// device needs to join the family.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairBlob {
+    pub device_id: DeviceId,
+    pub token_hex: String,
+    pub family_key_b64: String,
+    pub server_url: String,
 }

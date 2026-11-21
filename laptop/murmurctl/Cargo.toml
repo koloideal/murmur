@@ -10,3 +10,4 @@ serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }

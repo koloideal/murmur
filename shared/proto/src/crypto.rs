@@ -77,6 +77,11 @@ impl PairKey {
         self.secret.diffie_hellman(peer).to_bytes()
     }
 
+    /// DH against a base64-encoded peer pubkey.
+    pub fn dh_b64(&self, peer_b64: &str) -> anyhow::Result<[u8; 32]> {
+        Ok(self.dh(&Self::public_from_b64(peer_b64)?))
+    }
+
     pub fn public_b64(&self) -> String {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(self.public.as_bytes())
@@ -93,19 +98,30 @@ impl PairKey {
 }
 
 /// Short authentication string shown on both devices during pairing.
-/// Six digits from `SHA-256(pkA || pkB || idA || idB)`. A MITM relaying the
-/// handshake produces different pubkeys on the two sides → different codes.
+/// Six digits from `SHA-256(sorted pkA||pkB || sorted idA||idB)` — sorted
+/// inputs make the code symmetric: both sides pass (own, peer) in either
+/// order and compute the same value. A MITM relaying the handshake
+/// produces different pubkeys on the two sides → different codes.
 pub fn sas_code(
-    own_pub: &PublicKey,
-    peer_pub: &PublicKey,
-    own_id: &crate::DeviceId,
-    peer_id: &crate::DeviceId,
+    a_pub: &PublicKey,
+    b_pub: &PublicKey,
+    a_id: &crate::DeviceId,
+    b_id: &crate::DeviceId,
 ) -> String {
     let mut h = sha2::Sha256::new();
-    h.update(own_pub.as_bytes());
-    h.update(peer_pub.as_bytes());
-    h.update(own_id.0);
-    h.update(peer_id.0);
+    let (lo_pub, hi_pub) = match a_pub.as_bytes().cmp(b_pub.as_bytes()) {
+        std::cmp::Ordering::Greater => (b_pub, a_pub),
+        _ => (a_pub, b_pub),
+    };
+    h.update(lo_pub.as_bytes());
+    h.update(hi_pub.as_bytes());
+    let (lo_id, hi_id) = if a_id > b_id {
+        (b_id, a_id)
+    } else {
+        (a_id, b_id)
+    };
+    h.update(lo_id.0);
+    h.update(hi_id.0);
     let digest = h.finalize();
     let n = u32::from_be_bytes(digest[0..4].try_into().unwrap()) % 1_000_000;
     format!("{n:06}")

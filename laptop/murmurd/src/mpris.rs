@@ -26,7 +26,15 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     // artwork cache live here. MediaCommand is outbound-only — goes through
     // ctx.shared.send to the phone.
     while let Some((from, msg)) = inbox.recv().await {
-        let Message::MediaState { player, title, status, .. } = msg else { continue };
+        let Message::MediaState {
+            player,
+            title,
+            status,
+            ..
+        } = msg
+        else {
+            continue;
+        };
         debug!("mpris: {player} {title:?} {status:?} from {from} (TODO: update MPRIS)");
     }
     Ok(())

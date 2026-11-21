@@ -40,7 +40,12 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     //   pipe-fd read; hash; compare vs expected/last; broadcast (+phone if
     //   ctx.shared.is_active()).
     while let Some((from, msg)) = inbox.recv().await {
-        let Message::Clipboard { hash, mime, origin, .. } = msg else { continue };
+        let Message::Clipboard {
+            hash, mime, origin, ..
+        } = msg
+        else {
+            continue;
+        };
         if Some(hash) == last {
             continue; // our own echo
         }
@@ -54,7 +59,9 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             continue;
         }
         last = Some(hash);
-        debug!("clipboard: apply {mime} from {from} (origin {origin}) — TODO: set via data-control");
+        debug!(
+            "clipboard: apply {mime} from {from} (origin {origin}) — TODO: set via data-control"
+        );
     }
     Ok(())
 }

@@ -1,5 +1,7 @@
 use crate::config::{Config, Secrets};
-use murmur_proto::{Control, DeviceId, Envelope, FamilyKey, Message, PresenceState, Route};
+use murmur_proto::{
+    Control, DeviceId, Envelope, FamilyKey, Message, PairKey, PresenceState, PublicKey, Route,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +14,25 @@ pub fn now_ts() -> u64 {
         .unwrap_or(0)
 }
 
+/// Pairing state owned by the inviter side. Sessions are the joiner's
+/// conn ids: a `PairHello`'s `env.from` is matched against `invites`.
+#[derive(Default)]
+pub struct Pairing {
+    /// Outstanding invites: session → our ephemeral DH key.
+    pub invites: HashMap<DeviceId, PairKey>,
+    /// `PairHello` received for one of our invites.
+    pub pending: HashMap<DeviceId, Pending>,
+}
+
+pub struct Pending {
+    /// Our ephemeral key (kept for DH at confirm time).
+    pub key: PairKey,
+    /// Joiner's pubkey from its `PairHello`.
+    pub peer_pub: PublicKey,
+    /// Name the joiner asked to be registered under.
+    pub name: String,
+}
+
 /// Shared daemon state: identity, key, presence table, outbound queue.
 pub struct Shared {
     pub cfg: Config,
@@ -20,12 +41,16 @@ pub struct Shared {
     token_hex: String,
     seq: AtomicU64,
     pub out: mpsc::UnboundedSender<Envelope>,
-    /// Cleartext control replies from the server (Devices, Error, ...).
-    pub ctl_events: broadcast::Sender<Control>,
+    /// Cleartext control frames addressed to us: (sender, frame).
+    /// Server replies (Devices, Error) and inbound pair frames.
+    pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
     /// device → (last state, ts of last transition). Includes self.
     /// Shared because the active-node election is cross-cutting: clipboard
     /// routing and phone-side pushes both need it.
     pub presence: Mutex<HashMap<DeviceId, (PresenceState, u64)>>,
+    /// Inviter-side pairing sessions. Cross-cutting: conn feeds PairHello,
+    /// ctl drives invite/accept/confirm.
+    pub pair: Mutex<Pairing>,
 }
 
 impl Shared {
@@ -44,6 +69,7 @@ impl Shared {
             out,
             ctl_events,
             presence: Mutex::new(HashMap::new()),
+            pair: Mutex::new(Pairing::default()),
         })
     }
 
@@ -59,8 +85,14 @@ impl Shared {
     }
 
     /// Cleartext control message to the server.
-    pub fn send_control(&self, ctl: &murmur_proto::Control) -> anyhow::Result<()> {
-        let env = Envelope::control(self.id, Route::Server, self.next_seq(), ctl)?;
+    pub fn send_control(&self, ctl: &Control) -> anyhow::Result<()> {
+        self.send_control_to(Route::Server, ctl)
+    }
+
+    /// Cleartext control message to any route — pairing frames go unicast
+    /// to a session conn (`Route::Device(session)`).
+    pub fn send_control_to(&self, to: Route, ctl: &Control) -> anyhow::Result<()> {
+        let env = Envelope::control(self.id, to, self.next_seq(), ctl)?;
         let _ = self.out.send(env);
         Ok(())
     }

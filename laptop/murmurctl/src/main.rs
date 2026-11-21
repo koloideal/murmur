@@ -22,10 +22,23 @@ enum Cmd {
     Devices,
     /// Revoke a device by id (kills it instantly on the server).
     Revoke { device_id: String },
-    /// Accept a pending pairing request (SAS code shown on both sides).
-    Pair,
+    /// Issue an invite code for a new device (QR + pasteable string).
+    Invite,
+    /// Pairing requests: list pending / accept / confirm after SAS check.
+    Pair {
+        #[command(subcommand)]
+        op: Option<PairOp>,
+    },
     /// Push stdin into the shared clipboard (debug).
     Send,
+}
+
+#[derive(Subcommand)]
+enum PairOp {
+    /// Send our pubkey to a pending joiner (it can then show the SAS too).
+    Accept { session: String },
+    /// After the codes match: register the device and ship credentials.
+    Confirm { session: String },
 }
 
 fn sock_path() -> PathBuf {
@@ -47,24 +60,77 @@ fn request(req: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_str(line.trim())?)
 }
 
+fn print_qr(data: &str) {
+    match qrcode::QrCode::new(data) {
+        Ok(code) => {
+            let img = code
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(false)
+                .build();
+            println!("{img}");
+        }
+        Err(e) => eprintln!("(qr render failed: {e})"),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let req = match cli.cmd {
-        Cmd::Status => serde_json::json!({"cmd": "status"}),
-        Cmd::Devices => serde_json::json!({"cmd": "devices"}),
-        Cmd::Revoke { device_id } => serde_json::json!({"cmd": "revoke", "device_id": device_id}),
-        Cmd::Pair => serde_json::json!({"cmd": "pair"}),
+    let code = match cli.cmd {
+        Cmd::Status => return reply(serde_json::json!({"cmd": "status"})),
+        Cmd::Devices => return reply(serde_json::json!({"cmd": "devices"})),
+        Cmd::Revoke { device_id } => {
+            return reply(serde_json::json!({"cmd": "revoke", "device_id": device_id}));
+        }
         Cmd::Send => {
             use base64::Engine;
             let mut buf = Vec::new();
             std::io::stdin().read_to_end(&mut buf)?;
-            serde_json::json!({
+            return reply(serde_json::json!({
                 "cmd": "send",
                 "data_b64": base64::engine::general_purpose::STANDARD.encode(&buf)
-            })
+            }));
         }
+        Cmd::Invite => {
+            let res = request(serde_json::json!({"cmd": "invite"}))?;
+            let code = res["data"]["code"].as_str().unwrap_or_default().to_owned();
+            print_qr(&code);
+            println!("invite code (on the new device: `murmurd pair --code …`):");
+            println!("{code}");
+            return Ok(());
+        }
+        Cmd::Pair { op: None } => {
+            let res = request(serde_json::json!({"cmd": "pair"}))?;
+            let pending = res["data"]["pending"].as_array();
+            match pending.map(|p| p.len()) {
+                Some(0) => println!("no pending pairings"),
+                _ => {
+                    for p in pending.into_iter().flatten() {
+                        println!(
+                            "{}  {}  code {}",
+                            p["session"].as_str().unwrap_or("?"),
+                            p["name"].as_str().unwrap_or("?"),
+                            p["sas"].as_str().unwrap_or("?"),
+                        );
+                    }
+                    eprintln!(
+                        "\non the new device: murmurd pair --code <invite>\n\
+                         then here: murmurctl pair accept <session> → compare codes → murmurctl pair confirm <session>"
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Cmd::Pair {
+            op: Some(PairOp::Accept { session }),
+        } => serde_json::json!({"cmd": "pair_accept", "session": session}),
+        Cmd::Pair {
+            op: Some(PairOp::Confirm { session }),
+        } => serde_json::json!({"cmd": "pair_confirm", "session": session}),
     };
+    reply(code)
+}
 
+fn reply(req: serde_json::Value) -> anyhow::Result<()> {
     let res = request(req)?;
     println!("{}", serde_json::to_string_pretty(&res)?);
     if res.get("ok") == Some(&serde_json::json!(false)) {

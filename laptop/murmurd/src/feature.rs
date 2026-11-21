@@ -64,7 +64,10 @@ impl Feature {
 /// Fans each decrypted inbound message out to the features that want it.
 /// Lives on the conn side — conn calls `dispatch` per envelope.
 pub struct Hub {
-    sinks: Vec<(fn(&Message) -> bool, mpsc::UnboundedSender<(DeviceId, Message)>)>,
+    sinks: Vec<(
+        fn(&Message) -> bool,
+        mpsc::UnboundedSender<(DeviceId, Message)>,
+    )>,
 }
 
 impl Hub {

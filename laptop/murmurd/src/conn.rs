@@ -76,14 +76,14 @@ async fn connect_once(
                         continue;
                     }
                 };
-                match env.to {
-                    murmur_proto::Route::Server => {
-                        // Control replies (Devices, Error) — ctl consumes these.
-                        if let Ok(ctl) = env.control_payload() {
-                            let _ = shared.ctl_events.send(ctl);
-                        }
+                // Cleartext control first: server replies (Devices, Error)
+                // and unicast pair frames. Anything that doesn't parse is
+                // an E2E payload.
+                match env.control_payload() {
+                    Ok(ctl) => {
+                        let _ = shared.ctl_events.send((env.from, ctl));
                     }
-                    _ => match env.open(&shared.key) {
+                    Err(_) => match env.open(&shared.key) {
                         Ok(msg) => hub.dispatch(env.from, &msg),
                         Err(e) => warn!("decrypt from {} failed: {e}", env.from),
                     },
