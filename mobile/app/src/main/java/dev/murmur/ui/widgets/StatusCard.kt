@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +23,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -138,13 +141,25 @@ fun StatusCard() {
                 )
                 Spacer(Modifier.height(8.dp))
                 Row {
-                    TextButton(onClick = {
-                        if (status.running) MurmurService.stop(ctx) else MurmurService.start(ctx)
-                    }) {
-                        Text(if (status.running) "pause" else "resume")
+                    OutlinedButton(
+                        onClick = {
+                            if (status.running) MurmurService.stop(ctx)
+                            else MurmurService.start(ctx)
+                        },
+                        shape = RoundedCornerShape(50),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                    ) {
+                        Text(
+                            if (status.running) "pause" else "resume",
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { confirmLeave = true }) {
+                    OutlinedButton(
+                        onClick = { confirmLeave = true },
+                        shape = RoundedCornerShape(50),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                    ) {
                         Text(
                             "leave the family",
                             color = MaterialTheme.colorScheme.error,

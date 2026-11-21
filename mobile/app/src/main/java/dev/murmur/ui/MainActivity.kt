@@ -73,21 +73,23 @@ class MainActivity : ComponentActivity() {
 
 /** A column of feature cards — each lives in `ui/widgets/` and owns its
  *  own state; the screen itself knows nothing about the features. The
- *  footer explains what murmur is on every screen state. */
+ *  footer explains what murmur is, pinned to the bottom on every state. */
 @Composable
 private fun HomeScreen(modifier: Modifier = Modifier) {
-    Column(
-        modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 32.dp),
-        verticalArrangement = Arrangement.Top,
-    ) {
-        homeWidgets.forEach { it() }
+    Column(modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.Top,
+        ) {
+            homeWidgets.forEach { it() }
+        }
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 4.dp),
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp, top = 4.dp),
         ) {
             Text(
                 "your own relay · end-to-end encrypted",
