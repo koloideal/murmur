@@ -84,7 +84,10 @@ async fn connect_once(
                         let _ = shared.ctl_events.send((env.from, ctl));
                     }
                     Err(_) => match env.open(&shared.key) {
-                        Ok(msg) => hub.dispatch(env.from, &msg),
+                        Ok(msg) => {
+                            debug!("{} → {msg:?}", env.from);
+                            hub.dispatch(env.from, &msg);
+                        }
                         Err(e) => warn!("decrypt from {} failed: {e}", env.from),
                     },
                 }

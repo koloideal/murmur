@@ -29,7 +29,7 @@ enum Cmd {
         #[command(subcommand)]
         op: Option<PairOp>,
     },
-    /// Push stdin into the shared clipboard (debug).
+    /// Broadcast a Message (JSON from stdin) to all devices (debug).
     Send,
 }
 
@@ -82,13 +82,11 @@ fn main() -> anyhow::Result<()> {
             return reply(serde_json::json!({"cmd": "revoke", "device_id": device_id}));
         }
         Cmd::Send => {
-            use base64::Engine;
-            let mut buf = Vec::new();
-            std::io::stdin().read_to_end(&mut buf)?;
-            return reply(serde_json::json!({
-                "cmd": "send",
-                "data_b64": base64::engine::general_purpose::STANDARD.encode(&buf)
-            }));
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            let msg: serde_json::Value =
+                serde_json::from_str(buf.trim()).context("send expects a Message JSON on stdin")?;
+            return reply(serde_json::json!({"cmd": "send", "msg_json": msg}));
         }
         Cmd::Invite => {
             let res = request(serde_json::json!({"cmd": "invite"}))?;

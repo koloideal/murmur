@@ -15,12 +15,22 @@ use tracing::{info, warn};
 enum Req {
     Status,
     Devices,
-    Revoke { device_id: String },
+    Revoke {
+        device_id: String,
+    },
     Invite,
     Pair,
-    PairAccept { session: String },
-    PairConfirm { session: String },
-    Send { data_b64: String },
+    PairAccept {
+        session: String,
+    },
+    PairConfirm {
+        session: String,
+    },
+    /// Broadcast a raw `Message` (debug seam — `murmurctl send` reads the
+    /// JSON from stdin).
+    Send {
+        msg_json: serde_json::Value,
+    },
 }
 
 #[derive(Serialize)]
@@ -149,7 +159,12 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             },
             Err(e) => Res::err(e),
         },
-        // TODO: send = seal Clipboard msg from stdin payload (debug path)
-        Req::Send { .. } => Res::err("not implemented"),
+        Req::Send { msg_json } => match serde_json::from_value::<murmur_proto::Message>(msg_json) {
+            Ok(msg) => match shared.send(murmur_proto::Route::All, &msg) {
+                Ok(()) => Res::ok(serde_json::json!(null)),
+                Err(e) => Res::err(e),
+            },
+            Err(e) => Res::err(format!("not a Message: {e}")),
+        },
     }
 }
