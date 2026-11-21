@@ -34,7 +34,12 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text("murmur") },
+                            title = {
+                                Text(
+                                    "murmur",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                )
+                            },
                             colors = TopAppBarDefaults.topAppBarColors(
                                 titleContentColor = MaterialTheme.colorScheme.primary,
                             ),
@@ -61,7 +66,7 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
     ) {
         homeWidgets.forEach { it() }
         Text(
-            "your laptop family, end-to-end encrypted",
+            "your own relay · end-to-end encrypted",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,

@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package dev.murmur.core
 
 import kotlinx.coroutines.CoroutineScope

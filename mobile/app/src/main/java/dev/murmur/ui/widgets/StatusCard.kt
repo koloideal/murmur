@@ -16,7 +16,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.murmur.MurmurService
@@ -36,9 +35,9 @@ fun StatusCard() {
     FeatureCard("connection", Icons.Outlined.Hub) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val (color, label) = when (status.relay) {
-                Relay.State.ONLINE -> Color(0xFF4CAF50) to "online"
-                Relay.State.CONNECTING -> Color(0xFFFFC107) to "connecting…"
-                Relay.State.OFFLINE -> Color(0xFFE57373) to "offline"
+                Relay.State.ONLINE -> MaterialTheme.colorScheme.secondary to "online"
+                Relay.State.CONNECTING -> MaterialTheme.colorScheme.primary to "connecting…"
+                Relay.State.OFFLINE -> MaterialTheme.colorScheme.error to "offline"
             }
             Box(Modifier.size(10.dp).background(color, MaterialTheme.shapes.small))
             Spacer(Modifier.width(8.dp))

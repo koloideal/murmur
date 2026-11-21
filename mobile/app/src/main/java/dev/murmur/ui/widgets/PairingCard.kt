@@ -65,6 +65,7 @@ fun PairingCard() {
     var sas by remember { mutableStateOf("") }
     var sasAnswer by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var celebrated by remember { mutableStateOf(false) }
 
     val isShortCode = code.trim().matches(SHORT_CODE)
 
@@ -85,6 +86,7 @@ fun PairingCard() {
                 }
                 secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl)
                 phase = "done"
+                celebrated = true
                 MurmurService.start(ctx)
             } catch (e: PairingException) {
                 error = e.message
@@ -116,11 +118,26 @@ fun PairingCard() {
 
     FeatureCard("pair this phone", Icons.Outlined.QrCodeScanner) {
         when (phase) {
-            "done" -> Text(
-                "this phone is part of the family",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            "done" -> Column(
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (celebrated) {
+                    PairDoneBurst()
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "welcome to the family",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    Text(
+                        "this phone is part of the family",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
 
             "connecting" -> Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
