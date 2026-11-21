@@ -11,18 +11,26 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -34,8 +42,8 @@ import dev.murmur.core.Secrets
 
 /**
  * The dashboard hero: relay state as a big centered word over a living
- * whisper wave, identity details underneath. Hidden until the phone is
- * paired and the welcome burst has finished ([Secrets.settledFlow]).
+ * whisper wave, then identity, ping, and the service's own controls
+ * (pause/resume, rename, leave). Hidden until [Secrets.settledFlow].
  */
 @Composable
 fun StatusCard() {
@@ -44,14 +52,21 @@ fun StatusCard() {
     val status by MurmurService.status.collectAsState()
     val settled by Secrets.settledFlow.collectAsState()
 
-    val (color, label) = when (status.relay) {
-        Relay.State.ONLINE -> MaterialTheme.colorScheme.secondary to "online"
-        Relay.State.CONNECTING -> MaterialTheme.colorScheme.primary to "connecting"
-        Relay.State.OFFLINE -> MaterialTheme.colorScheme.error to "offline"
+    var editingName by remember { mutableStateOf(false) }
+    var confirmLeave by remember { mutableStateOf(false) }
+    var deviceName by remember { mutableStateOf(secrets.deviceName) }
+
+    val (color, label) = when {
+        !status.running -> MaterialTheme.colorScheme.onSurfaceVariant to "paused"
+        status.relay == Relay.State.ONLINE ->
+            MaterialTheme.colorScheme.secondary to "online"
+        status.relay == Relay.State.CONNECTING ->
+            MaterialTheme.colorScheme.primary to "connecting"
+        else -> MaterialTheme.colorScheme.error to "offline"
     }
 
     // The wave breathes while the relay is online.
-    val phase by if (status.relay == Relay.State.ONLINE) {
+    val phase by if (status.running && status.relay == Relay.State.ONLINE) {
         rememberInfiniteTransition(label = "wave").animateFloat(
             initialValue = 0f,
             targetValue = 6.2832f,
@@ -92,7 +107,7 @@ fun StatusCard() {
                     style = MaterialTheme.typography.displaySmall,
                     color = color,
                 )
-                if (status.relay == Relay.State.OFFLINE) {
+                if (status.running && status.relay == Relay.State.OFFLINE) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "can't reach the relay — is it running?",
@@ -101,9 +116,94 @@ fun StatusCard() {
                     )
                 }
                 Spacer(Modifier.height(16.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        StatusRow("name", deviceName)
+                    }
+                    IconButton(onClick = { editingName = true }) {
+                        Icon(
+                            Icons.Outlined.Edit,
+                            contentDescription = "rename this device",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
                 StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
+                StatusRow(
+                    "ping",
+                    status.serverRttMs?.let { "$it ms" } ?: "—",
+                    dim = status.serverRttMs == null,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row {
+                    TextButton(onClick = {
+                        if (status.running) MurmurService.stop(ctx) else MurmurService.start(ctx)
+                    }) {
+                        Text(if (status.running) "pause" else "resume")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { confirmLeave = true }) {
+                        Text(
+                            "leave the family",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             }
         }
+    }
+
+    if (editingName) {
+        var name by remember { mutableStateOf(deviceName) }
+        AlertDialog(
+            onDismissRequest = { editingName = false },
+            title = { Text("device name") },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deviceName = name.trim().ifEmpty { deviceName }
+                    secrets.deviceName = deviceName
+                    MurmurService.instance?.pushName()
+                    editingName = false
+                }) { Text("save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingName = false }) { Text("cancel") }
+            },
+        )
+    }
+
+    if (confirmLeave) {
+        AlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = { Text("leave the family?") },
+            text = {
+                Text(
+                    "This wipes the phone's keys and revokes it on the relay. " +
+                        "You'll need a fresh invite to pair again.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLeave = false
+                    MurmurService.instance?.revokeSelf()
+                    MurmurService.stop(ctx)
+                    secrets.clear()
+                }) {
+                    Text("leave", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLeave = false }) { Text("stay") }
+            },
+        )
     }
 }

@@ -17,6 +17,8 @@ import dev.murmur.core.Envelope
 import dev.murmur.core.FamilyKey
 import dev.murmur.core.Msg
 import dev.murmur.core.Relay
+import dev.murmur.core.Control
+import dev.murmur.core.DeviceInfo
 import dev.murmur.core.Secrets
 import dev.murmur.core.protoJson
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +50,10 @@ class MurmurService : Service() {
     /** device → (state, ts), mirrored from Presence broadcasts. */
     private val presence = mutableMapOf<String, Pair<String, Long>>()
 
+    /** ElapsedRealtimeNanos of the in-flight ListDevices — its reply RTT
+     *  is the "ping" the dashboard shows. */
+    private val listSentAt = java.util.concurrent.atomic.AtomicLong()
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             if (::relay.isInitialized) relay.kick()
@@ -73,7 +79,7 @@ class MurmurService : Service() {
             hello = {
                 dev.murmur.core.Control.Hello(
                     device_id = secrets.deviceId!!,
-                    name = android.os.Build.MODEL,
+                    name = secrets.deviceName,
                     role = "auth",
                     token_hex = secrets.authTokenHex(),
                 )
@@ -82,16 +88,34 @@ class MurmurService : Service() {
             onAuthed = { media.publishNow() },
         )
         media = MediaBridge(this, ::send, scope)
-        status.value = Status(provisioned = true)
+        status.value = Status(provisioned = true, running = true)
         relay.start()
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
         scope.launch { relay.state.collect { status.value = status.value.copy(relay = it) } }
+
+        // Push our display name (idempotent server-side upsert) and keep
+        // the family list + server ping fresh while online.
+        scope.launch {
+            relay.state.collect { st ->
+                if (st == Relay.State.ONLINE) pushName()
+            }
+        }
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(DEVICES_POLL_MS)
+                if (status.value.relay == Relay.State.ONLINE) {
+                    listSentAt.set(android.os.SystemClock.elapsedRealtimeNanos())
+                    relay.sendControl(Control.ListDevices, secrets.deviceId ?: return@launch)
+                }
+            }
+        }
 
         getSystemService(ConnectivityManager::class.java)
             .registerDefaultNetworkCallback(networkCallback)
     }
 
     override fun onDestroy() {
+        status.value = Status(provisioned = secrets.provisioned, running = false)
         relay.stop()
         runCatching {
             getSystemService(ConnectivityManager::class.java)
@@ -103,6 +127,21 @@ class MurmurService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Push the locally edited name to the registry. */
+    fun pushName() {
+        if (!::relay.isInitialized || !::secrets.isInitialized) return
+        val id = secrets.deviceId ?: return
+        relay.sendControl(Control.RenameDevice(id, secrets.deviceName), id)
+    }
+
+    /** Ask the server to kick us out of the family — best effort before
+     *  the local wipe on logout. */
+    fun revokeSelf() {
+        if (!::relay.isInitialized || !::secrets.isInitialized) return
+        val id = secrets.deviceId ?: return
+        relay.sendControl(Control.RevokeDevice(id), id)
+    }
 
     /** Seal and enqueue an E2E message. */
     fun send(msg: Msg, to: String = Envelope.ALL) {
@@ -139,6 +178,19 @@ class MurmurService : Service() {
         ?.key
 
     private fun onEnvelope(env: Envelope) {
+        // Cleartext control replies (Devices) — handled before decrypt.
+        env.controlPayload()?.let { ctl ->
+            if (ctl is Control.Devices) {
+                val sent = listSentAt.getAndSet(0)
+                status.value = status.value.copy(
+                    devices = ctl.devices,
+                    serverRttMs = if (sent != 0L)
+                        (android.os.SystemClock.elapsedRealtimeNanos() - sent) / 1_000_000
+                    else null,
+                )
+            }
+            return
+        }
         if (env.to == Envelope.SERVER) return
         val pt = runCatching { key.open(Base64.decode(env.payload, Base64.NO_WRAP)) }.getOrNull()
             ?: return // pairing cleartext or a different family key
@@ -181,11 +233,17 @@ class MurmurService : Service() {
     data class Status(
         val relay: Relay.State = Relay.State.OFFLINE,
         val provisioned: Boolean = false,
+        /** Service process is alive — the QS tile + pause button's truth. */
+        val running: Boolean = false,
+        /** ListDevices round-trip — the phone's own ping to the relay. */
+        val serverRttMs: Long? = null,
+        val devices: List<DeviceInfo> = emptyList(),
     )
 
     companion object {
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
+        private const val DEVICES_POLL_MS = 12_000L
 
         var instance: MurmurService? = null
             private set
@@ -195,6 +253,10 @@ class MurmurService : Service() {
 
         fun start(ctx: Context) {
             ctx.startForegroundService(Intent(ctx, MurmurService::class.java))
+        }
+
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, MurmurService::class.java))
         }
 
         /** FNV-1a — identical to murmurd::clipboard::hash_clip. */

@@ -37,8 +37,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -71,8 +73,7 @@ fun PairingCard() {
     var phase by remember { mutableStateOf("idle") }
     var manual by remember { mutableStateOf(false) }
     var inviteMode by remember { mutableStateOf(false) }
-    var codeA by remember { mutableStateOf("") }
-    var codeB by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
     var invite by remember { mutableStateOf("") }
     var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "ws://" }) }
     var sas by remember { mutableStateOf("") }
@@ -81,9 +82,7 @@ fun PairingCard() {
     var hint by remember { mutableStateOf<String?>(null) }
     var celebrating by remember { mutableStateOf(false) }
 
-    val code = codeA + codeB
     val codeReady = code.length == 8
-    val focusB = remember { FocusRequester() }
 
     fun runPairing(input: String, short: Boolean = false) {
         phase = "connecting"
@@ -237,25 +236,8 @@ fun PairingCard() {
                             ) { Text("have a short code?") }
                         } else {
                             ShortCodeField(
-                                a = codeA,
-                                b = codeB,
-                                onA = { v ->
-                                    val clean = v.filter(Char::isLetterOrDigit)
-                                        .uppercase().take(8)
-                                    if (clean.length > 4) {
-                                        codeA = clean.take(4)
-                                        codeB = clean.drop(4).take(4)
-                                        focusB.requestFocus()
-                                    } else {
-                                        codeA = clean
-                                        if (clean.length == 4) focusB.requestFocus()
-                                    }
-                                },
-                                onB = { v ->
-                                    codeB = v.filter(Char::isLetterOrDigit)
-                                        .uppercase().take(4)
-                                },
-                                focusB = focusB,
+                                code = code,
+                                onCode = { code = it },
                             )
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(
@@ -278,7 +260,7 @@ fun PairingCard() {
                         Button(
                             onClick = {
                                 if (inviteMode) runPairing(invite.trim())
-                                else runPairing("$codeA-$codeB", short = true)
+                                else runPairing("$code", short = true)
                             },
                             enabled = ready,
                             modifier = Modifier.fillMaxWidth(),
@@ -306,75 +288,70 @@ fun PairingCard() {
     }
 }
 
-/** Two four-character boxes with the dash fixed between them — the
- *  XXXX-XXXX shape is the hint, no formatting left to the user. */
+/** Eight cells with the dash fixed in the middle — the XXXX-XXXX
+ *  shape is the form, not something the user types. A single invisible
+ *  text field drives input; the cells are pure presentation. */
 @Composable
-private fun ShortCodeField(
-    a: String,
-    b: String,
-    onA: (String) -> Unit,
-    onB: (String) -> Unit,
-    focusB: FocusRequester,
-) {
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+private fun ShortCodeField(code: String, onCode: (String) -> Unit) {
+    BasicTextField(
+        value = code,
+        onValueChange = { v ->
+            onCode(v.filter(Char::isLetterOrDigit).uppercase().take(8))
+        },
+        modifier = Modifier.fillMaxWidth(),
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Characters,
+            keyboardType = KeyboardType.Ascii,
+        ),
+        decorationBox = { inner ->
+            Box(Modifier.fillMaxWidth()) {
+                // Keep the editable element alive but invisible — the
+                // cells do the talking.
+                Box(Modifier.alpha(0f)) { inner() }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    repeat(4) { i -> Cell(code.getOrNull(i), i == code.length, Modifier.weight(1f)) }
+                    Text(
+                        "–",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    repeat(4) { i ->
+                        Cell(code.getOrNull(i + 4), i + 4 == code.length, Modifier.weight(1f))
+                    }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .height(58.dp)
+            .background(
+                MaterialTheme.colorScheme.surfaceContainerHigh,
+                MaterialTheme.shapes.medium,
+            )
+            .then(
+                if (active) Modifier.border(
+                    1.dp,
+                    MaterialTheme.colorScheme.primary,
+                    MaterialTheme.shapes.medium,
+                ) else Modifier,
+            ),
+        contentAlignment = Alignment.Center,
     ) {
-        OutlinedTextField(
-            value = a,
-            onValueChange = onA,
-            modifier = Modifier.weight(1f),
-            textStyle = MaterialTheme.typography.headlineSmall.copy(
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center,
-            ),
-            placeholder = {
-                Text(
-                    "K7Q2",
-                    Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.Characters,
-                keyboardType = KeyboardType.Ascii,
-            ),
-        )
         Text(
-            "–",
+            ch?.toString() ?: "·",
             style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = b,
-            onValueChange = onB,
-            modifier = Modifier
-                .weight(1f)
-                .focusRequester(focusB),
-            textStyle = MaterialTheme.typography.headlineSmall.copy(
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center,
-            ),
-            placeholder = {
-                Text(
-                    "J4MN",
-                    Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.Characters,
-                keyboardType = KeyboardType.Ascii,
-            ),
+            fontFamily = FontFamily.Monospace,
+            color = if (ch != null) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

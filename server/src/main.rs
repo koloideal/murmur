@@ -42,11 +42,20 @@ struct DeviceRec {
     revoked: bool,
 }
 
+/// WS ping bookkeeping shared between this conn's writer (sets `sent`
+/// before each ping) and reader (stamps `ms` on the matching pong).
+#[derive(Default)]
+struct RttSlot {
+    sent: Option<std::time::Instant>,
+    ms: Option<u64>,
+}
+
 struct Conn {
     tx: mpsc::UnboundedSender<String>,
     /// Fire to make the reader loop exit (revocation, shutdown).
     close: mpsc::Sender<()>,
     pairing: bool,
+    rtt: std::sync::Arc<Mutex<RttSlot>>,
     /// Unique registration mark — a dying conn must only remove the
     /// registry entry if it still owns it (see drop_conn_if).
     epoch: u64,
@@ -130,8 +139,18 @@ impl Shared {
                 name: r.name.clone(),
                 revoked: r.revoked,
                 online: conns.contains_key(id),
+                rtt_ms: conns.get(id).and_then(|c| c.rtt.lock().unwrap().ms),
             })
             .collect()
+    }
+
+    fn rename(&self, id: &DeviceId, name: String) {
+        let mut devices = self.devices.lock().unwrap();
+        if let Some(rec) = devices.get_mut(id) {
+            rec.name = name;
+            drop(devices);
+            self.persist();
+        }
     }
 
     fn check_auth(&self, id: &DeviceId, token_hash_hex: &str) -> bool {
@@ -277,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         Some("add-device") => {
             let name = flag_value(&args[1..], "--name")
                 .or_else(|| args.get(1).cloned())
+                .or_else(|| prompt_line("device name"))
                 .context("usage: murmur-server add-device --name NAME")?;
             let res = admin_req(&AdminReq::AddDevice { name })?;
             let d = &res["data"];
@@ -289,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
             let res = admin_req(&AdminReq::ListDevices)?;
             for d in res["data"].as_array().into_iter().flatten() {
                 println!(
-                    "{}  {}  {}  {}",
+                    "{}  {}  {}  {}  {}",
                     d["device_id"].as_str().unwrap_or("?"),
                     d["name"].as_str().unwrap_or("?"),
                     if d["revoked"].as_bool() == Some(true) {
@@ -302,6 +322,10 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         "offline"
                     },
+                    d["rtt_ms"]
+                        .as_u64()
+                        .map(|ms| format!("{ms}ms"))
+                        .unwrap_or_default(),
                 );
             }
             Ok(())
@@ -443,6 +467,18 @@ fn print_caddy_hint(addr: &str) {
     );
 }
 
+fn prompt_line(label: &str) -> Option<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    eprint!("{label}: ");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok()?;
+    let line = line.trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
@@ -566,6 +602,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
     }
 
     let epoch = EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let rtt = std::sync::Arc::new(Mutex::new(RttSlot::default()));
     {
         let mut conns = shared.conns.lock().unwrap();
         if let Some(old) = conns.remove(&device_id) {
@@ -580,6 +617,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 close: close_tx,
                 pairing,
                 epoch,
+                rtt: rtt.clone(),
             },
         );
     }
@@ -587,6 +625,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
 
     // Writer: queued frames + periodic WS pings (NATs drop silent conns;
     // phones on mobile networks depend on this).
+    let rtt_w = rtt.clone();
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(std::time::Duration::from_secs(25));
         ping.tick().await; // first tick fires immediately — skip it
@@ -599,6 +638,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                     }
                 }
                 _ = ping.tick() => {
+                    rtt_w.lock().unwrap().sent = Some(std::time::Instant::now());
                     if sink.send(Ws::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }
@@ -620,6 +660,12 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                     msg
                 }
             };
+            if let Ok(Ws::Pong(_)) = &msg {
+                let mut slot = rtt.lock().unwrap();
+                if let Some(sent) = slot.sent.take() {
+                    slot.ms = Some(sent.elapsed().as_millis() as u64);
+                }
+            }
             let Ws::Text(t) = msg? else { continue };
             let mut env = match Envelope::from_json(&t) {
                 Ok(e) => e,
@@ -707,6 +753,14 @@ async fn handle_control(
         Control::RevokeDevice { device_id } => {
             info!("{from} revoked device {device_id}");
             shared.revoke(&device_id);
+        }
+        Control::RenameDevice { device_id, name } => {
+            if device_id == from {
+                info!("{from} renamed to {name}");
+                shared.rename(&from, name);
+            } else {
+                warn!("{from} tried to rename {device_id} — self-rename only");
+            }
         }
         Control::ListDevices => {
             let reply = Envelope::control(

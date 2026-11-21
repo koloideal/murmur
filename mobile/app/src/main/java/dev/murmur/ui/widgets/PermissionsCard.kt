@@ -78,15 +78,18 @@ fun PermissionsCard() {
             postNotifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
+    // Settings screens can lag before reporting the grant — keep polling
+    // while anything's missing so the card doesn't get stuck visible.
+    LaunchedEffect(listener, battery, postNotif) {
+        while (!(listener && battery && postNotif)) {
+            kotlinx.coroutines.delay(1500)
+            recheck()
+        }
+    }
 
     if (listener && battery && postNotif) return
 
     FeatureCard("permissions", Icons.Outlined.Shield) {
-        Text(
-            "murmur needs a hand with a few switches:",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         if (!listener) {
             PermRow(
                 title = "notification access",

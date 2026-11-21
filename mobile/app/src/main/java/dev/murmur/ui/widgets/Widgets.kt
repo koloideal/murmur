@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
  */
 val homeWidgets: List<@Composable () -> Unit> = listOf(
     { StatusCard() },
+    { DevicesCard() },
     { PairingCard() },
     { PermissionsCard() },
 )

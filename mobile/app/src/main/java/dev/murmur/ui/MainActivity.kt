@@ -90,15 +90,17 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
                 .padding(horizontal = 20.dp, vertical = 4.dp),
         ) {
             Text(
+                "your own relay · end-to-end encrypted",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
                 "murmur quietly links this phone to your laptops: " +
                     "notifications land on the desktop, the clipboard is shared, " +
                     "and laptop media keys control playback here.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                "your own relay · end-to-end encrypted",
-                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 modifier = Modifier

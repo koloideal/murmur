@@ -151,7 +151,33 @@ sealed class Control {
     @Serializable
     @SerialName("pair_data")
     data class PairData(val blob_b64: String) : Control()
+
+    @Serializable
+    @SerialName("list_devices")
+    object ListDevices : Control()
+
+    @Serializable
+    @SerialName("devices")
+    data class Devices(val devices: List<DeviceInfo>) : Control()
+
+    @Serializable
+    @SerialName("rename_device")
+    data class RenameDevice(val device_id: String, val name: String) : Control()
+
+    @Serializable
+    @SerialName("revoke_device")
+    data class RevokeDevice(val device_id: String) : Control()
 }
+
+/** Registry entry as the server reports it in `Control.Devices`. */
+@Serializable
+data class DeviceInfo(
+    val device_id: String,
+    val name: String,
+    val revoked: Boolean,
+    val online: Boolean,
+    val rtt_ms: Long? = null,
+)
 
 /** Invite bundle — base64url JSON `{s,i,p}`, same as murmur_proto::Invite. */
 @Serializable

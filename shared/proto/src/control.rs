@@ -58,6 +58,12 @@ pub enum Control {
     RevokeDevice {
         device_id: DeviceId,
     },
+    /// Authed device → @server. Rename a registry entry — only self-
+    /// renames are honoured (`device_id` must equal the sender's id).
+    RenameDevice {
+        device_id: DeviceId,
+        name: String,
+    },
     /// Authed device → @server.
     ListDevices,
     /// Server → device.
@@ -84,6 +90,10 @@ pub struct DeviceInfo {
     pub name: String,
     pub revoked: bool,
     pub online: bool,
+    /// Server-side WS ping round-trip, millis — the per-device latency
+    /// the dashboards display. `None` while offline or unmeasured.
+    #[serde(default)]
+    pub rtt_ms: Option<u64>,
 }
 
 /// The DH-sealed payload inside `Control::PairData`: everything the new

@@ -17,9 +17,9 @@ import javax.crypto.spec.GCMParameterSpec
  * Keystore key that never leaves the TEE — a stolen prefs file is useless
  * off-device. Non-secret fields stay in plain SharedPreferences.
  */
-class Secrets(context: Context) {
+class Secrets(private val ctx: Context) {
 
-    private val prefs = context.getSharedPreferences("murmur", Context.MODE_PRIVATE)
+    private val prefs = ctx.getSharedPreferences("murmur", Context.MODE_PRIVATE)
     private val cipher = KeystoneCipher()
 
     init {
@@ -38,6 +38,31 @@ class Secrets(context: Context) {
     var serverUrl: String
         get() = prefs.getString(KEY_URL, "") ?: ""
         set(v) = prefs.edit { putString(KEY_URL, v) }
+
+    /** Display name for this device. Defaults to the system device name
+     *  ("device_name" is OEM-set, e.g. "Galaxy S26 Ultra"), then the
+     *  build model. Editable from the dashboard; the service pushes it
+     *  to the server with RenameDevice. */
+    var deviceName: String
+        get() = prefs.getString(KEY_NAME, null)
+            ?: systemDeviceName().also { deviceName = it }
+        set(v) = prefs.edit { putString(KEY_NAME, v) }
+
+    private fun systemDeviceName(): String {
+        val sys = runCatching {
+            android.provider.Settings.Global.getString(
+                ctx.contentResolver, "device_name",
+            )
+        }.getOrNull()
+        return sys?.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL
+    }
+
+    /** Full local logout: prefs + the Keystore key material. */
+    fun clear() {
+        prefs.edit { clear() }
+        KeystoneCipher.deleteKey()
+        settledFlow.value = false
+    }
 
     fun save(deviceId: String, authTokenHex: String, familyKeyBytes: ByteArray, serverUrl: String) {
         prefs.edit {
@@ -75,6 +100,7 @@ class Secrets(context: Context) {
         private const val KEY_TOKEN = "auth_token_enc"
         private const val KEY_FAMILY = "family_key_enc"
         private const val KEY_URL = "server_url"
+        private const val KEY_NAME = "device_name"
         private const val KEY_ALLOW = "notif_allowlist"
     }
 }
@@ -117,8 +143,17 @@ private class KeystoneCipher {
         c.doFinal(blob.copyOfRange(GCM_IV_LEN, blob.size))
     }.getOrNull()
 
-    private companion object {
-        const val ALIAS = "murmur-secrets"
-        const val GCM_IV_LEN = 12
+    companion object {
+        private const val ALIAS = "murmur-secrets"
+        private const val GCM_IV_LEN = 12
+
+        fun deleteKey() {
+            runCatching {
+                KeyStore.getInstance("AndroidKeyStore").apply {
+                    load(null)
+                    deleteEntry(ALIAS)
+                }
+            }
+        }
     }
 }

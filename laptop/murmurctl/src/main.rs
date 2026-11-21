@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
                 _ => {
                     for d in devs.into_iter().flatten() {
                         println!(
-                            "{}  {}  {}  {}",
+                            "{}  {}  {}  {}  {}",
                             d["device_id"].as_str().unwrap_or("?"),
                             d["name"].as_str().unwrap_or("?"),
                             if d["revoked"].as_bool() == Some(true) {
@@ -102,6 +102,10 @@ fn main() -> anyhow::Result<()> {
                             } else {
                                 "offline"
                             },
+                            d["rtt_ms"]
+                                .as_u64()
+                                .map(|ms| format!("{ms}ms"))
+                                .unwrap_or_default(),
                         );
                     }
                 }

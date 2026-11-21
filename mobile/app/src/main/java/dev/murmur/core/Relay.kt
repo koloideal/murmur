@@ -49,7 +49,7 @@ class Relay(
     private val client = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
-    private var ws: WebSocket? = null
+    @Volatile private var ws: WebSocket? = null
     private val running = AtomicBoolean(false)
     private val seq = AtomicLong(1)
 
@@ -91,6 +91,11 @@ class Relay(
         ws?.send(env.toJson())
     }
 
+    /** Cleartext control-plane to the server — device list, rename, revoke. */
+    fun sendControl(ctl: Control, selfId: String) {
+        ws?.send(Envelope.wrap(selfId, Envelope.SERVER, seq.getAndIncrement(), ctl).toJson())
+    }
+
     private suspend fun loop() {
         var backoff = 1.seconds
         while (running.get()) {
@@ -124,6 +129,7 @@ class Relay(
                 Request.Builder().url(url).build(),
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
+                        ws = webSocket
                         webSocket.send(protoJson.encodeToString(Control.serializer(), hello()))
                     }
 
@@ -157,6 +163,7 @@ class Relay(
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = done()
 
                     private fun done() {
+                        ws = null
                         if (cont.isActive) cont.resume(authed)
                     }
                 },

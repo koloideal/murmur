@@ -124,7 +124,12 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("missing {name}"))
     }
     let server_url = flag(args, "--server")?;
-    let name = flag(args, "--name")?;
+    let name = flag(args, "--name")
+        .map(str::to_owned)
+        .map_or_else(
+            |_| prompt("device name", std::env::var("HOSTNAME").ok().as_deref()),
+            Ok,
+        )?;
     let device_id = flag(args, "--device-id")?;
     let token_hex = flag(args, "--token")?;
 
@@ -148,6 +153,26 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
         eprintln!("(unit install skipped: {e:#} — start murmurd manually)");
     }
     Ok(())
+}
+
+/// Interactive fallback for `--name`-style flags: asks on a TTY, prefilled
+/// default shown in brackets and accepted on empty input.
+fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("missing flag — pass it explicitly or run on a TTY");
+    }
+    match default {
+        Some(d) => eprint!("{label} [{d}]: "),
+        None => eprint!("{label}: "),
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim();
+    if !line.is_empty() {
+        return Ok(line.into());
+    }
+    default.map(str::to_owned).ok_or_else(|| anyhow::anyhow!("{label} required"))
 }
 
 /// Write config.toml + secrets.toml (0600, never overwritten). Shared by
