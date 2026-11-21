@@ -84,8 +84,9 @@ class NotificationBridge : NotificationListenerService() {
         private val remoteCancels = ConcurrentHashMap.newKeySet<String>()
 
         fun requestCancel(key: String) {
+            val listener = instance ?: return
             remoteCancels.add(key)
-            instance?.cancelNotification(key)
+            listener.cancelNotification(key)
         }
     }
 }

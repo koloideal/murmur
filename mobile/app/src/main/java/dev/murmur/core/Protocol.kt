@@ -103,7 +103,9 @@ sealed class Msg {
     @SerialName("clipboard")
     data class Clipboard(
         val origin: String,
-        val hash: Long,
+        // u64 on the wire — a plain Long overflows on half of all
+        // FNV hashes and the whole message silently fails to decode.
+        val hash: ULong,
         val mime: String,
         val data_b64: String,
         val explicit: Boolean = false,

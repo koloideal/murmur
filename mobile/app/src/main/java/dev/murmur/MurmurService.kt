@@ -118,7 +118,7 @@ class MurmurService : Service() {
         send(
             Msg.Clipboard(
                 origin = secrets.deviceId!!,
-                hash = fnv1a(text.encodeToByteArray()),
+                hash = fnv1a(text.encodeToByteArray()).toULong(),
                 mime = "text/plain",
                 data_b64 = Base64.encodeToString(text.encodeToByteArray(), Base64.NO_WRAP),
                 explicit = true,
@@ -201,7 +201,9 @@ class MurmurService : Service() {
         fun fnv1a(data: ByteArray): Long {
             var h = 0xcbf29ce484222325uL.toLong()
             for (b in data) {
-                h = h xor b.toLong()
+                // Byte.toLong() sign-extends — Rust uses u64::from(u8)
+                // (zero-extend). Mask first or high bytes hash differently.
+                h = h xor (b.toLong() and 0xFF)
                 h *= 0x100000001b3uL.toLong()
             }
             return h

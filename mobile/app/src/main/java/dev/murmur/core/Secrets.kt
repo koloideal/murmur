@@ -23,7 +23,8 @@ class Secrets(context: Context) {
     private val cipher = KeystoneCipher()
 
     val provisioned: Boolean
-        get() = prefs.contains(KEY_FAMILY) && prefs.contains(KEY_TOKEN)
+        get() = prefs.contains(KEY_FAMILY) && prefs.contains(KEY_TOKEN) &&
+            prefs.contains(KEY_DEVICE)
 
     var deviceId: String?
         get() = prefs.getString(KEY_DEVICE, null)

@@ -103,7 +103,18 @@ fn write_icon(pkg: &str, b64: &str) -> Option<String> {
         .join("murmur/icons");
     std::fs::create_dir_all(&dir).ok()?;
     // Stable name per package+bytes so reposts overwrite, not accumulate.
-    let name = format!("{pkg}-{:x}.img", fnv(&bytes));
+    // pkg comes from the network — strip anything that isn't filename-safe.
+    let safe_pkg: String = pkg
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = format!("{safe_pkg}-{:x}.img", fnv(&bytes));
     let path = dir.join(name);
     std::fs::write(&path, bytes).ok()?;
     Some(path.to_string_lossy().into_owned())

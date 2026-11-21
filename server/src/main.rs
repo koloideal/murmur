@@ -47,7 +47,12 @@ struct Conn {
     /// Fire to make the reader loop exit (revocation, shutdown).
     close: mpsc::Sender<()>,
     pairing: bool,
+    /// Unique registration mark — a dying conn must only remove the
+    /// registry entry if it still owns it (see drop_conn_if).
+    epoch: u64,
 }
+
+static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct Shared {
     devices_path: PathBuf,
@@ -156,6 +161,18 @@ impl Shared {
     fn drop_conn(&self, id: &DeviceId) {
         if let Some(c) = self.conns.lock().unwrap().remove(id) {
             let _ = c.close.try_send(());
+        }
+    }
+
+    /// Like drop_conn, but only if the entry still belongs to the conn
+    /// that is cleaning itself up. Without this, a dying conn that was
+    /// already displaced would kill the fresh conn that took its id.
+    fn drop_conn_if(&self, id: &DeviceId, epoch: u64) {
+        let mut conns = self.conns.lock().unwrap();
+        if conns.get(id).is_some_and(|c| c.epoch == epoch) {
+            if let Some(c) = conns.remove(id) {
+                let _ = c.close.try_send(());
+            }
         }
     }
 }
@@ -379,17 +396,19 @@ fn install_user(exe: &str, addr: &str) -> anyhow::Result<()> {
          [Install]\n\
          WantedBy=default.target\n"
     );
-    let dir = PathBuf::from(std::env::var_os("HOME").context("no HOME")?)
-        .join(".config/systemd/user");
+    let dir =
+        PathBuf::from(std::env::var_os("HOME").context("no HOME")?).join(".config/systemd/user");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("murmur-server.service");
     std::fs::write(&path, &unit)?;
     std::fs::create_dir_all(
-        PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".local/share/murmur-server"),
+        PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/share/murmur-server"),
     )?;
     run("systemctl", &["--user", "daemon-reload"])?;
-    run("systemctl", &["--user", "enable", "--now", "murmur-server.service"])?;
+    run(
+        "systemctl",
+        &["--user", "enable", "--now", "murmur-server.service"],
+    )?;
     // Survives logout; failure is non-fatal — needs polkit/root on some systems.
     if run("loginctl", &["enable-linger"]).is_err() {
         eprintln!("hint: run `loginctl enable-linger $USER` so it survives logout");
@@ -403,10 +422,10 @@ fn run(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
         .args(args)
         .status()
         .with_context(|| format!("spawn {cmd}"))?;
-    status.success().then_some(()).context(format!(
-        "{cmd} {} exited {status}",
-        args.join(" ")
-    ))
+    status
+        .success()
+        .then_some(())
+        .context(format!("{cmd} {} exited {status}", args.join(" ")))
 }
 
 fn print_caddy_hint(addr: &str) {
@@ -515,10 +534,30 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
         },
         _ => bail!("expected Hello"),
     };
-    send_ctl(&mut sink, &Control::HelloOk).await?;
-
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (close_tx, mut close_rx) = mpsc::channel::<()>(1);
+
+    // A pairing conn may only displace another pairing conn — a session
+    // id must never kick a live authed device offline.
+    let occupied = shared
+        .conns
+        .lock()
+        .unwrap()
+        .get(&device_id)
+        .is_some_and(|c| pairing && !c.pairing);
+    if occupied {
+        send_ctl(
+            &mut sink,
+            &Control::HelloErr {
+                reason: "device id already connected".into(),
+            },
+        )
+        .await
+        .ok();
+        bail!("pairing conn claimed live device id {device_id}");
+    }
+
+    let epoch = EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     {
         let mut conns = shared.conns.lock().unwrap();
         if let Some(old) = conns.remove(&device_id) {
@@ -532,15 +571,30 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 tx,
                 close: close_tx,
                 pairing,
+                epoch,
             },
         );
     }
+    send_ctl(&mut sink, &Control::HelloOk).await?;
 
-    // Writer: everything queued for this conn goes out as text frames.
+    // Writer: queued frames + periodic WS pings (NATs drop silent conns;
+    // phones on mobile networks depend on this).
     let writer = tokio::spawn(async move {
-        while let Some(json) = rx.recv().await {
-            if sink.send(Ws::Text(json.into())).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(25));
+        ping.tick().await; // first tick fires immediately — skip it
+        loop {
+            tokio::select! {
+                json = rx.recv() => {
+                    let Some(json) = json else { break };
+                    if sink.send(Ws::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping.tick() => {
+                    if sink.send(Ws::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -571,13 +625,24 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
             if pairing {
                 // Pairing conns may only exchange cleartext Pair* frames,
                 // unicast to the inviter/from the inviter. No broadcast,
-                // no server ops.
-                let ok = matches!(
-                    env.control_payload(),
-                    Ok(Control::PairHello { .. })
-                        | Ok(Control::PairAccept { .. })
-                        | Ok(Control::PairData { .. })
-                ) && matches!(env.to, Route::Device(_));
+                // no server ops, no pair↔pair chatter (the inviter is
+                // always authed — a pair→pair frame is never legitimate).
+                let dst_authed = match &env.to {
+                    Route::Device(d) => shared
+                        .conns
+                        .lock()
+                        .unwrap()
+                        .get(d)
+                        .is_some_and(|c| !c.pairing),
+                    _ => false,
+                };
+                let ok = dst_authed
+                    && matches!(
+                        env.control_payload(),
+                        Ok(Control::PairHello { .. })
+                            | Ok(Control::PairAccept { .. })
+                            | Ok(Control::PairData { .. })
+                    );
                 if !ok {
                     warn!("{device_id}: pairing conn sent a non-pair frame");
                     continue;
@@ -591,7 +656,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                     if pairing {
                         warn!("{device_id}: pairing conn tried broadcast");
                     } else {
-                        shared.broadcast(&device_id, &env, false);
+                        shared.broadcast(&device_id, &env, true);
                     }
                 }
             }
@@ -600,7 +665,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
     }
     .await;
 
-    shared.drop_conn(&device_id);
+    shared.drop_conn_if(&device_id, epoch);
     writer.abort();
     info!("device {device_id} disconnected");
     read_res

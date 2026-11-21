@@ -77,7 +77,37 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let code = match cli.cmd {
         Cmd::Status => return reply(serde_json::json!({"cmd": "status"})),
-        Cmd::Devices => return reply(serde_json::json!({"cmd": "devices"})),
+        Cmd::Devices => {
+            let res = request(serde_json::json!({"cmd": "devices"}))?;
+            if res["ok"].as_bool() != Some(true) {
+                eprintln!("{}", res["error"].as_str().unwrap_or("failed"));
+                std::process::exit(1);
+            }
+            let devs = res["data"]["devices"].as_array();
+            match devs.map(|d| d.len()) {
+                Some(0) => println!("no devices in the registry"),
+                _ => {
+                    for d in devs.into_iter().flatten() {
+                        println!(
+                            "{}  {}  {}  {}",
+                            d["device_id"].as_str().unwrap_or("?"),
+                            d["name"].as_str().unwrap_or("?"),
+                            if d["revoked"].as_bool() == Some(true) {
+                                "revoked"
+                            } else {
+                                "active"
+                            },
+                            if d["online"].as_bool() == Some(true) {
+                                "online"
+                            } else {
+                                "offline"
+                            },
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
         Cmd::Revoke { device_id } => {
             return reply(serde_json::json!({"cmd": "revoke", "device_id": device_id}));
         }

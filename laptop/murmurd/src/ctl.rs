@@ -76,6 +76,13 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let path = sock_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
+    // The socket grants full daemon control — owner only. Matters when
+    // XDG_RUNTIME_DIR is absent and we land in world-readable /tmp.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     info!("ctl socket: {}", path.display());
 
     loop {
@@ -125,11 +132,33 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "presence": presence,
             }))
         }
-        Req::Devices => match shared.send_control(&Control::ListDevices) {
-            // TODO: await the server's Devices reply via ctl_events and return it
-            Ok(()) => Res::ok(serde_json::json!("request sent")),
-            Err(e) => Res::err(e),
-        },
+        Req::Devices => {
+            let mut rx = shared.ctl_events.subscribe();
+            match shared.send_control(&Control::ListDevices) {
+                Ok(()) => {
+                    let devs = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            match rx.recv().await {
+                                Ok((_, Control::Devices { devices })) => return Some(devices),
+                                Ok(_) => continue,
+                                // Skip lagged gaps; Closed means nobody
+                                // is sending anymore — give up.
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return None;
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                    })
+                    .await;
+                    match devs {
+                        Ok(Some(d)) => Res::ok(serde_json::json!({"devices": d})),
+                        _ => Res::err("no reply from server (offline?)"),
+                    }
+                }
+                Err(e) => Res::err(e),
+            }
+        }
         Req::Revoke { device_id } => match device_id.parse::<murmur_proto::DeviceId>() {
             Ok(device_id) => match shared.send_control(&Control::RevokeDevice { device_id }) {
                 Ok(()) => Res::ok(serde_json::json!(null)),

@@ -283,20 +283,25 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let mut inbox = ctx.inbox.expect("feature declares wants");
     let st = Arc::new(Mutex::new(Media::default()));
 
-    let conn = match zbus::connection::Builder::session()
-        .context("session bus")?
-        .name(BUS_NAME)?
-        .serve_at(PATH, Root)?
-        .serve_at(
-            PATH,
-            Player {
-                st: st.clone(),
-                shared: shared.clone(),
-            },
-        )?
-        .build()
-        .await
-    {
+    // No session bus (headless, ssh) — the feature idles instead of
+    // killing the daemon, like the other adapter-backed features.
+    let conn: anyhow::Result<zbus::Connection> = async {
+        Ok(zbus::connection::Builder::session()
+            .context("session bus")?
+            .name(BUS_NAME)?
+            .serve_at(PATH, Root)?
+            .serve_at(
+                PATH,
+                Player {
+                    st: st.clone(),
+                    shared: shared.clone(),
+                },
+            )?
+            .build()
+            .await?)
+    }
+    .await;
+    let conn = match conn {
         Ok(c) => c,
         Err(e) => {
             warn!("mpris feature disabled: {e:#}");
@@ -306,12 +311,15 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     };
     info!("mpris: serving {BUS_NAME}");
 
-    let emitter: SignalEmitter<'static> = conn
-        .object_server()
-        .interface::<_, Player>(PATH)
-        .await?
-        .signal_emitter()
-        .clone();
+    let emitter: SignalEmitter<'static> =
+        match conn.object_server().interface::<_, Player>(PATH).await {
+            Ok(i) => i.signal_emitter().clone(),
+            Err(e) => {
+                warn!("mpris feature disabled: {e:#}");
+                while inbox.recv().await.is_some() {}
+                return Ok(());
+            }
+        };
 
     while let Some((from, msg)) = inbox.recv().await {
         let Message::MediaState {
@@ -344,7 +352,9 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 m.art_path = cache_art(&b64);
             }
         }
-        let iface = conn.object_server().interface::<_, Player>(PATH).await?;
+        let Ok(iface) = conn.object_server().interface::<_, Player>(PATH).await else {
+            continue;
+        };
         let player_iface = iface.get().await;
         let _ = player_iface.playback_status_changed(&emitter).await;
         let _ = player_iface.metadata_changed(&emitter).await;

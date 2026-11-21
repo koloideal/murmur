@@ -16,12 +16,21 @@ pub fn now_ts() -> u64 {
 
 /// Pairing state owned by the inviter side. Sessions are the joiner's
 /// conn ids: a `PairHello`'s `env.from` is matched against `invites`.
+/// Entries expire — an invite nobody finishes within TTL is swept.
 #[derive(Default)]
 pub struct Pairing {
     /// Outstanding invites: session → our ephemeral DH key.
-    pub invites: HashMap<DeviceId, PairKey>,
+    pub invites: HashMap<DeviceId, InviteEntry>,
     /// `PairHello` received for one of our invites.
     pub pending: HashMap<DeviceId, Pending>,
+}
+
+/// How long an invite/pending stays around without progress.
+pub const PAIR_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+pub struct InviteEntry {
+    pub key: PairKey,
+    pub created: std::time::Instant,
 }
 
 pub struct Pending {
@@ -31,6 +40,8 @@ pub struct Pending {
     pub peer_pub: PublicKey,
     /// Name the joiner asked to be registered under.
     pub name: String,
+    /// When the invite was issued (TTL counts from then, not from hello).
+    pub created: std::time::Instant,
 }
 
 /// Shared daemon state: identity, key, presence table, outbound queue.

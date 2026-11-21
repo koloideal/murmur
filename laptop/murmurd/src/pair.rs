@@ -13,15 +13,20 @@
 //! print the SAS, wait for `PairData`, hand the secrets to provisioning.
 
 use crate::feature::{Feature, FeatureCtx};
-use crate::state::{Pending, Shared};
+use crate::state::{InviteEntry, PAIR_TTL, Pending, Shared};
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use murmur_proto::control::{HelloRole, PairBlob};
 use murmur_proto::{
     AuthToken, Control, DeviceId, Envelope, FamilyKey, Invite, PairKey, Route, sas_code,
 };
+use std::time::{Duration, Instant};
+use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as Ws;
 use tracing::{info, warn};
+
+/// Joiner gives up if the inviter doesn't confirm within this window.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ---------- inviter side ----------
 
@@ -35,38 +40,58 @@ pub fn feature() -> Feature {
 async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let shared = ctx.shared;
     let mut events = shared.ctl_events.subscribe();
+    let mut sweep = tokio::time::interval(Duration::from_secs(60));
     loop {
-        let (from, ctl) = events.recv().await?;
-        let Control::PairHello { pubkey_b64, name } = ctl else {
-            continue;
-        };
-        let peer_pub = match PairKey::public_from_b64(&pubkey_b64) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("{from}: bad pair pubkey: {e}");
-                continue;
+        tokio::select! {
+            ev = events.recv() => {
+                match ev {
+                    Ok((from, ctl)) => handle_ctl(&shared, from, ctl),
+                    // Lagging drops frames, not the feature.
+                    Err(RecvError::Lagged(n)) => warn!("pair: missed {n} control frames"),
+                    Err(RecvError::Closed) => return Ok(()),
+                }
             }
-        };
-        let mut pair = shared.pair.lock().unwrap();
-        match pair.invites.remove(&from) {
-            Some(key) => {
-                pair.pending.insert(
-                    from,
-                    Pending {
-                        key,
-                        peer_pub,
-                        name: name.clone(),
-                    },
-                );
-                info!("pairing pending: {from} ({name}) — `murmurctl pair` to confirm");
-            }
-            None => debug_no_invite(from),
+            _ = sweep.tick() => sweep_pairing(&shared),
         }
     }
 }
 
-fn debug_no_invite(from: DeviceId) {
-    tracing::debug!("{from}: PairHello for an unknown session, ignored");
+fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
+    let Control::PairHello { pubkey_b64, name } = ctl else {
+        return;
+    };
+    let peer_pub = match PairKey::public_from_b64(&pubkey_b64) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("{from}: bad pair pubkey: {e}");
+            return;
+        }
+    };
+    let mut pair = shared.pair.lock().unwrap();
+    match pair.invites.remove(&from) {
+        Some(entry) => {
+            pair.pending.insert(
+                from,
+                Pending {
+                    key: entry.key,
+                    peer_pub,
+                    name: name.clone(),
+                    created: entry.created,
+                },
+            );
+            info!("pairing pending: {from} ({name}) — `murmurctl pair` to confirm");
+        }
+        None => tracing::debug!("{from}: PairHello for an unknown session, ignored"),
+    }
+}
+
+/// Drop invites and pendings that never completed — pairing is a
+/// here-and-now ritual, stale entries only confuse `murmurctl pair`.
+fn sweep_pairing(shared: &Shared) {
+    let mut pair = shared.pair.lock().unwrap();
+    let fresh = |t: &Instant| t.elapsed() < PAIR_TTL;
+    pair.invites.retain(|_, e| fresh(&e.created));
+    pair.pending.retain(|_, p| fresh(&p.created));
 }
 
 impl Shared {
@@ -74,11 +99,13 @@ impl Shared {
     /// code the new device feeds to `murmurd pair --code`.
     pub fn invite(&self) -> Invite {
         let invite = Invite::new(self.cfg.server_url.clone(), self.id);
-        self.pair
-            .lock()
-            .unwrap()
-            .invites
-            .insert(invite.session, PairKey::generate());
+        self.pair.lock().unwrap().invites.insert(
+            invite.session,
+            InviteEntry {
+                key: PairKey::generate(),
+                created: Instant::now(),
+            },
+        );
         invite
     }
 
@@ -209,36 +236,40 @@ pub async fn join(code: &str, name: &str) -> anyhow::Result<Paired> {
         invite.inviter
     );
 
-    let mut dh_key: Option<FamilyKey> = None;
-    while let Some(msg) = source.next().await {
-        let Ws::Text(t) = msg? else { continue };
-        let env = Envelope::from_json(&t)?;
-        match env.control_payload()? {
-            Control::PairAccept { pubkey_b64 } => {
-                let peer = PairKey::public_from_b64(&pubkey_b64)?;
-                dh_key = Some(FamilyKey::from_raw(key.dh(&peer)));
-                let sas = sas_code(&key.public, &peer, &invite.session, &invite.inviter);
-                eprintln!("verification code: {sas}");
-                eprintln!("confirm it matches on the inviter, it will then complete pairing");
+    tokio::time::timeout(JOIN_TIMEOUT, async {
+        let mut dh_key: Option<FamilyKey> = None;
+        while let Some(msg) = source.next().await {
+            let Ws::Text(t) = msg? else { continue };
+            let env = Envelope::from_json(&t)?;
+            match env.control_payload()? {
+                Control::PairAccept { pubkey_b64 } => {
+                    let peer = PairKey::public_from_b64(&pubkey_b64)?;
+                    dh_key = Some(FamilyKey::from_raw(key.dh(&peer)));
+                    let sas = sas_code(&key.public, &peer, &invite.session, &invite.inviter);
+                    eprintln!("verification code: {sas}");
+                    eprintln!("confirm it matches on the inviter, it will then complete pairing");
+                }
+                Control::PairData { blob_b64 } => {
+                    use base64::Engine;
+                    let dk = dh_key.context("PairData before PairAccept")?;
+                    let ct = base64::engine::general_purpose::STANDARD.decode(blob_b64)?;
+                    let blob: PairBlob = serde_json::from_slice(&dk.open(&ct)?)?;
+                    return anyhow::Ok(Paired {
+                        server_url: blob.server_url,
+                        device_id: blob.device_id,
+                        token_hex: blob.token_hex,
+                        family_key_hex: {
+                            let raw = base64::engine::general_purpose::STANDARD
+                                .decode(blob.family_key_b64)?;
+                            hex::encode(raw)
+                        },
+                    });
+                }
+                _ => {}
             }
-            Control::PairData { blob_b64 } => {
-                use base64::Engine;
-                let dk = dh_key.context("PairData before PairAccept")?;
-                let ct = base64::engine::general_purpose::STANDARD.decode(blob_b64)?;
-                let blob: PairBlob = serde_json::from_slice(&dk.open(&ct)?)?;
-                return Ok(Paired {
-                    server_url: blob.server_url,
-                    device_id: blob.device_id,
-                    token_hex: blob.token_hex,
-                    family_key_hex: {
-                        let raw = base64::engine::general_purpose::STANDARD
-                            .decode(blob.family_key_b64)?;
-                        hex::encode(raw)
-                    },
-                });
-            }
-            _ => {}
         }
-    }
-    bail!("connection closed before PairData")
+        bail!("connection closed before PairData")
+    })
+    .await
+    .context("pairing timed out — the inviter didn't confirm in time")?
 }

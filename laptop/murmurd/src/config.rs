@@ -31,7 +31,7 @@ pub struct Config {
     pub server_url: String,
     /// Human name shown in device lists ("thinkpad", "desktop").
     pub name: String,
-    /// Minutes without input before this node reports `idle`. ~3
+    /// Seconds without input before this node reports `idle`. ~180
     #[serde(default = "default_idle")]
     pub idle_timeout_secs: u64,
     /// Clipboard offers carrying these MIME types are never synced

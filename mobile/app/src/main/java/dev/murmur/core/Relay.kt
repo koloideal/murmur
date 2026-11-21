@@ -14,6 +14,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
@@ -41,7 +42,11 @@ class Relay(
 ) {
     enum class State { CONNECTING, ONLINE, OFFLINE }
 
-    private val client = OkHttpClient()
+    // WS pings keep mobile NATs from silently dropping an idle conn;
+    // the server pings too — belt and suspenders for flaky networks.
+    private val client = OkHttpClient.Builder()
+        .pingInterval(20, TimeUnit.SECONDS)
+        .build()
     private var ws: WebSocket? = null
     private val running = AtomicBoolean(false)
     private val seq = AtomicLong(1)

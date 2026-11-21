@@ -98,7 +98,19 @@ class MediaBridge(
                     PlaybackState.STATE_PAUSED -> "paused"
                     else -> "stopped"
                 },
-                pos_ms = ps?.position ?: 0,
+                // ps.position is sampled at state-write time — while
+                // playing, advance it by wall-clock * speed so laptops
+                // extrapolate from a fresh base, not a stale one.
+                pos_ms = ps?.let {
+                    if (it.state == PlaybackState.STATE_PLAYING) {
+                        it.position + ((
+                            android.os.SystemClock.elapsedRealtime() -
+                                it.lastPositionUpdateTime
+                            ) * it.playbackSpeed).toLong()
+                    } else {
+                        it.position
+                    }
+                } ?: 0,
                 dur_ms = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0,
                 art_b64 = artB64(md),
                 ts = System.currentTimeMillis() / 1000,
