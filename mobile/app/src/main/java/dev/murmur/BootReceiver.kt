@@ -7,7 +7,9 @@ import android.content.Intent
 /** Restart the agent after reboot. No-ops until the device is provisioned. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED &&
+            dev.murmur.core.Secrets(context).provisioned
+        ) {
             MurmurService.start(context)
         }
     }

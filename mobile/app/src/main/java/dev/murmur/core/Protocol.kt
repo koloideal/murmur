@@ -1,7 +1,9 @@
 package dev.murmur.core
 
+import android.util.Base64
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
@@ -15,22 +17,37 @@ import kotlinx.serialization.json.JsonClassDiscriminator
  */
 
 val protoJson = Json {
-    classDiscriminator = "#kind" // replaced per-type below; see encode helpers
     ignoreUnknownKeys = true
+    explicitNulls = false
 }
 
 @Serializable
 data class Envelope(
     val v: Int,
     val from: String,
-    val to: String,           // "*" | "@server" | "<device-hex>"
+    val to: String, // "*" | "@server" | "<device-hex>"
     val seq: Long,
-    val payload: String,      // base64: ciphertext, or cleartext Control JSON
+    val payload: String, // base64: ciphertext, or cleartext Control JSON
 ) {
     fun toJson(): String = protoJson.encodeToString(this)
 
+    fun controlPayload(): Control? = runCatching {
+        protoJson.decodeFromString<Control>(Base64.decode(payload, Base64.NO_WRAP).decodeToString())
+    }.getOrNull()
+
     companion object {
         fun fromJson(s: String): Envelope = protoJson.decodeFromString(s)
+        fun wrap(from: String, to: String, seq: Long, ctl: Control) = Envelope(
+            v = VERSION,
+            from = from,
+            to = to,
+            seq = seq,
+            payload = Base64.encodeToString(
+                protoJson.encodeToString(ctl).encodeToByteArray(),
+                Base64.NO_WRAP,
+            ),
+        )
+
         const val SERVER = "@server"
         const val ALL = "*"
         const val VERSION = 1
@@ -74,6 +91,10 @@ sealed class Msg {
         val ts: Long,
     ) : Msg()
 
+    /**
+     * Rust `MediaCommand { #[serde(flatten)] op: MediaOp }` — flat fields:
+     * `{"t":"media_command","op":"play"}` / `"op":"seek","pos_ms":N`.
+     */
     @Serializable
     @SerialName("media_command")
     data class MediaCommand(val op: String, val pos_ms: Long? = null) : Msg()
@@ -85,6 +106,7 @@ sealed class Msg {
         val hash: Long,
         val mime: String,
         val data_b64: String,
+        val explicit: Boolean = false,
         val ts: Long,
     ) : Msg()
 
@@ -92,10 +114,6 @@ sealed class Msg {
     @SerialName("key_rotate")
     data class KeyRotate(val new_key_b64: String) : Msg()
 }
-
-// Note: MediaOp on the Rust side is an internally-tagged enum
-// ({op: play|pause|next|previous|seek}). Serialized here as plain fields
-// on MediaCommand; decode op+pos_ms accordingly. Align when implementing.
 
 /** Cleartext control-plane. Rust serde `tag = "c"`. */
 @Serializable
@@ -106,7 +124,7 @@ sealed class Control {
     data class Hello(
         val device_id: String,
         val name: String,
-        val role: String,        // "auth" | "pair"
+        val role: String, // "auth" | "pair"
         val token_hex: String? = null,
     ) : Control()
 
@@ -120,7 +138,7 @@ sealed class Control {
 
     @Serializable
     @SerialName("pair_hello")
-    data class PairHello(val pubkey_b64: String) : Control()
+    data class PairHello(val pubkey_b64: String, val name: String) : Control()
 
     @Serializable
     @SerialName("pair_accept")
@@ -130,3 +148,27 @@ sealed class Control {
     @SerialName("pair_data")
     data class PairData(val blob_b64: String) : Control()
 }
+
+/** Invite bundle — base64url JSON `{s,i,p}`, same as murmur_proto::Invite. */
+@Serializable
+data class Invite(
+    @SerialName("s") val serverUrl: String,
+    @SerialName("i") val inviter: String,
+    @SerialName("p") val session: String,
+) {
+    companion object {
+        fun decode(code: String): Invite? = runCatching {
+            val json = Base64.decode(code.trim(), Base64.URL_SAFE or Base64.NO_WRAP)
+            protoJson.decodeFromString<Invite>(json.decodeToString())
+        }.getOrNull()
+    }
+}
+
+/** DH-sealed credentials inside `Control.PairData`. */
+@Serializable
+data class PairBlob(
+    val device_id: String,
+    val token_hex: String,
+    val family_key_b64: String,
+    val server_url: String,
+)

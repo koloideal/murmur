@@ -2,10 +2,13 @@ package dev.murmur.core
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -49,6 +52,10 @@ class Relay(
     private val _state = MutableSharedFlow<State>(replay = 1)
     val state: SharedFlow<State> = _state
 
+    /** Conflated "retry now" — ConnectivityManager pokes this on network
+     *  changes so a dead period doesn't wait out the backoff. */
+    private val kicks = Channel<Unit>(Channel.CONFLATED)
+
     fun start() {
         if (running.getAndSet(true)) return
         scope.launch(Dispatchers.IO) { loop() }
@@ -57,6 +64,12 @@ class Relay(
     fun stop() {
         running.set(false)
         ws?.close(1000, "shutdown")
+    }
+
+    /** Abort the current backoff and reconnect immediately. */
+    fun kick() {
+        kicks.trySend(Unit)
+        ws?.cancel() // dead socket → next loop iteration
     }
 
     fun send(to: String, payloadJson: String, selfId: String) {
@@ -83,7 +96,11 @@ class Relay(
                 // auth rejection, DNS, TLS — all the same: back off and retry
             }
             _state.emit(State.OFFLINE)
-            delay(backoff)
+            // Sleep out the backoff unless kicked by a connectivity change.
+            select<Unit> {
+                kicks.onReceive { }
+                onTimeout(backoff) { }
+            }
             backoff = min(backoff.inWholeSeconds * 2, 60).seconds
         }
     }

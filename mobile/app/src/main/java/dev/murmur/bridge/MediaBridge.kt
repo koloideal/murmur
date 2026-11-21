@@ -5,9 +5,11 @@ import android.content.Context
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
+import android.graphics.Bitmap
 import android.media.session.PlaybackState
 import android.util.Base64
 import dev.murmur.core.Msg
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -28,6 +30,12 @@ class MediaBridge(
     private val listenerName = ComponentName(ctx, NotificationBridge::class.java)
     private var controller: MediaController? = null
     private var ticker: Job? = null
+    /** Art we already sent this track — no point resending every 5s. */
+    private var lastArtHash: Int? = null
+
+    private companion object {
+        const val ART_PX = 512
+    }
 
     private val sessionListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
@@ -92,10 +100,36 @@ class MediaBridge(
                 },
                 pos_ms = ps?.position ?: 0,
                 dur_ms = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0,
-                art_b64 = null, // TODO: md.art bitmap → downscale → PNG → b64
+                art_b64 = artB64(md),
                 ts = System.currentTimeMillis() / 1000,
             ),
         )
+    }
+
+    /**
+     * Album art → PNG → b64, only when it changed since the last publish.
+     * `Some("")` clears stale art on the laptop; `null` keeps it (heartbeat
+     * updates don't resend the image).
+     */
+    private fun artB64(md: MediaMetadata?): String? {
+        val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+        if (bmp == null) {
+            val was = lastArtHash
+            lastArtHash = null
+            return if (was == null) null else "" // tell laptops to drop it
+        }
+        val marker = bmp.generationId
+        if (lastArtHash == marker) return null
+        lastArtHash = marker
+        val scale = minOf(1f, ART_PX.toFloat() / maxOf(bmp.width, bmp.height, 1))
+        val small = if (scale < 1f) {
+            Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true)
+        } else bmp
+        val out = ByteArrayOutputStream()
+        small.compress(Bitmap.CompressFormat.PNG, 90, out)
+        if (small !== bmp) small.recycle()
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
     fun execute(cmd: Msg.MediaCommand) {

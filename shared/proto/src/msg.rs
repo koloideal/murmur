@@ -39,8 +39,13 @@ pub enum Message {
         ts: u64,
     },
 
-    /// Laptop (any, via MPRIS) → phone.
-    MediaCommand { op: MediaOp },
+    /// Laptop (any, via MPRIS) → phone. `op` is flattened so the wire is
+    /// `{"t":"media_command","op":"play"}` / `{"op":"seek","pos_ms":N}`
+    /// — flat fields the Android side can model as `op` + `pos_ms?`.
+    MediaCommand {
+        #[serde(flatten)]
+        op: MediaOp,
+    },
 
     /// Clipboard contents. `origin` = device that produced the data (for
     /// loop diagnostics), `hash` = FNV/xx of plaintext for dedup & anti-echo.

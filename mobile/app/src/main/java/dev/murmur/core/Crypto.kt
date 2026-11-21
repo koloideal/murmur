@@ -45,7 +45,59 @@ class FamilyKey(private val keyBytes: ByteArray) {
         const val NONCE_LEN = 24
         const val MAC_LEN = 16
 
-        fun fromHex(hex: String): FamilyKey = FamilyKey(hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
+        fun fromBytes(bytes: ByteArray): FamilyKey {
+            require(bytes.size == KEY_LEN) { "family key must be 32 bytes" }
+            return FamilyKey(bytes)
+        }
+
+        fun fromHex(hex: String): FamilyKey = fromBytes(hexToBytes(hex))
         fun random(): FamilyKey = FamilyKey(ByteArray(KEY_LEN).also(SecureRandom()::nextBytes))
     }
+}
+
+/** Ephemeral X25519 keypair for the pairing handshake — mirrors
+ *  murmur_proto::PairKey. `kx` keypairs are Curve25519, DH-compatible. */
+class PairKey(private val sodium: LazySodiumAndroid) {
+
+    private val pair = sodium.cryptoKxKeypair()
+
+    val public: ByteArray get() = pair.publicKey.asBytes
+    val publicB64: String
+        get() = android.util.Base64.encodeToString(public, android.util.Base64.NO_WRAP)
+
+    /** DH result — used both as SAS input and as the PairData AEAD key. */
+    fun dh(peerPublic: ByteArray): ByteArray {
+        val shared = ByteArray(32)
+        check(sodium.cryptoScalarMult(shared, pair.secretKey.asBytes, peerPublic)) {
+            "DH failed"
+        }
+        return shared
+    }
+
+    fun dhB64(peerB64: String): ByteArray =
+        dh(android.util.Base64.decode(peerB64, android.util.Base64.NO_WRAP))
+}
+
+/** Six digits from SHA-256(sorted pkA||pkB || sorted idA||idB) — byte-for-byte
+ *  murmur_proto::sas_code. Both sides compute the same value; a MITM gets
+ *  different codes. `idA`/`idB` are the raw 8 device/session id bytes. */
+fun sasCode(pubA: ByteArray, pubB: ByteArray, idA: ByteArray, idB: ByteArray): String {
+    val (loPub, hiPub) = if (pubA.contentCompareTo(pubB) > 0) pubB to pubA else pubA to pubB
+    val (loId, hiId) = if (idA.contentCompareTo(idB) > 0) idB to idA else idA to idB
+    val digest = java.security.MessageDigest.getInstance("SHA-256").apply {
+        update(loPub); update(hiPub); update(loId); update(hiId)
+    }.digest()
+    val n = (java.nio.ByteBuffer.wrap(digest, 0, 4).int.toLong() and 0xFFFFFFFFL) % 1_000_000
+    return "%06d".format(n)
+}
+
+fun hexToBytes(hex: String): ByteArray =
+    hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+private fun ByteArray.contentCompareTo(other: ByteArray): Int {
+    for (i in 0 until minOf(size, other.size)) {
+        val d = (this[i].toInt() and 0xFF) - (other[i].toInt() and 0xFF)
+        if (d != 0) return d
+    }
+    return size - other.size
 }
