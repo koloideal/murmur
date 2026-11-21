@@ -8,6 +8,7 @@ mod config;
 mod conn;
 mod ctl;
 mod feature;
+mod install;
 mod lockproc;
 mod logind;
 mod mpris;
@@ -109,6 +110,9 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         family_key_hex: paired.family_key_hex,
     };
     config::provision(&cfg, &secrets)?;
-    eprintln!("paired as {} — start murmurd", paired.device_id);
+    eprintln!("paired as {}", paired.device_id);
+    if let Err(e) = install::install_user_unit() {
+        eprintln!("(unit install skipped: {e:#} — start murmurd manually)");
+    }
     Ok(())
 }

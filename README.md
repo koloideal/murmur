@@ -42,14 +42,17 @@ The phone is a thin background agent — it only reports events and obeys comman
 ## 🚀 Quick Start
 
 ```console
-# the relay (runs on your home server, behind any TLS terminator)
+# relay: build, install as a service, bootstrap the first device
 $ cd server && cargo build --release
+$ target/release/murmur-server install        # systemd unit + Caddy hint
+$ murmur-server add-device --name my-laptop   # prints device_id + token
 
-# laptop daemon + CLI
-$ cd laptop && cargo build --release
+# laptop: provision (writes config+secrets, installs the user unit)
+$ murmurd init --server wss://murmur.example.org \
+      --name my-laptop --device-id … --token …
 
-# the Android app — open mobile/ in Android Studio or
-$ cd mobile && ./gradlew assembleRelease
+# every next device: murmurctl invite on a laptop → scan the QR
+# on the phone, or `murmurd pair --code …` on another laptop
 ```
 
 ## 📌 Design

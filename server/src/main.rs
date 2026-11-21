@@ -293,10 +293,127 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some("install") => install(&args[1..]),
         Some(other) => bail!(
-            "unknown command {other:?} — usage: murmur-server [add-device|list-devices|revoke]"
+            "unknown command {other:?} — usage: murmur-server [add-device|list-devices|revoke|install]"
         ),
     }
+}
+
+/// `murmur-server install [--addr A] [--user]` — write a systemd unit and
+/// enable the relay. System unit when /etc/systemd is writable (DynamicUser,
+/// state under /var/lib/murmur, admin socket under /run/murmur); otherwise a
+/// user unit + linger. Always prints the Caddy reverse-proxy snippet —
+/// WS upgrade needs no special handling there.
+fn install(args: &[String]) -> anyhow::Result<()> {
+    let addr = flag_value(args, "--addr").unwrap_or_else(|| "127.0.0.1:8770".into());
+    let exe = std::env::current_exe()?.display().to_string();
+    let unit_dir = PathBuf::from("/etc/systemd/system");
+    let user_mode =
+        args.iter().any(|a| a == "--user") || std::fs::metadata(&unit_dir.join(".")).is_err() || {
+            // Cheap writability probe: can we create a file in the unit dir?
+            let probe = unit_dir.join(".murmur-probe");
+            match std::fs::write(&probe, "") {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&probe);
+                    false
+                }
+                Err(_) => true,
+            }
+        };
+
+    if user_mode {
+        install_user(&exe, &addr)
+    } else {
+        install_system(&exe, &addr)
+    }?;
+    print_caddy_hint(&addr);
+    Ok(())
+}
+
+fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
+    let unit = format!(
+        "[Unit]\n\
+         Description=murmur relay server\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\n\
+         [Service]\n\
+         DynamicUser=yes\n\
+         StateDirectory=murmur\n\
+         RuntimeDirectory=murmur\n\
+         Environment=MURMUR_ADDR={addr}\n\
+         Environment=MURMUR_DEVICES=/var/lib/murmur/devices.json\n\
+         Environment=MURMUR_ADMIN_SOCK=/run/murmur/admin.sock\n\
+         ExecStart={exe}\n\
+         Restart=on-failure\n\
+         RestartSec=3\n\
+         NoNewPrivileges=yes\n\
+         PrivateTmp=yes\n\
+         ProtectSystem=strict\n\n\
+         [Install]\n\
+         WantedBy=multi-user.target\n"
+    );
+    let path = PathBuf::from("/etc/systemd/system/murmur-server.service");
+    std::fs::write(&path, &unit).context("write unit file")?;
+    run("systemctl", &["daemon-reload"])?;
+    run("systemctl", &["enable", "--now", "murmur-server.service"])?;
+    eprintln!("installed + started: {path:?}");
+    eprintln!(
+        "admin commands need: MURMUR_ADMIN_SOCK=/run/murmur/admin.sock sudo -E {exe} <cmd>\n\
+         (the socket is owned by the dynamic service user)"
+    );
+    Ok(())
+}
+
+fn install_user(exe: &str, addr: &str) -> anyhow::Result<()> {
+    let unit = format!(
+        "[Unit]\n\
+         Description=murmur relay server\n\
+         After=network-online.target\n\n\
+         [Service]\n\
+         Environment=MURMUR_ADDR={addr}\n\
+         Environment=MURMUR_DEVICES=%h/.local/share/murmur-server/devices.json\n\
+         ExecStart={exe}\n\
+         Restart=on-failure\n\
+         RestartSec=3\n\n\
+         [Install]\n\
+         WantedBy=default.target\n"
+    );
+    let dir = PathBuf::from(std::env::var_os("HOME").context("no HOME")?)
+        .join(".config/systemd/user");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("murmur-server.service");
+    std::fs::write(&path, &unit)?;
+    std::fs::create_dir_all(
+        PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".local/share/murmur-server"),
+    )?;
+    run("systemctl", &["--user", "daemon-reload"])?;
+    run("systemctl", &["--user", "enable", "--now", "murmur-server.service"])?;
+    // Survives logout; failure is non-fatal — needs polkit/root on some systems.
+    if run("loginctl", &["enable-linger"]).is_err() {
+        eprintln!("hint: run `loginctl enable-linger $USER` so it survives logout");
+    }
+    eprintln!("installed + started (user unit): {path:?}");
+    Ok(())
+}
+
+fn run(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
+    let status = std::process::Command::new(cmd)
+        .args(args)
+        .status()
+        .with_context(|| format!("spawn {cmd}"))?;
+    status.success().then_some(()).context(format!(
+        "{cmd} {} exited {status}",
+        args.join(" ")
+    ))
+}
+
+fn print_caddy_hint(addr: &str) {
+    eprintln!(
+        "\nTLS + public endpoint — one Caddyfile block (WebSocket upgrade is proxied as-is):\n\
+         \n  murmur.example.org {{\n      reverse_proxy {addr}\n  }}\n"
+    );
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {

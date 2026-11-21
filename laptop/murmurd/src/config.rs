@@ -147,7 +147,10 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
         family_key_hex: hex::encode(FamilyKey::random().0),
     };
     provision(&cfg, &secrets)?;
-    eprintln!("device {id} provisioned — start murmurd");
+    eprintln!("device {id} provisioned");
+    if let Err(e) = crate::install::install_user_unit() {
+        eprintln!("(unit install skipped: {e:#} — start murmurd manually)");
+    }
     Ok(())
 }
 
