@@ -38,7 +38,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
 
     // Lock votes: [logind, locker-process]. Any true → session locked.
     let mut votes = [false; 2];
-    let mut locked = |votes: &[bool; 2]| votes.iter().any(|v| *v);
+    let locked = |votes: &[bool; 2]| votes.iter().any(|v| *v);
 
     let mut logind_rx = match logind::watch().await {
         Ok(w) => {

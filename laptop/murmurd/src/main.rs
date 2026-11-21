@@ -15,6 +15,7 @@ mod notify;
 mod pair;
 mod presence;
 mod state;
+mod wlclip;
 mod wlidle;
 
 use anyhow::Context;

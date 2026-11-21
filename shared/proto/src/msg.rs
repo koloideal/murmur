@@ -44,13 +44,17 @@ pub enum Message {
 
     /// Clipboard contents. `origin` = device that produced the data (for
     /// loop diagnostics), `hash` = FNV/xx of plaintext for dedup & anti-echo.
-    /// Routing rules: laptops broadcast to "*"; only the active laptop also
-    /// targets the phone. Phone pushes to "*" but only the active laptop applies.
+    /// `explicit` = pushed by a deliberate user action (phone share /
+    /// process-text) rather than passive sync — laptops apply such clips
+    /// only when they're the active node. Laptops broadcast with
+    /// `explicit=false` (peer sync); the phone applies only clips that
+    /// came from the active node.
     Clipboard {
         origin: DeviceId,
         hash: u64,
         mime: String,
         data_b64: String,
+        explicit: bool,
         ts: u64,
     },
 

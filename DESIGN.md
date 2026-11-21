@@ -83,7 +83,7 @@ ListDevices, PairHello, PairAccept), payload без семейного ключ�
 | `NotificationDismiss`  | любой → `*`          | `{key}` |
 | `MediaState`           | phone → `*`          | `{player, title, artist, album, status, pos_ms, dur_ms, art?}` |
 | `MediaCommand`         | laptop → phone       | `{op: play|pause|next|prev|seek(pos_ms)}` |
-| `Clipboard`            | любой → см. правила  | `{origin, hash, mime, data, ts}` |
+| `Clipboard`            | любой → см. правила  | `{origin, hash, mime, data_b64, explicit, ts}` |
 | `KeyRotate`            | любой authed → `*`   | новый `K` (при отзыве устройства) |
 
 `seq` монотонен на отправителя; получатель отбрасывает `(from, seq)` старше
@@ -107,16 +107,18 @@ murmurd вычисляет локальное состояние:
 - Ноут→ноут: любое локальное изменение → `Clipboard` на `*`, применяют все.
 - Ноут→телефон: тот же `Clipboard`, но на телефон его шлёт **только узел,
   считающий себя активным** (`to=phone`).
-- Телефон→ноуты: `Clipboard` на `*` по явному действию (share / process-text);
-  применяет только активный ноут («отправить на тот, за которым сижу»).
+- Телефон→ноуты: `Clipboard{explicit=true}` на `*` по явному действию
+  (share / process-text); применяет только активный ноут («отправить на тот,
+  за которым сижу»). Ноуты шлют `explicit=false` — применяют все.
 - Анти-эхо: узел хранит `last_hash` применённого/отправленного. Watcher при
   входящем `hash == last_hash` игнорирует; при применении удалённого значения
   выставляет `expected_hash`, чтобы свой же watcher не зациклил отправку.
 - Типы: `text/plain`, `text/uri-list`, `image/png`. Файлы — v2.
-- Секреты: не отправлять, если в offer есть `x-kde-passwordManagerHint` или
-  аналогичные MIME-маркеры, или `sensitive`-флаг `ext-data-control-v1`.
-  (Wayland не сообщает app-источник буфера — per-app denylist только через
-  косвенный хак с `activewindow`, не делаем в v1.)
+- Секреты: не отправлять, если **любой** MIME в offer попадает в denylist
+  (`clipboard_mime_deny`, дефолт — `x-kde-passwordManagerHint`; менеджеры
+  паролей мечут клипы этим маркером рядом с `text/plain`). Wayland не
+  сообщает app-источник буфера — per-app denylist только через косвенный
+  хак с `activewindow`, не делаем в v1.
 
 ## Уведомления
 
