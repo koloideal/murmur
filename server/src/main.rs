@@ -751,8 +751,24 @@ async fn handle_control(
             shared.register(device_id, name, token_hash_hex);
         }
         Control::RevokeDevice { device_id } => {
-            info!("{from} revoked device {device_id}");
-            shared.revoke(&device_id);
+            // Self-revoke only — a compromised device must not be able to
+            // kick others out of the family. Admin revokes go through the
+            // unix socket (`murmur-server revoke`).
+            if device_id == from {
+                info!("{from} revoked itself");
+                shared.revoke(&device_id);
+            } else {
+                warn!("{from} tried to revoke {device_id} — self-revoke only");
+                let reply = Envelope::control(
+                    DeviceId([0; 8]),
+                    Route::device(from),
+                    0,
+                    &Control::Error {
+                        reason: "can only revoke self".into(),
+                    },
+                )?;
+                shared.send_to(&from, &reply);
+            }
         }
         Control::RenameDevice { device_id, name } => {
             if device_id == from {

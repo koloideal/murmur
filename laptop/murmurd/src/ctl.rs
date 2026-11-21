@@ -128,6 +128,9 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             };
             Res::ok(serde_json::json!({
                 "self": shared.id.to_string(),
+                "name": shared.cfg.name,
+                "server": shared.cfg.server_url,
+                "online": shared.online.load(std::sync::atomic::Ordering::Relaxed),
                 "active_node": shared.active_node().map(|i| i.to_string()),
                 "presence": presence,
             }))
@@ -152,7 +155,9 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     })
                     .await;
                     match devs {
-                        Ok(Some(d)) => Res::ok(serde_json::json!({"devices": d})),
+                        Ok(Some(d)) => Res::ok(serde_json::json!({
+                            "self": shared.id.to_string(), "devices": d
+                        })),
                         _ => Res::err("no reply from server (offline?)"),
                     }
                 }
@@ -160,10 +165,39 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             }
         }
         Req::Revoke { device_id } => match device_id.parse::<murmur_proto::DeviceId>() {
-            Ok(device_id) => match shared.send_control(&Control::RevokeDevice { device_id }) {
-                Ok(()) => Res::ok(serde_json::json!(null)),
-                Err(e) => Res::err(e),
-            },
+            Ok(device_id) => {
+                let mut rx = shared.ctl_events.subscribe();
+                match shared.send_control(&Control::RevokeDevice { device_id }) {
+                    Ok(()) => {
+                        // The server only honours self-revoke; anything else
+                        // draws a `Control::Error` — surface it instead of
+                        // pretending the kick worked.
+                        let err = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            async {
+                                loop {
+                                    match rx.recv().await {
+                                        Ok((_, Control::Error { reason })) => {
+                                            return Some(reason);
+                                        }
+                                        Ok(_) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            return None;
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+                        match err {
+                            Ok(Some(reason)) => Res::err(reason),
+                            _ => Res::ok(serde_json::json!(null)),
+                        }
+                    }
+                    Err(e) => Res::err(e),
+                }
+            }
             Err(e) => Res::err(e),
         },
         Req::Invite => {
@@ -172,6 +206,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "code": invite.encode(),
                 "short": invite.code,
                 "session": invite.session.to_string(),
+                "server": shared.cfg.server_url,
             }))
         }
         Req::Pair => Res::ok(serde_json::json!({"pending": shared.pair_pending()})),

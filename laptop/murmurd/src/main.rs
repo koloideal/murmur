@@ -45,14 +45,36 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // rustls needs an explicit crypto provider — tokio-tungstenite pulls
+    // it featureless, so ring is wired in murmurd's own Cargo.toml. Must
+    // run before `pair` too — it opens a wss connection of its own.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // `murmurd init` / `murmurd pair` — one-shot provisioning paths,
     // neither starts the daemon.
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("init") => return config::init(&args[1..]),
         Some("pair") => return pair_join(&args[1..]).await,
-        _ => {}
+        Some("install") => return install::install_user_unit(),
+        Some("-h") | Some("--help") | Some("help") => {
+            eprint!(
+                "murmurd — laptop daemon\n\n\
+                 usage: murmurd            run the daemon (no args)\n\
+                 \x20      murmurd init      bootstrap: name, server, device credentials\n\
+                 \x20      murmurd pair      join via invite (`--code CODE [--server URL] [--name NAME]`)\n\
+                 \x20      murmurd install   install + enable the systemd user unit\n\n\
+                 control a running daemon with murmurctl\n"
+            );
+            return Ok(());
+        }
+        Some(other) => anyhow::bail!("unknown command {other:?} — try `murmurd --help`"),
+        None => {}
     }
+
+    // Single instance: the lock socket is bound for the process lifetime.
+    // A second murmurd would hijack the ctl socket and the server conn.
+    let _lock = instance_lock()?;
 
     let cfg = config::Config::load().context("load config")?;
     let secrets = config::Secrets::load()
@@ -81,6 +103,28 @@ async fn main() -> anyhow::Result<()> {
     // All tasks are daemons; first error shuts everything down.
     futures_util::future::try_join_all(tasks).await?;
     Ok(())
+}
+
+/// Bind `$XDG_RUNTIME_DIR/murmur.lock` — a unix socket nobody accepts.
+/// EADDRINUSE means either a live murmurd or a stale file; probing a
+/// connect tells them apart (stale files refuse connections).
+fn instance_lock() -> anyhow::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::net::UnixListener;
+    let path = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("murmur.lock");
+    match UnixListener::bind(&path) {
+        Ok(l) => Ok(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                anyhow::bail!("murmurd is already running (lock: {})", path.display());
+            }
+            std::fs::remove_file(&path)?; // stale lock from a dead instance
+            Ok(UnixListener::bind(&path)?)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `murmurd pair --code <invite> [--name X]` — join the family through an

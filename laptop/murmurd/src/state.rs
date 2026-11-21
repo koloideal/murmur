@@ -4,7 +4,7 @@ use murmur_proto::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
 pub fn now_ts() -> u64 {
@@ -62,6 +62,8 @@ pub struct Shared {
     /// Inviter-side pairing sessions. Cross-cutting: conn feeds PairHello,
     /// ctl drives invite/accept/confirm.
     pub pair: Mutex<Pairing>,
+    /// True between HelloOk and the socket's death — for `murmurctl status`.
+    pub online: AtomicBool,
 }
 
 impl Shared {
@@ -81,6 +83,7 @@ impl Shared {
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
+            online: AtomicBool::new(false),
         })
     }
 

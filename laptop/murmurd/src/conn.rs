@@ -24,6 +24,7 @@ pub async fn run(
             Ok(()) => info!("connection closed cleanly"),
             Err(e) => warn!("connection lost: {e:#}"),
         }
+        shared.online.store(false, std::sync::atomic::Ordering::Relaxed);
         shared.note_presence_offline();
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -48,7 +49,10 @@ async fn connect_once(
 
     match source.next().await {
         Some(Ok(Ws::Text(t))) => match serde_json::from_str::<Control>(&t) {
-            Ok(Control::HelloOk) => info!("authed to {}", shared.cfg.server_url),
+            Ok(Control::HelloOk) => {
+                shared.online.store(true, std::sync::atomic::Ordering::Relaxed);
+                info!("authed to {}", shared.cfg.server_url);
+            }
             Ok(Control::HelloErr { reason }) => anyhow::bail!("auth rejected: {reason}"),
             other => anyhow::bail!("unexpected hello reply: {other:?}"),
         },

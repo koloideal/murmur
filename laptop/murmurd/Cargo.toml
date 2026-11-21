@@ -22,3 +22,4 @@ zbus.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 base64 = "0.22"
+rustls = { version = "0.23", features = ["ring"] }
