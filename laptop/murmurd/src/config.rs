@@ -20,6 +20,11 @@ fn data_dir() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share").join("murmur")
 }
 
+/// ~/.cache/murmur — artwork and other transient payloads.
+pub(crate) fn cache_dir() -> PathBuf {
+    xdg_dir("XDG_CACHE_HOME", ".cache").join("murmur")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// wss://host[:port]/murmur
