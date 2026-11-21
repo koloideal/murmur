@@ -1,0 +1,144 @@
+package dev.murmur.core
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.math.min
+import kotlin.time.Duration.Companion.seconds
+
+/**
+ * The deep module: persistent WSS connection to murmur-server.
+ *
+ * Interface for the rest of the app:
+ *   val relay = Relay(url, helloJson = { Control.Hello(...) }, scope)
+ *   relay.start()
+ *   relay.incoming.collect { env -> … }   // raw envelopes in
+ *   relay.send(env)                        // raw envelopes out
+ *
+ * Everything else — reconnect with backoff, auth handshake, queueing while
+ * offline — is inside. Callers never see connection state beyond [state].
+ */
+class Relay(
+    private val url: String,
+    private val hello: () -> Control.Hello,
+    private val scope: CoroutineScope,
+    private val onAuthed: suspend () -> Unit = {},
+) {
+    enum class State { CONNECTING, ONLINE, OFFLINE }
+
+    private val client = OkHttpClient()
+    private var ws: WebSocket? = null
+    private val running = AtomicBoolean(false)
+    private val seq = AtomicLong(1)
+
+    private val _incoming = MutableSharedFlow<Envelope>(extraBufferCapacity = 256)
+    val incoming: SharedFlow<Envelope> = _incoming
+
+    private val _state = MutableSharedFlow<State>(replay = 1)
+    val state: SharedFlow<State> = _state
+
+    fun start() {
+        if (running.getAndSet(true)) return
+        scope.launch(Dispatchers.IO) { loop() }
+    }
+
+    fun stop() {
+        running.set(false)
+        ws?.close(1000, "shutdown")
+    }
+
+    fun send(to: String, payloadJson: String, selfId: String) {
+        val env = Envelope(
+            v = Envelope.VERSION,
+            from = selfId,
+            to = to,
+            seq = seq.getAndIncrement(),
+            payload = payloadJson,
+        )
+        // Drop silently while offline — live-only by design.
+        ws?.send(env.toJson())
+    }
+
+    private suspend fun loop() {
+        var backoff = 1.seconds
+        while (running.get()) {
+            _state.emit(State.CONNECTING)
+            try {
+                // Suspends until the socket dies. `true` = we got through auth,
+                // so the link itself was healthy → reset backoff.
+                if (connectOnce()) backoff = 1.seconds
+            } catch (_: Throwable) {
+                // auth rejection, DNS, TLS — all the same: back off and retry
+            }
+            _state.emit(State.OFFLINE)
+            delay(backoff)
+            backoff = min(backoff.inWholeSeconds * 2, 60).seconds
+        }
+    }
+
+    /**
+     * Drives one socket until it dies: send Hello, wait HelloOk, then pump
+     * incoming text frames into [_incoming].
+     * Returns `true` if auth succeeded before the socket closed.
+     */
+    private suspend fun connectOnce(): Boolean =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            var authed = false
+            val socket = client.newWebSocket(
+                Request.Builder().url(url).build(),
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send(protoJson.encodeToString(Control.serializer(), hello()))
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        if (!authed) {
+                            when (val ctl = runCatching {
+                                protoJson.decodeFromString(Control.serializer(), text)
+                            }.getOrNull()) {
+                                is Control.HelloOk -> {
+                                    authed = true
+                                    scope.launch {
+                                        _state.emit(State.ONLINE)
+                                        onAuthed()
+                                    }
+                                }
+                                is Control.HelloErr -> {
+                                    if (cont.isActive) {
+                                        cont.resumeWithException(RelayAuthException(ctl.reason))
+                                    }
+                                }
+                                else -> {}
+                            }
+                            return
+                        }
+                        runCatching { Envelope.fromJson(text) }.getOrNull()?.let {
+                            _incoming.tryEmit(it)
+                        }
+                    }
+
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = done()
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = done()
+
+                    private fun done() {
+                        if (cont.isActive) cont.resume(authed)
+                    }
+                },
+            )
+            cont.invokeOnCancellation { socket.cancel() }
+        }
+}
+
+class RelayAuthException(reason: String) : Exception("server rejected auth: $reason")

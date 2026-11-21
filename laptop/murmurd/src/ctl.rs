@@ -1,0 +1,131 @@
+//! murmurctl control socket: $XDG_RUNTIME_DIR/murmur.sock, newline-delimited
+//! JSON. All daemon ops go through here — no other UI on laptops.
+
+use crate::feature::{Feature, FeatureCtx};
+use crate::state::Shared;
+use murmur_proto::Control;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
+use tracing::{info, warn};
+
+#[derive(Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+enum Req {
+    Status,
+    Devices,
+    Revoke { device_id: String },
+    Pair,
+    Send { data_b64: String },
+}
+
+#[derive(Serialize)]
+struct Res {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl Res {
+    fn ok(data: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    fn err(e: impl std::fmt::Display) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error: Some(e.to_string()),
+        }
+    }
+}
+
+fn sock_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("murmur.sock")
+}
+
+pub fn feature() -> Feature {
+    Feature::new("ctl", None, |ctx| Box::pin(run(ctx)))
+}
+
+async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
+    let shared = ctx.shared;
+    let path = sock_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path)?;
+    info!("ctl socket: {}", path.display());
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle(stream, shared).await {
+                warn!("ctl: {e:#}");
+            }
+        });
+    }
+}
+
+async fn handle(stream: tokio::net::UnixStream, shared: Arc<Shared>) -> anyhow::Result<()> {
+    let (r, mut w) = stream.into_split();
+    let mut lines = BufReader::new(r).lines();
+    while let Some(line) = lines.next_line().await? {
+        let res = match serde_json::from_str::<Req>(&line) {
+            Ok(req) => dispatch(&shared, req).await,
+            Err(e) => {
+                warn!("ctl parse: {e}");
+                Res::err("bad request")
+            }
+        };
+        w.write_all(serde_json::to_string(&res)?.as_bytes()).await?;
+        w.write_all(b"\n").await?;
+    }
+    Ok(())
+}
+
+async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
+    match req {
+        Req::Status => {
+            let presence = {
+                let m = shared.presence.lock().unwrap();
+                m.iter()
+                    .map(|(id, (s, ts))| {
+                        serde_json::json!({
+                            "device": id.to_string(), "state": s, "ts": ts
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            Res::ok(serde_json::json!({
+                "self": shared.id.to_string(),
+                "active_node": shared.active_node().map(|i| i.to_string()),
+                "presence": presence,
+            }))
+        }
+        Req::Devices => match shared.send_control(&Control::ListDevices) {
+            // TODO: await the server's Devices reply via ctl_events and return it
+            Ok(()) => Res::ok(serde_json::json!("request sent")),
+            Err(e) => Res::err(e),
+        },
+        Req::Revoke { device_id } => match device_id.parse::<murmur_proto::DeviceId>() {
+            Ok(device_id) => match shared.send_control(&Control::RevokeDevice { device_id }) {
+                Ok(()) => Res::ok(serde_json::json!(null)),
+                Err(e) => Res::err(e),
+            },
+            Err(e) => Res::err(e),
+        },
+        // TODO: pair = drive PairHello/PairAccept + SAS display + confirm flow
+        // TODO: send = seal Clipboard msg from stdin payload (debug path)
+        Req::Pair | Req::Send { .. } => Res::err("not implemented"),
+    }
+}

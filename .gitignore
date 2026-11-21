@@ -1,0 +1,12 @@
+**/target/
+
+# server registry — contains device token hashes
+devices.json
+devices.tmp
+
+# android
+mobile/.gradle/
+mobile/local.properties
+mobile/**/build/
+*.apk
+*.keystore

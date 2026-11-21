@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["murmurd", "murmurctl"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+murmur-proto = { path = "../shared/proto" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.27"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+hex = "0.4"
+zbus = "5"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

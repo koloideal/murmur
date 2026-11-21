@@ -1,0 +1,12 @@
+[package]
+name = "murmurctl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "murmur laptop CLI: pair, status, devices, revoke, send"
+
+[dependencies]
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+base64 = "0.22"
