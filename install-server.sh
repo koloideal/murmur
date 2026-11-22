@@ -7,19 +7,20 @@
 # tunes whichever firewall exists (ufw / firewalld), installs the
 # systemd service and prints the bootstrap code.
 # Flags for non-interactive runs:
-#   --domain D  --addr A  --email E  --no-proxy  --no-firewall  --yes
+#   --domain D  --addr A  --email E  --family-name N  --no-proxy  --no-firewall  --yes
 set -eu
 
 REPO="${MURMUR_REPO:-koloideal/murmur}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 
-DOMAIN="" ADDR="" EMAIL="" YES=""
+DOMAIN="" ADDR="" EMAIL="" FAMILY="" YES=""
 PROXY_CFG=auto FW_CFG=auto
 while [ $# -gt 0 ]; do
     case "$1" in
         --domain)      DOMAIN="$2"; shift 2 ;;
         --addr)        ADDR="$2"; shift 2 ;;
         --email)       EMAIL="$2"; shift 2 ;;
+        --family-name) FAMILY="$2"; shift 2 ;;
         --no-proxy)    PROXY_CFG=no; shift ;;
         --no-firewall) FW_CFG=no; shift ;;
         --yes|-y)      YES=yes; shift ;;
@@ -125,10 +126,12 @@ askyn() {
 fw_open() {
     port=$1
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow "$port/tcp" >/dev/null && ok "ufw: $port/tcp allowed"
+        ufw allow "$port/tcp" >/dev/null && ok "ufw: $port/tcp allowed" || \
+            warn "ufw allow $port/tcp failed"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-port="$port/tcp" >/dev/null && \
-            firewall-cmd --reload >/dev/null && ok "firewalld: $port/tcp allowed"
+            firewall-cmd --reload >/dev/null && ok "firewalld: $port/tcp allowed" || \
+            warn "firewalld rule for $port/tcp failed"
     elif command -v nft >/dev/null 2>&1; then
         warn "nftables: open $port/tcp — nft add rule inet filter input tcp dport $port accept"
     elif command -v iptables >/dev/null 2>&1; then
@@ -166,6 +169,10 @@ case "$PROXY" in
     nginx|caddy) ADDR=$(ask v_addr "127.0.0.1:8770" "relay listen address (localhost — proxy terminates TLS)") ;;
     *)           ADDR=$(ask v_addr "0.0.0.0:8770" "relay listen address") ;;
 esac
+
+if [ -z "$FAMILY" ]; then
+    FAMILY=$(ask "" "" "family name — shown in list-devices/status (optional)")
+fi
 
 # flag-supplied values are validated too (interactive answers already are)
 v_domain "$DOMAIN" || exit 1
@@ -208,15 +215,22 @@ server {
 }
 EOF
         ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
-        nginx -t && systemctl reload nginx
-        ok "$vh enabled"
+        if nginx -t && systemctl reload nginx; then
+            ok "$vh enabled"
+        else
+            warn "nginx -t failed — vhost written but not enabled; fix nginx and reload manually"
+        fi
         printf '\n'
 
         if ! command -v certbot >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1 && \
                askyn y "certbot not installed — install certbot + nginx plugin via apt?"; then
-                apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
-                ok "certbot installed"
+                if apt-get update -qq && \
+                   apt-get install -y -qq certbot python3-certbot-nginx >/dev/null; then
+                    ok "certbot installed"
+                else
+                    warn "apt install of certbot failed"
+                fi
                 printf '\n'
             fi
         fi
@@ -272,7 +286,15 @@ fi
 
 # ---- systemd unit + start (idempotent)
 step "systemd service"
-"$PREFIX/murmur-server" install --addr "$ADDR" >/dev/null
+was_active=""
+if systemctl is-active --quiet murmur-server 2>/dev/null; then was_active=yes; fi
+if [ -n "$FAMILY" ]; then
+    "$PREFIX/murmur-server" install --addr "$ADDR" --family-name "$FAMILY" >/dev/null
+else
+    "$PREFIX/murmur-server" install --addr "$ADDR" >/dev/null
+fi
+# enable --now only starts an inactive unit — restart when upgrading in place
+if [ -n "$was_active" ]; then systemctl restart murmur-server; fi
 ok "murmur-server.service enabled + started ($ADDR)"
 
 sleep 1
@@ -281,15 +303,34 @@ code=$(journalctl -u murmur-server -n 30 --no-pager 2>/dev/null \
 
 if [ -n "$DOMAIN" ]; then EP="wss://$DOMAIN"; else EP="ws://$ADDR"; fi
 
-printf '\n  %s┌─%s %s murmur-server is up %s\n' "$C_AC" "$R0" "$B" "$R0"
-printf '  %s│%s\n' "$C_AC" "$R0"
-printf '  %s│%s   endpoint     %s%s%s\n' "$C_AC" "$R0" "$C_CY" "$EP" "$R0"
+# vlen: visible length (strip ANSI escapes, count chars not bytes)
+vlen() { printf '%s' "$1" | sed "s/$(printf '\033')\\[[0-9;]*m//g" | wc -m; }
+
+# box LINE... — full frame, auto-width on the longest visible line
+box() {
+    w=0
+    for _l in "$@"; do
+        _n=$(vlen "$_l")
+        if [ "$_n" -gt "$w" ]; then w=$_n; fi
+    done
+    bar=""; _i=0; while [ $_i -lt $((w + 2)) ]; do bar="${bar}─"; _i=$((_i + 1)); done
+    printf '\n  %s╭%s╮%s\n' "$C_AC" "$bar" "$R0"
+    for _l in "$@"; do
+        printf '  %s│%s %s%*s %s│%s\n' "$C_AC" "$R0" "$_l" $((w - $(vlen "$_l"))) '' "$C_AC" "$R0"
+    done
+    printf '  %s╰%s╯%s\n\n' "$C_AC" "$bar" "$R0"
+}
+
+lines="${B}murmur-server is up${R0}|endpoint    ${C_CY}$EP${R0}"
+if [ -n "$FAMILY" ]; then lines="$lines|family      $FAMILY"; fi
 if [ -n "$code" ]; then
     short=${code##*bootstrap code: }
-    printf '  %s│%s   bootstrap    %s%s%s%s  (one-shot, founder becomes the family)\n' "$C_AC" "$R0" "$B" "$C_GR" "$short" "$R0"
-    printf '  %s│%s\n' "$C_AC" "$R0"
-    printf '  %s│%s   first laptop:  %smurmurd pair --server %s --code %s%s\n' "$C_AC" "$R0" "$B" "$EP" "$short" "$R0"
+    lines="$lines|bootstrap   ${B}${C_GR}$short${R0}  ${D2}(one-shot — first device becomes the founder)${R0}"
+    lines="$lines||${B}first laptop:${R0}  murmurd pair --server $EP --code $short"
 else
-    printf '  %s│%s   family already exists — invite new devices via %smurmurctl invite%s\n' "$C_AC" "$R0" "$B" "$R0"
+    lines="$lines||family exists — invite new devices via ${B}murmurctl invite${R0}"
 fi
-printf '  %s└────────────────────────────────────────%s\n\n' "$C_AC" "$R0"
+OLDIFS=$IFS; IFS='|'; set -f
+# shellcheck disable=SC2086
+set -- $lines; set +f; IFS=$OLDIFS
+box "$@"

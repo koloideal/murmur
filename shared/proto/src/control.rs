@@ -73,6 +73,10 @@ pub enum Control {
     /// Server → device.
     Devices {
         devices: Vec<DeviceInfo>,
+        /// Family name, when the admin gave the relay one
+        /// (`--family-name`). Older relays omit it.
+        #[serde(default)]
+        family_name: Option<String>,
     },
 
     /// Server → device: generic control error.

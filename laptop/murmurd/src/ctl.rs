@@ -142,7 +142,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     let devs = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                         loop {
                             match rx.recv().await {
-                                Ok((_, Control::Devices { devices })) => return Some(devices),
+                                Ok((_, Control::Devices {
+                                    devices,
+                                    family_name,
+                                })) => return Some((devices, family_name)),
                                 Ok(_) => continue,
                                 // Skip lagged gaps; Closed means nobody
                                 // is sending anymore — give up.
@@ -155,8 +158,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     })
                     .await;
                     match devs {
-                        Ok(Some(d)) => Res::ok(serde_json::json!({
-                            "self": shared.id.to_string(), "devices": d
+                        Ok(Some((d, fam))) => Res::ok(serde_json::json!({
+                            "self": shared.id.to_string(),
+                            "family": fam,
+                            "devices": d,
                         })),
                         _ => Res::err("no reply from server (offline?)"),
                     }

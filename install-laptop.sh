@@ -94,10 +94,27 @@ if [ $# -gt 0 ]; then
     exec "$BIN/murmurd" pair "$@"
 fi
 
-printf '\n  %s┌─%s %s join the family %s\n' "$C_AC" "$R0" "$B" "$R0"
-printf '  %s│%s\n' "$C_AC" "$R0"
-printf '  %s│%s   founder (fresh relay)    %smurmurd pair --server wss://YOUR.DOMAIN --code <bootstrap code>%s\n' "$C_AC" "$R0" "$B" "$R0"
-printf '  %s│%s   invited by another node  %smurmurd pair --code <XXXX-XXXX or invite string>%s\n' "$C_AC" "$R0" "$B" "$R0"
-printf '  %s│%s\n' "$C_AC" "$R0"
-printf '  %s│%s   then:  %ssystemctl --user start murmurd%s   and   %smurmurd doctor%s\n' "$C_AC" "$R0" "$B" "$R0" "$B" "$R0"
-printf '  %s└────────────────────────────────────────%s\n\n' "$C_AC" "$R0"
+# vlen: visible length (strip ANSI escapes, count chars not bytes)
+vlen() { printf '%s' "$1" | sed "s/$(printf '\033')\\[[0-9;]*m//g" | wc -m; }
+
+# box LINE... — full frame, auto-width on the longest visible line
+box() {
+    w=0
+    for _l in "$@"; do
+        _n=$(vlen "$_l")
+        if [ "$_n" -gt "$w" ]; then w=$_n; fi
+    done
+    bar=""; _i=0; while [ $_i -lt $((w + 2)) ]; do bar="${bar}─"; _i=$((_i + 1)); done
+    printf '\n  %s╭%s╮%s\n' "$C_AC" "$bar" "$R0"
+    for _l in "$@"; do
+        printf '  %s│%s %s%*s %s│%s\n' "$C_AC" "$R0" "$_l" $((w - $(vlen "$_l"))) '' "$C_AC" "$R0"
+    done
+    printf '  %s╰%s╯%s\n\n' "$C_AC" "$bar" "$R0"
+}
+
+box "${B}join the family${R0}" \
+    "" \
+    "founder (fresh relay)    ${B}murmurd pair --server wss://YOUR.DOMAIN --code <bootstrap code>${R0}" \
+    "invited by another node  ${B}murmurd pair --code <XXXX-XXXX or invite string>${R0}" \
+    "" \
+    "then:  ${B}systemctl --user start murmurd${R0}   and   ${B}murmurd doctor${R0}"

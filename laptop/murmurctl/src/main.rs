@@ -215,6 +215,9 @@ fn cmd_devices(all: bool) -> anyhow::Result<()> {
         println!("{}", p.dim("no devices in the registry"));
         return Ok(());
     }
+    if let Some(fam) = d["family"].as_str() {
+        println!("{}", p.dim(format!("family · {fam}")));
+    }
     let w = devs
         .iter()
         .map(|x| x["name"].as_str().unwrap_or("?").len())

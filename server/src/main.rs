@@ -70,6 +70,8 @@ struct Shared {
     devices_path: PathBuf,
     /// Persistent registry, mirrored to devices.json on mutation.
     devices: Mutex<HashMap<DeviceId, DeviceRec>>,
+    /// Family name — set via --family-name, stored in devices.json.
+    family_name: Mutex<Option<String>>,
     /// Live connections.
     conns: Mutex<HashMap<DeviceId, Conn>>,
     /// Open pair sessions: session → inviter. Lets a joiner reach the
@@ -91,8 +93,18 @@ struct Bootstrap {
 
 impl Shared {
     fn load(path: PathBuf) -> anyhow::Result<Self> {
+        // devices.json is the device map + an optional "family_name" key.
+        let mut family_name = None;
         let devices: HashMap<DeviceId, DeviceRec> = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).context("parse devices.json")?,
+            Ok(s) => {
+                let mut v: serde_json::Value =
+                    serde_json::from_str(&s).context("parse devices.json")?;
+                family_name = v
+                    .as_object_mut()
+                    .and_then(|o| o.remove("family_name"))
+                    .and_then(|x| x.as_str().map(String::from));
+                serde_json::from_value(v).context("parse devices.json")?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e).context("read devices.json"),
         };
@@ -110,6 +122,7 @@ impl Shared {
         Ok(Self {
             devices_path: path,
             devices: Mutex::new(devices),
+            family_name: Mutex::new(family_name),
             conns: Mutex::new(HashMap::new()),
             open_pairs: Mutex::new(HashMap::new()),
             bootstrap: Mutex::new(bootstrap),
@@ -129,8 +142,15 @@ impl Shared {
     fn persist(&self) {
         let devices = self.devices.lock().unwrap();
         let tmp = self.devices_path.with_extension("tmp");
-        match serde_json::to_string_pretty(&*devices) {
-            Ok(json) => {
+        let json = serde_json::to_value(&*devices).ok().and_then(|v| {
+            let mut m = v.as_object()?.clone();
+            if let Some(n) = self.family_name.lock().unwrap().as_ref() {
+                m.insert("family_name".into(), n.clone().into());
+            }
+            serde_json::to_string_pretty(&m).ok()
+        });
+        match json {
+            Some(json) => {
                 let res = self
                     .devices_path
                     .parent()
@@ -143,7 +163,7 @@ impl Shared {
                     warn!("persist devices.json: {e}");
                 }
             }
-            Err(e) => warn!("serialize devices.json: {e}"),
+            None => warn!("serialize devices.json: devices map is not a json object"),
         }
     }
 
@@ -329,7 +349,11 @@ fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
             })
         }
         AdminReq::ListDevices => {
-            serde_json::json!({"ok": true, "data": shared.device_list()})
+            serde_json::json!({
+                "ok": true,
+                "family": *shared.family_name.lock().unwrap(),
+                "data": shared.device_list(),
+            })
         }
         AdminReq::Revoke { device_id } => {
             if shared.revoke(&device_id) {
@@ -369,6 +393,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("list-devices") => {
             let res = admin_req(&AdminReq::ListDevices, &args)?;
+            if let Some(fam) = res["family"].as_str() {
+                println!("family: {fam}");
+            }
             for d in res["data"].as_array().into_iter().flatten() {
                 println!(
                     "{}  {}  {}  {}  {}",
@@ -411,7 +438,7 @@ async fn main() -> anyhow::Result<()> {
              \x20 murmur-server add-device --name X [--admin-sock P]\n\
              \x20 murmur-server list-devices [--admin-sock P]\n\
              \x20 murmur-server revoke --id ID [--admin-sock P]\n\
-             \x20 murmur-server install [--addr A] [--user]"
+             \x20 murmur-server install [--addr A] [--family-name N] [--user]"
         ),
     }
 }
@@ -423,6 +450,10 @@ async fn main() -> anyhow::Result<()> {
 /// WS upgrade needs no special handling there.
 fn install(args: &[String]) -> anyhow::Result<()> {
     let addr = flag_value(args, "--addr").unwrap_or_else(|| "0.0.0.0:8770".into());
+    // Family name goes into ExecStart quoted — systemd strips the quotes.
+    let family_arg = flag_value(args, "--family-name")
+        .map(|f| format!(" --family-name \"{}\"", f.replace('"', "")))
+        .unwrap_or_default();
     let exe = std::env::current_exe()?.display().to_string();
     let unit_dir = PathBuf::from("/etc/systemd/system");
     let user_mode =
@@ -439,15 +470,15 @@ fn install(args: &[String]) -> anyhow::Result<()> {
         };
 
     if user_mode {
-        install_user(&exe, &addr)
+        install_user(&exe, &addr, &family_arg)
     } else {
-        install_system(&exe, &addr)
+        install_system(&exe, &addr, &family_arg)
     }?;
     print_caddy_hint(&addr);
     Ok(())
 }
 
-fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
+fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]\n\
          Description=murmur relay server\n\
@@ -457,7 +488,7 @@ fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
          DynamicUser=yes\n\
          StateDirectory=murmur\n\
          RuntimeDirectory=murmur\n\
-         ExecStart={exe} --addr {addr} --devices /var/lib/murmur/devices.json --admin-sock /run/murmur/admin.sock\n\
+         ExecStart={exe} --addr {addr} --devices /var/lib/murmur/devices.json --admin-sock /run/murmur/admin.sock{family_arg}\n\
          Restart=on-failure\n\
          RestartSec=3\n\
          NoNewPrivileges=yes\n\
@@ -478,13 +509,13 @@ fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_user(exe: &str, addr: &str) -> anyhow::Result<()> {
+fn install_user(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]\n\
          Description=murmur relay server\n\
          After=network-online.target\n\n\
          [Service]\n\
-         ExecStart={exe} --addr {addr} --devices %h/.local/share/murmur-server/devices.json\n\
+         ExecStart={exe} --addr {addr} --devices %h/.local/share/murmur-server/devices.json{family_arg}\n\
          Restart=on-failure\n\
          RestartSec=3\n\n\
          [Install]\n\
@@ -557,6 +588,12 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
         .parse()
         .context("--addr")?;
     let shared = Arc::new(Shared::load(devices_path(args))?);
+    if let Some(fam) = flag_value(args, "--family-name")
+        .or_else(|| std::env::var("MURMUR_FAMILY_NAME").ok())
+    {
+        *shared.family_name.lock().unwrap() = Some(fam);
+        shared.persist();
+    }
 
     let listener = TcpListener::bind(addr).await?;
     let admin_path = admin_sock_path(args);
@@ -865,6 +902,7 @@ async fn handle_control(
                 0,
                 &Control::Devices {
                     devices: shared.device_list(),
+                    family_name: shared.family_name.lock().unwrap().clone(),
                 },
             )?;
             shared.send_to(&from, &reply);
