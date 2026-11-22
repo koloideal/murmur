@@ -10,3 +10,4 @@ mobile/local.properties
 mobile/**/build/
 *.apk
 *.keystore
+__pycache__/
