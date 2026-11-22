@@ -34,7 +34,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.murmur.ui.theme.MurmurTheme
-import dev.murmur.ui.theme.Unbounded
 import dev.murmur.ui.widgets.homeWidgets
 
 class MainActivity : ComponentActivity() {
@@ -67,23 +66,11 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                             actions = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        "powered by kolo",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = Unbounded,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                FilledTonalIconButton(onClick = { about = true }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Outlined.HelpOutline,
+                                        contentDescription = "what is murmur",
                                     )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("🦀", style = MaterialTheme.typography.labelSmall)
-                                    Spacer(Modifier.width(8.dp))
-                                    FilledTonalIconButton(onClick = { about = true }) {
-                                        Icon(
-                                            Icons.AutoMirrored.Outlined.HelpOutline,
-                                            contentDescription = "what is murmur",
-                                        )
-                                    }
-                                    Spacer(Modifier.width(4.dp))
                                 }
                             },
                             colors = TopAppBarDefaults.topAppBarColors(

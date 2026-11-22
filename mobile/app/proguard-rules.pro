@@ -9,3 +9,10 @@
 # Wire types are matched by @SerialName, but keep them readable in
 # stack traces from the field.
 -keep class dev.murmur.core.** { *; }
+
+# zxing decodes via hints and internally-held decoder classes — R8
+# renamed them once and the scanner previewed but never decoded.
+-keep class com.google.zxing.** { *; }
+-keep class com.journeyapps.** { *; }
+-dontwarn com.google.zxing.**
+-dontwarn com.journeyapps.**

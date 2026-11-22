@@ -7,6 +7,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -134,20 +135,38 @@ suspend fun pair(
 
             // PairHello → @server, which forwards it to the inviter that
             // PairOpen'd this session — the joiner needs no inviter id.
-            ws.send(
-                Envelope.wrap(
-                    from = session,
-                    to = Envelope.SERVER,
-                    seq = seq++,
-                    ctl = Control.PairHello(
-                        pubkey_b64 = pairKey.publicB64,
-                        name = deviceName,
-                    ),
-                ).toJson(),
-            )
+            // Resend every few seconds until something answers: if the
+            // hello landed before the inviter's PairOpen (slow relay,
+            // invite typed before the laptop connected), a single shot
+            // just drops and both sides wait forever.
+            val hello = {
+                ws.send(
+                    Envelope.wrap(
+                        from = session,
+                        to = Envelope.SERVER,
+                        seq = seq++,
+                        ctl = Control.PairHello(
+                            pubkey_b64 = pairKey.publicB64,
+                            name = deviceName,
+                        ),
+                    ).toJson(),
+                )
+            }
             onStage(PairStage.AwaitingAccept(session))
 
-            val (inviter, frame) = next()
+            var inviter = ""
+            var frame: Control? = null
+            while (frame !is Control.PairAccept) {
+                hello()
+                // PairReject throws inside next(); a null here is just the
+                // retry window elapsing — resend. The outer withTimeout
+                // still bounds the whole handshake.
+                val got = withTimeoutOrNull(HELLO_RETRY_MS) { next() }
+                if (got != null) {
+                    inviter = got.first
+                    frame = got.second
+                }
+            }
             // The relay itself answering = this was the one-shot
             // bootstrap code. The founder has to be a laptop (it mints
             // the family key and confirms against the relay log).
@@ -196,4 +215,5 @@ suspend fun pair(
 }
 
 private const val TIMEOUT_MS = 180_000L
+private const val HELLO_RETRY_MS = 3_000L
 private const val ZERO_ID = "0000000000000000"

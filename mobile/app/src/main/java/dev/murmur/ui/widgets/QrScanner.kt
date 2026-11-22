@@ -68,6 +68,7 @@ fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         val haptics = LocalHapticFeedback.current
         val lifecycle = LocalLifecycleOwner.current.lifecycle
         var torch by remember { mutableStateOf(false) }
+        var hit by remember { mutableStateOf(false) }
         val view = remember {
             BarcodeView(ctx).apply {
                 decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
@@ -83,15 +84,34 @@ fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                 }
             }
             lifecycle.addObserver(obs)
-            view.resume()
-            view.decodeSingle { r ->
+            // resume() must run after the view is attached — inside a
+            // Dialog the composable is ready before the window surfaces
+            // exist, and an early resume leaves the decoder dead while
+            // the preview still draws (camera on, nothing scans).
+            val attach = object : android.view.View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: android.view.View) {
+                    view.resume()
+                }
+
+                override fun onViewDetachedFromWindow(v: android.view.View) {
+                    view.pause()
+                }
+            }
+            view.addOnAttachStateChangeListener(attach)
+            // Continuous, not decodeSingle: if the first frames decode
+            // before the surface settles, single-shot mode swallows them
+            // and never tries again.
+            view.decodeContinuous { r ->
+                if (hit) return@decodeContinuous
                 r.text?.takeIf { it.isNotBlank() }?.let {
+                    hit = true
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onResult(it)
                 }
             }
             onDispose {
                 lifecycle.removeObserver(obs)
+                view.removeOnAttachStateChangeListener(attach)
                 view.pause()
             }
         }

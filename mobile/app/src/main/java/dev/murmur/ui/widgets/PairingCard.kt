@@ -351,6 +351,26 @@ fun PairingCard() {
     }
 }
 
+/** The laptop's invite alphabet (murmur_proto CODE_ALPHABET) — typing
+ *  anything outside it can never resolve to a real session. */
+private val CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ".toSet()
+
+/** Cyrillic letters that look exactly like Latin invite characters. */
+private val CYRILLIC_TO_LATIN = mapOf(
+    'а' to 'A', 'А' to 'A',
+    'в' to 'B', 'В' to 'B',
+    'е' to 'E', 'Е' to 'E',
+    'к' to 'K', 'К' to 'K',
+    'м' to 'M', 'М' to 'M',
+    'н' to 'H', 'Н' to 'H',
+    'о' to 'O', 'О' to 'O',
+    'р' to 'P', 'Р' to 'P',
+    'с' to 'C', 'С' to 'C',
+    'т' to 'T', 'Т' to 'T',
+    'у' to 'Y', 'У' to 'Y',
+    'х' to 'X', 'Х' to 'X',
+)
+
 /** Eight cells with the dash fixed in the middle — the XXXX-XXXX
  *  shape is the form, not something the user types. A single invisible
  *  text field drives input; the cells are pure presentation. */
@@ -359,7 +379,15 @@ private fun ShortCodeField(code: String, onCode: (String) -> Unit) {
     BasicTextField(
         value = code,
         onValueChange = { v ->
-            onCode(v.filter(Char::isLetterOrDigit).uppercase().take(8))
+            // Only the invite alphabet counts. Cyrillic homoglyphs map to
+            // their Latin lookalikes — a Cyrillic Е hashes to a different
+            // session id and the relay rejects it as an unknown invite.
+            onCode(
+                v.map { CYRILLIC_TO_LATIN[it] ?: it.uppercaseChar() }
+                    .filter { it in CODE_ALPHABET }
+                    .take(8)
+                    .joinToString(""),
+            )
         },
         modifier = Modifier.fillMaxWidth(),
         keyboardOptions = KeyboardOptions(
