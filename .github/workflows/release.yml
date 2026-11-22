@@ -50,9 +50,18 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - name: build debug APK
-        run: cd mobile && ./gradlew assembleDebug --warning-mode all
-      - run: cp mobile/app/build/outputs/apk/debug/app-debug.apk murmur-android.apk
+      - name: decode signing keystore
+        run: echo "$MURMUR_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/murmur.keystore"
+        env:
+          MURMUR_KEYSTORE_B64: ${{ secrets.MURMUR_KEYSTORE_B64 }}
+      - name: build signed release APK
+        run: cd mobile && ./gradlew assembleRelease --warning-mode all
+        env:
+          MURMUR_KEYSTORE_FILE: ${{ runner.temp }}/murmur.keystore
+          MURMUR_KEYSTORE_PASSWORD: ${{ secrets.MURMUR_KEYSTORE_PASSWORD }}
+          MURMUR_KEY_ALIAS: ${{ secrets.MURMUR_KEY_ALIAS }}
+          MURMUR_KEY_PASSWORD: ${{ secrets.MURMUR_KEY_PASSWORD }}
+      - run: cp mobile/app/build/outputs/apk/release/app-release.apk murmur-android.apk
       - uses: softprops/action-gh-release@v2
         with:
           files: murmur-android.apk

@@ -13,8 +13,37 @@ android {
         applicationId = "dev.murmur"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
+        // CI runs increment it — Obtainium-style updaters compare this,
+        // not the name. Local builds stay at 1.
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "0.1.0"
+    }
+
+    signingConfigs {
+        // Release signing comes from CI secrets; without them we fall
+        // back to the debug key so `assembleRelease` still works locally.
+        create("release") {
+            val storeFile = System.getenv("MURMUR_KEYSTORE_FILE")
+            if (storeFile != null) {
+                this.storeFile = file(storeFile)
+                storePassword = System.getenv("MURMUR_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MURMUR_KEY_ALIAS")
+                keyPassword = System.getenv("MURMUR_KEY_PASSWORD")
+            } else {
+                val d = signingConfigs.getByName("debug")
+                this.storeFile = d.storeFile
+                storePassword = d.storePassword
+                keyAlias = d.keyAlias
+                keyPassword = d.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 
     buildFeatures {
