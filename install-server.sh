@@ -292,6 +292,7 @@ if [ "$FW_CFG" != "no" ]; then
                 fw_open "$port"
             fi ;;
     esac
+    printf '\n'
 fi
 
 # ---- systemd unit + start (idempotent)
