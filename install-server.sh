@@ -2,32 +2,34 @@
 # murmur relay installer — run as root:
 #   curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-server.sh | sudo sh
 #
-# Interactive: asks for the public domain, sets up the nginx vhost +
-# certbot certificate, tunes ufw, installs the systemd service and
-# prints the bootstrap code. Flags for non-interactive runs:
-#   --domain D  --addr A  --email E  --no-nginx  --no-ufw  --yes
+# Interactive: asks for the public domain, detects the proxy stack on
+# the box (nginx → vhost + certbot, caddy → Caddyfile block w/ auto TLS),
+# tunes whichever firewall exists (ufw / firewalld), installs the
+# systemd service and prints the bootstrap code.
+# Flags for non-interactive runs:
+#   --domain D  --addr A  --email E  --no-proxy  --no-firewall  --yes
 set -eu
 
 REPO="${MURMUR_REPO:-koloideal/murmur}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 
 DOMAIN="" ADDR="" EMAIL="" YES=""
-NGINX_CFG=auto UFW_CFG=auto
+PROXY_CFG=auto FW_CFG=auto
 while [ $# -gt 0 ]; do
     case "$1" in
-        --domain)   DOMAIN="$2"; shift 2 ;;
-        --addr)     ADDR="$2"; shift 2 ;;
-        --email)    EMAIL="$2"; shift 2 ;;
-        --no-nginx) NGINX_CFG=no; shift ;;
-        --no-ufw)   UFW_CFG=no; shift ;;
-        --yes|-y)   YES=yes; shift ;;
+        --domain)      DOMAIN="$2"; shift 2 ;;
+        --addr)        ADDR="$2"; shift 2 ;;
+        --email)       EMAIL="$2"; shift 2 ;;
+        --no-proxy)    PROXY_CFG=no; shift ;;
+        --no-firewall) FW_CFG=no; shift ;;
+        --yes|-y)      YES=yes; shift ;;
         *) echo "unknown flag: $1" >&2; exit 1 ;;
     esac
 done
 
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
 
-# ask VAR DEFAULT PROMPT — interactive unless --yes (then DEFAULT).
+# ask DEFAULT IGNORED PROMPT — interactive unless --yes (then DEFAULT).
 ask() {
     if [ -n "$YES" ] || ! have_tty; then
         echo "$1"; return
@@ -38,36 +40,57 @@ ask() {
 }
 
 askyn() {
-    def=$1
-    a=$(ask "$def" "" "$2 (y/n)")
+    a=$(ask "$1" "" "$2 (y/n)")
     case "$a" in
         y|Y|yes) return 0 ;;
         n|N|no)  return 1 ;;
-        *)       [ "$def" = "y" ] ;;
+        *)       [ "$1" = "y" ] ;;
     esac
+}
+
+# fw_open PORT — ufw / firewalld / print the nft rule for the rest.
+fw_open() {
+    port=$1
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "$port/tcp"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="$port/tcp" && firewall-cmd --reload
+    elif command -v nft >/dev/null 2>&1; then
+        echo "   open $port/tcp — e.g.: nft add rule inet filter input tcp dport $port accept"
+    elif command -v iptables >/dev/null 2>&1; then
+        echo "   open $port/tcp — e.g.: iptables -A INPUT -p tcp --dport $port -j ACCEPT"
+    else
+        echo "   open $port/tcp in your firewall"
+    fi
 }
 
 [ "$(id -u)" -eq 0 ] || { echo "needs root — run: curl -fsSL ... | sudo sh" >&2; exit 1; }
 
-# ---- questions first, so network failures don't waste the user's time
-if [ -z "$DOMAIN" ] && [ "$NGINX_CFG" != "no" ]; then
+# ---- questions first, so failures don't waste the user's time
+if [ -z "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
     DOMAIN=$(ask "" "" "public domain for the wss endpoint (empty = plain ws, no TLS)")
 fi
 
-if [ -n "$DOMAIN" ] && [ "$NGINX_CFG" = "auto" ]; then
-    if command -v nginx >/dev/null 2>&1; then
-        askyn y "configure nginx vhost + certbot for $DOMAIN?" && NGINX_CFG=yes || NGINX_CFG=no
+# Proxy detection: prefer what's already installed. nginx needs certbot
+# for TLS; caddy issues certs itself.
+PROXY=""
+if [ -n "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
+    if command -v nginx >/dev/null 2>&1; then found=nginx
+    elif command -v caddy >/dev/null 2>&1; then found=caddy
+    else found=""
+    fi
+    if [ -n "$found" ]; then
+        askyn y "configure $found as TLS proxy for $DOMAIN?" && PROXY=$found || PROXY=none
     else
-        echo "note: nginx not installed — skipping vhost setup" >&2
-        NGINX_CFG=no
+        echo "note: no nginx/caddy found — relay stays plain ws, TLS is on you" >&2
+        PROXY=none
     fi
 fi
 
-if [ "$NGINX_CFG" = "yes" ]; then
-    ADDR=$(ask "127.0.0.1:8770" "" "relay listen address (localhost — nginx terminates TLS)")
-else
-    ADDR=$(ask "0.0.0.0:8770" "" "relay listen address")
-fi
+case "$PROXY" in
+    nginx|caddy) ADDR=$(ask "127.0.0.1:8770" "" "relay listen address (localhost — proxy terminates TLS)") ;;
+    *)           ADDR=$(ask "0.0.0.0:8770" "" "relay listen address") ;;
+esac
 
 # ---- binary
 case "$(uname -m)" in
@@ -82,10 +105,11 @@ tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 curl -fsSL "$URL" -o "$tmp"
 install -m 755 "$tmp" "$PREFIX/murmur-server"
 
-# ---- nginx + TLS
-if [ "$NGINX_CFG" = "yes" ]; then
-    vh="/etc/nginx/sites-available/$DOMAIN"
-    cat > "$vh" <<EOF
+# ---- proxy config + TLS
+case "$PROXY" in
+    nginx)
+        vh="/etc/nginx/sites-available/$DOMAIN"
+        cat > "$vh" <<EOF
 server {
     server_name $DOMAIN;
     location / {
@@ -101,31 +125,59 @@ server {
     listen [::]:80;
 }
 EOF
-    ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
-    nginx -t && systemctl reload nginx
+        ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
+        nginx -t && systemctl reload nginx
 
-    email_flags=""
-    if [ -n "$EMAIL" ]; then email_flags="--email $EMAIL"; else
-        EMAIL=$(ask "" "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
-        [ -n "$EMAIL" ] && email_flags="--email $EMAIL" || email_flags="--register-unsafely-without-email"
-    fi
-    # shellcheck disable=SC2086
-    if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $email_flags --redirect 2>&1; then
-        echo "==> https://$DOMAIN ready"
-    else
-        echo "!! certbot failed — cert stays on :80 only; run it manually:" >&2
-        echo "   certbot --nginx -d $DOMAIN" >&2
-    fi
-fi
+        if ! command -v certbot >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1 && \
+               askyn y "certbot not installed — install certbot + nginx plugin via apt?"; then
+                apt-get update && apt-get install -y certbot python3-certbot-nginx
+            fi
+        fi
+        if command -v certbot >/dev/null 2>&1; then
+            if [ -z "$EMAIL" ]; then
+                EMAIL=$(ask "" "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
+            fi
+            [ -n "$EMAIL" ] && ef="--email $EMAIL" || ef="--register-unsafely-without-email"
+            # shellcheck disable=SC2086
+            if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $ef --redirect; then
+                echo "==> https://$DOMAIN ready"
+            else
+                echo "!! certbot failed — run it manually: certbot --nginx -d $DOMAIN" >&2
+            fi
+        else
+            echo "!! no certbot — get the cert yourself, then add 443 to $vh" >&2
+        fi
+        ;;
+    caddy)
+        cf="/etc/caddy/Caddyfile"
+        if ! grep -q "^$DOMAIN" "$cf" 2>/dev/null; then
+            cat >> "$cf" <<EOF
 
-# ---- firewall
-if [ "$UFW_CFG" != "no" ] && command -v ufw >/dev/null 2>&1; then
+$DOMAIN {
+    reverse_proxy $ADDR
+}
+EOF
+        fi
+        systemctl reload caddy 2>/dev/null || caddy reload --config "$cf" 2>/dev/null || true
+        echo "==> caddy serves https://$DOMAIN (cert is automatic)"
+        ;;
+esac
+
+# ---- firewall: only what actually needs an opening
+if [ "$FW_CFG" != "no" ]; then
+    case "$PROXY" in
+        nginx|caddy)
+            if askyn y "open 80+443/tcp in the firewall (proxy needs them from outside)?"; then
+                fw_open 80; fw_open 443
+            fi ;;
+    esac
     case "$ADDR" in
         127.0.0.1:*|localhost:*|\[::1\]:*) : ;;   # localhost — nothing to open
         *)
             port=${ADDR##*:}
-            if askyn y "open $port/tcp in ufw (relay listens on $ADDR)?"; then
-                ufw allow "$port/tcp"
+            if askyn y "open $port/tcp in the firewall (relay listens on $ADDR)?"; then
+                fw_open "$port"
             fi ;;
     esac
 fi
