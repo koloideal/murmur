@@ -22,7 +22,7 @@ else
     B= D2= R0= C_AC= C_CY= C_GR= C_YL= C_RD=
 fi
 
-step() { printf '%s  ›%s %s\n' "$C_AC$B" "$R0" "$*"; }
+step() { printf '\n%s  ›%s %s\n' "$C_AC$B" "$R0" "$*"; }
 ok()   { printf '%s  ✓%s %s\n' "$C_GR" "$R0" "$*"; }
 warn() { printf '%s  !%s %s\n' "$C_YL" "$R0" "$*" >&2; }
 die()  { printf '%s  ✗%s %s\n' "$C_RD" "$R0" "$*" >&2; exit 1; }
@@ -60,13 +60,13 @@ ask() {
     _v=$1
     while :; do
         if ! have_tty; then echo "$2"; return; fi
+        printf '\n' > /dev/tty
         printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${2:-—}" "$R0" > /dev/tty
         printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
         read -r _a < /dev/tty || _a=""
         printf '\n' > /dev/tty
         _a=${_a:-$2}
         if [ -z "$_v" ] || "$_v" "$_a"; then echo "$_a"; return; fi
-        printf '\n' > /dev/tty
     done
 }
 
@@ -77,7 +77,7 @@ askyn() {
         case "$_a" in
             y|Y|yes) return 0 ;;
             n|N|no)  return 1 ;;
-            *)       printf '  %s✗%s answer y or n (Enter = %s)\n\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
+            *)       printf '  %s✗%s answer y or n (Enter = %s)\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
         esac
     done
 }
@@ -121,7 +121,6 @@ for tool in murmurd murmurctl; do
     mv "$BIN/$tool.new" "$BIN/$tool"
     ok "$BIN/$tool"
 done
-printf '\n'
 
 # ---- PATH
 case ":$PATH:" in
@@ -143,10 +142,8 @@ case ":$PATH:" in
                 ok "PATH → $HOME/.profile"
             fi
             warn "open a new shell or run now: export PATH=\"$BIN:\$PATH\""
-            printf '\n'
         else
             warn "skipped — call the binaries by full path or add $BIN to PATH yourself"
-            printf '\n'
         fi ;;
 esac
 
@@ -176,7 +173,7 @@ if [ $# -gt 0 ]; then
     exec "$BIN/murmurd" pair "$@"
 fi
 
-if have_tty && askyn y "join the family now? (Enter = later, pair manually)"; then
+if have_tty && askyn n "join the family now?"; then
     SERVER=$(ask v_url "" "relay server URL — wss://domain or ws://ip:port")
     CODE=$(ask "" "" "invite code — XXXX-XXXX or a full invite string")
     pair_args=""

@@ -37,7 +37,7 @@ else
     B= D2= R0= C_AC= C_CY= C_GR= C_YL= C_RD=
 fi
 
-step() { printf '%s  ›%s %s\n' "$C_AC$B" "$R0" "$*"; }
+step() { printf '\n%s  ›%s %s\n' "$C_AC$B" "$R0" "$*"; }
 ok()   { printf '%s  ✓%s %s\n' "$C_GR" "$R0" "$*"; }
 warn() { printf '%s  !%s %s\n' "$C_YL" "$R0" "$*" >&2; }
 die()  { printf '%s  ✗%s %s\n' "$C_RD" "$R0" "$*" >&2; exit 1; }
@@ -99,13 +99,13 @@ ask() {
     _v=$1
     while :; do
         if [ -n "$YES" ] || ! have_tty; then echo "$2"; return; fi
+        printf '\n' > /dev/tty
         printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${2:-—}" "$R0" > /dev/tty
         printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
         read -r _a < /dev/tty || _a=""
         printf '\n' > /dev/tty
         _a=${_a:-$2}
         if [ -z "$_v" ] || "$_v" "$_a"; then echo "$_a"; return; fi
-        printf '\n' > /dev/tty
     done
 }
 
@@ -117,7 +117,7 @@ askyn() {
             y|Y|yes) return 0 ;;
             n|N|no)  return 1 ;;
             "")      [ "$1" = "y" ]; return ;;
-            *)       printf '  %s✗%s answer y or n (Enter = %s)\n\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
+            *)       printf '  %s✗%s answer y or n (Enter = %s)\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
         esac
     done
 }
@@ -226,7 +226,6 @@ EOF
         else
             warn "nginx -t failed — vhost written but not enabled; fix nginx and reload manually"
         fi
-        printf '\n'
 
         if ! command -v certbot >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1 && \
@@ -237,7 +236,6 @@ EOF
                 else
                     warn "apt install of certbot failed"
                 fi
-                printf '\n'
             fi
         fi
         if command -v certbot >/dev/null 2>&1; then
@@ -255,7 +253,6 @@ EOF
             else
                 warn "skipping TLS — vhost stays on :80; add the cert yourself when ready"
             fi
-            printf '\n'
         else
             warn "no certbot — get the cert yourself, then add 443 to $vh"
         fi
@@ -292,7 +289,6 @@ if [ "$FW_CFG" != "no" ]; then
                 fw_open "$port"
             fi ;;
     esac
-    printf '\n'
 fi
 
 # ---- systemd unit + start (idempotent)
