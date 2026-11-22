@@ -327,7 +327,7 @@ impl Paint {
         }
     }
     fn accent(&self, s: impl std::fmt::Display) -> String {
-        self.wrap("38;5;214", s) // the murmur amber
+        self.wrap("38;5;141", s) // the murmur lavender
     }
     fn green(&self, s: impl std::fmt::Display) -> String {
         self.wrap("32", s)
@@ -343,32 +343,44 @@ impl Paint {
     }
 }
 
-const ART: &str = "   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
-  | \x27_ ` _ \\| | | | \x27__| \x27_ ` _ \\| | | | \x27__|\n\
-  | | | | | | |_| | |  | | | | | | |_| | |\n\
-  |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
+const ART: &str = "╔╦╗╦ ╦╦═╗╔╦╗╦ ╦╦═╗\n║║║║ ║╠╦╝║║║║ ║╠╦╝\n╩ ╩╚═╝╩╚═╩ ╩╚═╝╩╚═";
 
-/// One framed block: `╭─ murmur ────╮` … `│ lines` … `╰────╯`,
-/// matching the installer boxes. Widths count chars, not bytes.
+/// Visible width of a possibly-ANSI-colored line.
+fn vlen(s: &str) -> usize {
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (_, '\x1b') => esc = true,
+            (true, 'm') => esc = false,
+            (true, _) => {}
+            (false, _) => n += 1,
+        }
+    }
+    n
+}
+
+/// Full-perimeter box like the installer's `box()`:
+/// `╭─ title ─╮`, `│ line … │`, `╰───╯` — border all in accent.
 fn frame(p: &Paint, title: &str, lines: &[String]) {
     let w = lines
         .iter()
-        .map(|l| l.chars().count() + 2)
+        .map(|l| vlen(l))
         .max()
         .unwrap_or(0)
-        .max(title.chars().count() + 4)
-        + 2;
+        .max(title.chars().count() + 2);
     let head = format!("─ {title} ");
-    println!(
-        "  {}╭{}{}╮",
-        "",
-        p.accent(&head),
-        "─".repeat(w.saturating_sub(head.chars().count())),
+    let top = format!(
+        "╭{}{}╮",
+        head,
+        "─".repeat(w.saturating_sub(head.chars().count()))
     );
+    println!("  {}", p.accent(top));
     for l in lines {
-        println!("  {}  {l}", p.accent("│"));
+        let pad = " ".repeat(w.saturating_sub(vlen(l)));
+        println!("  {} {l}{pad} {}", p.accent("│"), p.accent("│"));
     }
-    println!("  {}╰{}╯", "", "─".repeat(w));
+    println!("  {}", p.accent(format!("╰{}╯", "─".repeat(w + 1))));
 }
 
 // ---------- admin socket (CLI ↔ running server) ----------
@@ -532,27 +544,28 @@ async fn main() -> anyhow::Result<()> {
 
 fn print_help(p: &Paint) {
     let d = |s: &str| p.dim(s);
+    let c = |s: &str| p.accent(format!("{s:<20}"));
     let lines: Vec<String> = [
         ART.lines().map(|l| p.accent(l)).collect::<Vec<_>>(),
-        vec![String::new(), d("the murmur relay — it routes ciphertext, nothing else")],
+        vec![String::new(), d("the murmur relay — routes ciphertext only")],
         vec![String::new()],
         vec![
             p.bold("service").to_string(),
-            format!("  {}  run the relay", p.accent(format!("{:<24}", "serve --addr A"))),
-            format!("  {}  systemd unit + autostart", p.accent(format!("{:<24}", "install [--addr A]"))),
+            format!("  {} run the relay", c("serve")),
+            format!("  {} systemd unit + autostart", c("install")),
         ],
         vec![String::new(), p.bold("admin").to_string()],
         vec![
-            format!("  {}  what the relay is doing right now", p.accent(format!("{:<24}", "status"))),
-            format!("  {}  device table · state · online · rtt", p.accent(format!("{:<24}", "list-devices"))),
-            format!("  {}  register a device by hand", p.accent(format!("{:<24}", "add-device --name N"))),
-            format!("  {}  kick a device — members rotate the key", p.accent(format!("{:<24}", "revoke --id ID"))),
-            format!("  {}  one-shot code while the family is empty", p.accent(format!("{:<24}", "bootstrap-code"))),
+            format!("  {} live overview", c("status")),
+            format!("  {} device table", c("list-devices")),
+            format!("  {} register a device", c("add-device")),
+            format!("  {} kick a device out", c("revoke")),
+            format!("  {} first-device code", c("bootstrap-code")),
         ],
         vec![
             String::new(),
-            d("admin commands talk to the live relay over the admin socket —"),
-            d("no sudo needed once you're in the `murmur` group."),
+            d("admin talks to the live relay — no sudo"),
+            d("once you're in the murmur group."),
         ],
     ]
     .concat();
@@ -560,7 +573,6 @@ fn print_help(p: &Paint) {
     frame(p, "murmur-server", &lines);
     println!();
 }
-
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     // A flag in first position means "run the relay" (the systemd
@@ -674,7 +686,6 @@ fn print_help(p: &Paint) {
     }
 }
 
-/// `murmur-server status` — one framed screen of what the relay is doing.
 fn status(args: &[String]) -> anyhow::Result<()> {
     let p = Paint::new();
     let res = admin_req(&AdminReq::Status, args)?;

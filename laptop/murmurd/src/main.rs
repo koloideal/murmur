@@ -61,15 +61,7 @@ async fn main() -> anyhow::Result<()> {
         Some("install") => return install::install_user_unit(),
         Some("doctor") => return doctor().await,
         Some("-h") | Some("--help") | Some("help") => {
-            eprint!(
-                "murmurd — laptop daemon\n\n\
-                 usage: murmurd            run the daemon (no args)\n\
-                 \x20      murmurd init      bootstrap: name, server, device credentials\n\
-                 \x20      murmurd pair      join via invite (`--code CODE [--server URL] [--name NAME]`)\n\
-                 \x20      murmurd install   install + enable the systemd user unit\n\
-                 \x20      murmurd doctor    check config, secrets, unit, daemon and relay\n\n\
-                 control a running daemon with murmurctl\n"
-            );
+            print_help();
             return Ok(());
         }
         Some(other) => anyhow::bail!("unknown command {other:?} — try `murmurd --help`"),
@@ -287,4 +279,55 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         eprintln!("  ! unit install skipped: {e:#} — start murmurd manually");
     }
     Ok(())
+}
+
+// ---------- pretty help (same boxes as murmurctl / murmur-server) ----------
+
+fn print_help() {
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let ac = |s: &str| if tty { format!("\x1b[38;5;141m{s}\x1b[0m") } else { s.into() };
+    let dm = |s: &str| if tty { format!("\x1b[2m{s}\x1b[0m") } else { s.into() };
+    let bd = |s: &str| if tty { format!("\x1b[1m{s}\x1b[0m") } else { s.into() };
+    let art = "╔╦╗╦ ╦╦═╗╔╦╗╦ ╦╦═╗\n║║║║ ║╠╦╝║║║║ ║╠╦╝\n╩ ╩╚═╝╩╚═╩ ╩╚═╝╩╚═";
+    let mut lines: Vec<String> = art.lines().map(&ac).collect();
+    lines.extend([
+        String::new(),
+        dm("the murmur client daemon".into()),
+        String::new(),
+        bd("run".into()),
+        format!("  {} run the daemon", ac(&format!("{:<18}", "murmurd"))),
+        String::new(),
+        bd("setup".into()),
+        format!("  {} name, server, credentials", ac(&format!("{:<18}", "murmurd init"))),
+        format!("  {} join via invite code", ac(&format!("{:<18}", "murmurd pair"))),
+        format!("  {} systemd user unit", ac(&format!("{:<18}", "murmurd install"))),
+        format!("  {} check config + relay", ac(&format!("{:<18}", "murmurd doctor"))),
+        String::new(),
+        dm("control a running daemon with murmurctl".into()),
+    ]);
+    let w = lines.iter().map(|l| vlen(l)).max().unwrap_or(0).max(12);
+    println!();
+    let head = "─ murmurd ";
+    println!("  {}", ac(&format!("╭{}{}╮", head, "─".repeat(w - head.chars().count()))));
+    for l in &lines {
+        let pad = " ".repeat(w - vlen(l));
+        println!("  {} {l}{pad} {}", ac("│"), ac("│"));
+    }
+    println!("  {}", ac(&format!("╰{}╯", "─".repeat(w + 1))));
+    println!();
+}
+
+/// Visible width of a possibly-ANSI-colored line.
+fn vlen(s: &str) -> usize {
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (_, '\x1b') => esc = true,
+            (true, 'm') => esc = false,
+            (true, _) => {}
+            (false, _) => n += 1,
+        }
+    }
+    n
 }

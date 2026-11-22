@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[command(name = "murmurctl", about = "control murmurd", version)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -107,6 +107,71 @@ impl Paint {
     fn bold(&self, s: impl std::fmt::Display) -> String {
         self.wrap("1", s)
     }
+    fn accent(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("38;5;141", s)
+    }
+}
+
+const ART: &str = "╔╦╗╦ ╦╦═╗╔╦╗╦ ╦╦═╗\n║║║║ ║╠╦╝║║║║ ║╠╦╝\n╩ ╩╚═╝╩╚═╩ ╩╚═╝╩╚═";
+
+/// Visible width of a possibly-ANSI-colored line.
+fn vlen(s: &str) -> usize {
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (_, '\x1b') => esc = true,
+            (true, 'm') => esc = false,
+            (true, _) => {}
+            (false, _) => n += 1,
+        }
+    }
+    n
+}
+
+/// Full-perimeter box, same as the installer and murmur-server.
+fn frame(p: &Paint, title: &str, lines: &[String]) {
+    let w = lines
+        .iter()
+        .map(|l| vlen(l))
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 2);
+    let head = format!("─ {title} ");
+    let top = format!("╭{}{}╮", head, "─".repeat(w.saturating_sub(head.chars().count())));
+    println!("  {}", p.accent(top));
+    for l in lines {
+        let pad = " ".repeat(w.saturating_sub(vlen(l)));
+        println!("  {} {l}{pad} {}", p.accent("│"), p.accent("│"));
+    }
+    println!("  {}", p.accent(format!("╰{}╯", "─".repeat(w + 1))));
+}
+
+fn print_help(p: &Paint) {
+    let d = |s: &str| p.dim(s);
+    let c = |s: &str| p.accent(format!("{s:<12}"));
+    let lines: Vec<String> = [
+        ART.lines().map(|l| p.accent(l)).collect::<Vec<_>>(),
+        vec![String::new(), d("control the running murmurd")],
+        vec![String::new()],
+        vec![
+            format!("  {} connection, presence, active node", c("status")),
+            format!("  {} family devices (--all for revoked)", c("devices")),
+            format!("  {} invite a device: QR + walkthrough", c("invite")),
+            format!("  {} pending pairing requests", c("pair")),
+            format!("  {} rotate the family key", c("rotate")),
+            format!("  {} self-revoke a device", c("revoke")),
+        ],
+        vec![
+            String::new(),
+            d("kick other devices from the relay host:"),
+            d("murmur-server revoke --id <device>"),
+        ],
+    ]
+    .concat();
+    println!();
+    frame(p, "murmurctl", &lines);
+    println!();
 }
 
 fn ago(ts: u64) -> String {
@@ -419,7 +484,11 @@ fn cmd_pair() -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        print_help(&Paint::new());
+        return Ok(());
+    };
+    match cmd {
         Cmd::Status => cmd_status(),
         Cmd::Devices { all } => cmd_devices(all),
         Cmd::Revoke { device_id } => {
