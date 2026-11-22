@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+      - name: build musl binaries (rust-lld, fully static)
+        run: |
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            RUSTFLAGS="-C linker=rust-lld" \
+              cargo build --release --manifest-path server/Cargo.toml --target "$t"
+            cp "server/target/$t/release/murmur-server" "murmur-server-$t"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: murmur-server-*-linux-musl
+
+  laptop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build murmurd + murmurctl (glibc — Arch laptops)
+        run: |
+          cargo build --release --manifest-path laptop/Cargo.toml
+          for b in murmurd murmurctl; do
+            cp "laptop/target/release/$b" "$b-x86_64-unknown-linux-gnu"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*-x86_64-unknown-linux-gnu"
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: build debug APK
+        run: cd mobile && ./gradlew assembleDebug --warning-mode all
+      - run: cp mobile/app/build/outputs/apk/debug/app-debug.apk murmur-android.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: murmur-android.apk

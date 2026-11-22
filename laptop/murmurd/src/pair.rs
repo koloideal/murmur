@@ -168,11 +168,11 @@ impl Shared {
         let blob = PairBlob {
             device_id,
             token_hex: token.to_hex(),
-            family_key_b64: {
+            family_key_b64: Some({
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD.encode(self.key.0)
-            },
-            server_url: self.cfg.server_url.clone(),
+            }),
+            server_url: Some(self.cfg.server_url.clone()),
         };
         let dh = pending.key.dh(&pending.peer_pub);
         let blob_b64 = {
@@ -262,9 +262,33 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                     // env.from is the inviter's device id (stamped by
                     // the server) — the SAS needs it, and on the
                     // short-code path it's the only way to learn it.
+                    // DeviceId::ZERO means the relay itself answered:
+                    // bootstrap pairing, SAS lives in the relay log and
+                    // the joiner confirms right here.
                     let sas = sas_code(&key.public, &peer, &session, &env.from);
-                    eprintln!("verification code: {sas}");
-                    eprintln!("confirm it matches on the inviter, it will then complete pairing");
+                    if env.from == DeviceId::ZERO {
+                        eprintln!("bootstrap pairing — verification code: {sas}");
+                        eprintln!(
+                            "compare it with the relay log: journalctl -u murmur-server"
+                        );
+                        eprint!("codes match? [y/N] ");
+                        use std::io::Write;
+                        std::io::stderr().flush()?;
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line)?;
+                        if !line.trim().eq_ignore_ascii_case("y") {
+                            bail!("pairing aborted — SAS not confirmed");
+                        }
+                        let confirm =
+                            Envelope::control(session, Route::Server, 2, &Control::PairConfirm)?;
+                        sink.send(Ws::Text(confirm.to_json().into())).await?;
+                        eprintln!("confirmed — receiving credentials");
+                    } else {
+                        eprintln!("verification code: {sas}");
+                        eprintln!(
+                            "confirm it matches on the inviter, it will then complete pairing"
+                        );
+                    }
                 }
                 Control::PairData { blob_b64 } => {
                     use base64::Engine;
@@ -272,13 +296,18 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                     let ct = base64::engine::general_purpose::STANDARD.decode(blob_b64)?;
                     let blob: PairBlob = serde_json::from_slice(&dk.open(&ct)?)?;
                     return anyhow::Ok(Paired {
-                        server_url: blob.server_url,
+                        // Bootstrap blobs leave these empty: the joiner
+                        // keeps the URL it dialed and mints the family
+                        // key itself — the relay never sees it.
+                        server_url: blob.server_url.unwrap_or(server_url.clone()),
                         device_id: blob.device_id,
                         token_hex: blob.token_hex,
-                        family_key_hex: {
-                            let raw = base64::engine::general_purpose::STANDARD
-                                .decode(blob.family_key_b64)?;
-                            hex::encode(raw)
+                        family_key_hex: match &blob.family_key_b64 {
+                            Some(b64) => {
+                                let raw = base64::engine::general_purpose::STANDARD.decode(b64)?;
+                                hex::encode(raw)
+                            }
+                            None => hex::encode(FamilyKey::random().0),
                         },
                     });
                 }

@@ -42,6 +42,10 @@ pub enum Control {
     PairAccept {
         pubkey_b64: String,
     },
+    /// Joiner → @server, bootstrap flow only: "the SAS matched the relay
+    /// log — hand me credentials". Normal pairing doesn't use this; the
+    /// inviter decides.
+    PairConfirm,
     /// Inviter → joiner, only after SAS confirmation. `blob_b64` is
     /// XChaCha20-Poly1305 under `FamilyKey::from_raw(dh)` of a [`PairBlob`].
     PairData {
@@ -102,6 +106,12 @@ pub struct DeviceInfo {
 pub struct PairBlob {
     pub device_id: DeviceId,
     pub token_hex: String,
-    pub family_key_b64: String,
-    pub server_url: String,
+    /// `None` in the bootstrap flow — the founder generates the family
+    /// key locally; the relay must never see it.
+    #[serde(default)]
+    pub family_key_b64: Option<String>,
+    /// `None` in the bootstrap flow — the joiner keeps the URL it
+    /// connected to; the relay doesn't know its own public name.
+    #[serde(default)]
+    pub server_url: Option<String>,
 }

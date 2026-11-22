@@ -57,13 +57,15 @@ async fn main() -> anyhow::Result<()> {
         Some("init") => return config::init(&args[1..]),
         Some("pair") => return pair_join(&args[1..]).await,
         Some("install") => return install::install_user_unit(),
+        Some("doctor") => return doctor().await,
         Some("-h") | Some("--help") | Some("help") => {
             eprint!(
                 "murmurd — laptop daemon\n\n\
                  usage: murmurd            run the daemon (no args)\n\
                  \x20      murmurd init      bootstrap: name, server, device credentials\n\
                  \x20      murmurd pair      join via invite (`--code CODE [--server URL] [--name NAME]`)\n\
-                 \x20      murmurd install   install + enable the systemd user unit\n\n\
+                 \x20      murmurd install   install + enable the systemd user unit\n\
+                 \x20      murmurd doctor    check config, secrets, unit, daemon and relay\n\n\
                  control a running daemon with murmurctl\n"
             );
             return Ok(());
@@ -124,6 +126,119 @@ fn instance_lock() -> anyhow::Result<std::os::unix::net::UnixListener> {
             Ok(UnixListener::bind(&path)?)
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// `murmurd doctor` — first-run and break-glass diagnostics: checks each
+/// piece a healthy laptop needs and prints the fix when one is missing.
+/// Non-destructive: the relay check is a bare WS handshake, no auth —
+/// it never disturbs a running daemon's connection.
+async fn doctor() -> anyhow::Result<()> {
+    let mut bad = 0u32;
+    let mut ok = |cond: bool, good: String, fix: &str| {
+        if cond {
+            println!("  ✓ {good}");
+        } else {
+            bad += 1;
+            println!("  ✗ {fix}");
+        }
+    };
+
+    // config.toml
+    let cfg = config::Config::load().ok();
+    match &cfg {
+        Some(c) => {
+            let sane = c.server_url.starts_with("ws://") || c.server_url.starts_with("wss://");
+            ok(
+                sane,
+                format!("config.toml — {} ({})", c.server_url, c.name),
+                "config.toml missing or server_url is not ws(s):// — run `murmurd pair` or `murmurd init`",
+            );
+        }
+        None => ok(
+            false,
+            String::new(),
+            "no config.toml — provision first: `murmurd pair --code …` or `murmurd init`",
+        ),
+    }
+
+    // secrets.toml
+    match config::Secrets::load() {
+        Ok(s) => ok(
+            s.device_id().is_ok() && s.family_key().is_ok(),
+            format!("secrets.toml — device {}", s.device_id),
+            "secrets.toml is corrupt — re-pair the device",
+        ),
+        Err(_) => ok(
+            false,
+            String::new(),
+            "no secrets.toml — this laptop isn't in a family yet",
+        ),
+    }
+
+    // systemd user unit
+    let unit = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".config/systemd/user/murmurd.service"));
+    let unit_exists = unit.as_ref().is_some_and(|p| p.exists());
+    let active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "murmurd"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false);
+    ok(
+        unit_exists,
+        "systemd unit installed".into(),
+        "no user unit — `murmurd install`",
+    );
+    if unit_exists {
+        ok(
+            active,
+            "daemon running under systemd".into(),
+            "unit installed but not running — `systemctl --user start murmurd`",
+        );
+    }
+
+    // ctl socket: daemon alive outside systemd too
+    if !active {
+        let sock = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("murmur.sock");
+        ok(
+            std::os::unix::net::UnixStream::connect(&sock).is_ok(),
+            "daemon alive (ctl socket)".into(),
+            "daemon not running — `systemctl --user start murmurd` or run murmurd",
+        );
+    }
+
+    // relay reachability: bare WS handshake, no auth frame.
+    if let Some(c) = &cfg {
+        let t0 = std::time::Instant::now();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio_tungstenite::connect_async(&c.server_url),
+        )
+        .await
+        {
+            Ok(Ok(_)) => ok(
+                true,
+                format!("relay reachable — handshake in {}ms", t0.elapsed().as_millis()),
+                "",
+            ),
+            _ => ok(
+                false,
+                String::new(),
+                "relay unreachable — check server_url, DNS, TLS and that murmur-server is up",
+            ),
+        }
+    }
+
+    if bad == 0 {
+        println!("all good");
+        Ok(())
+    } else {
+        anyhow::bail!("{bad} problem(s) found")
     }
 }
 

@@ -41,16 +41,33 @@ murmur — это **«самый тихий»**, **«самый приватны
 
 ## 🚀 Быстрый старт
 
+Всё ставится из бинарей релиза — тулчейны не нужны.
+
+**1. Релей** (любой свой линукс-сервер, под рутом):
+
 ```console
-# релей (на домашнем сервере, за любым TLS-терминатором)
-$ cd server && cargo build --release
-
-# демон ноута + CLI
-$ cd laptop && cargo build --release
-
-# приложение — открыть mobile/ в Android Studio или
-$ cd mobile && ./gradlew assembleRelease
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-server.sh | sudo sh
+==> bootstrap code: T45K-TP6D      # одноразовый, пока семья пустая
 ```
+
+Перед релеем ставишь TLS-прокси (caddy/nginx на `127.0.0.1:8770`) — ноутам понадобится `wss://` адрес.
+
+**2. Первый ноут** (под юзером, без рута):
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-laptop.sh | sh
+$ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
+bootstrap pairing — verification code: 452690       # совпадает с логом релея
+$ systemctl --user start murmurd && murmurd doctor
+```
+
+Кто первым использовал bootstrap-код — тот основатель: он сам генерирует family key локально, релей её не видит.
+
+**3. Телефон:** APK `murmur-android.apk` из [Releases](https://github.com/koloideal/murmur/releases) (совместимо с Obtainium). На ноуте `murmurctl invite` → сканируешь QR — сервер уже зашит в инвайт.
+
+**4. Остальные ноуты:** `murmurctl invite` на любом члене семьи, на новом `murmurd pair --code …`.
+
+Собирать самому: `cargo build --release` в `server/` или `laptop/`, `./gradlew assembleDebug` в `mobile/`.
 
 ## 📌 Дизайн
 

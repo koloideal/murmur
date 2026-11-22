@@ -41,19 +41,33 @@ The phone is a thin background agent — it only reports events and obeys comman
 
 ## 🚀 Quick Start
 
+Everything installs from release binaries — no toolchains needed.
+
+**1. Relay** (any Linux box you own, root):
+
 ```console
-# relay: build, install as a service, bootstrap the first device
-$ cd server && cargo build --release
-$ target/release/murmur-server install        # systemd unit + Caddy hint
-$ murmur-server add-device --name my-laptop   # prints device_id + token
-
-# laptop: provision (writes config+secrets, installs the user unit)
-$ murmurd init --server wss://murmur.example.org \
-      --name my-laptop --device-id … --token …
-
-# every next device: murmurctl invite on a laptop → scan the QR
-# on the phone, or `murmurd pair --code …` on another laptop
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-server.sh | sudo sh
+==> bootstrap code: T45K-TP6D      # one-shot, armed while the family is empty
 ```
+
+Point a TLS reverse proxy (caddy/nginx) at `127.0.0.1:8770` — laptops will use the `wss://` URL.
+
+**2. First laptop** (your user, no root):
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-laptop.sh | sh
+$ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
+bootstrap pairing — verification code: 452690       # matches the relay log
+$ systemctl --user start murmurd && murmurd doctor
+```
+
+The first device to use the bootstrap code becomes the founder and mints the family key locally — the relay never sees it.
+
+**3. Phone:** grab `murmur-android.apk` from [Releases](https://github.com/koloideal/murmur/releases) (Obtainium-friendly). On a laptop run `murmurctl invite`, scan the QR — the invite carries the server URL itself.
+
+**4. More laptops:** `murmurctl invite` on any member, then `murmurd pair --code …` on the new one.
+
+Prefer building yourself? `cargo build --release` in `server/` or `laptop/`, `./gradlew assembleDebug` in `mobile/`.
 
 ## 📌 Design
 

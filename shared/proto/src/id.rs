@@ -8,6 +8,10 @@ use std::str::FromStr;
 pub struct DeviceId(pub [u8; 8]);
 
 impl DeviceId {
+    /// Server-originated envelopes carry this as `from` — the relay has
+    /// no device identity of its own.
+    pub const ZERO: Self = Self([0; 8]);
+
     pub fn random() -> Self {
         let mut b = [0u8; 8];
         rand::rng().fill_bytes(&mut b);

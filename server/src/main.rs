@@ -21,7 +21,10 @@
 
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
-use murmur_proto::{Control, DeviceId, Envelope, Route, control::DeviceInfo, control::HelloRole};
+use murmur_proto::{
+    Control, DeviceId, Envelope, FamilyKey, Route,
+    control::{DeviceInfo, HelloRole, PairBlob},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -72,21 +75,55 @@ struct Shared {
     /// Open pair sessions: session → inviter. Lets a joiner reach the
     /// inviter through @server without knowing its device id.
     open_pairs: Mutex<HashMap<DeviceId, DeviceId>>,
+    /// One-shot bootstrap invite, armed while the family is empty
+    /// (no non-revoked devices). The relay itself plays the inviter.
+    bootstrap: Mutex<Option<Bootstrap>>,
+}
+
+/// Server-side state of the bootstrap invite: an ephemeral DH key and
+/// the joiner's half once `PairHello` arrives.
+struct Bootstrap {
+    code: String,
+    session: DeviceId,
+    key: murmur_proto::PairKey,
+    joiner: Option<(murmur_proto::PublicKey, String)>,
 }
 
 impl Shared {
     fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let devices = match std::fs::read_to_string(&path) {
+        let devices: HashMap<DeviceId, DeviceRec> = match std::fs::read_to_string(&path) {
             Ok(s) => serde_json::from_str(&s).context("parse devices.json")?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e).context("read devices.json"),
+        };
+        let bootstrap = if devices.values().all(|d| d.revoked) {
+            let code = murmur_proto::pair_code();
+            Some(Bootstrap {
+                session: DeviceId::from_code(&code),
+                code,
+                key: murmur_proto::PairKey::generate(),
+                joiner: None,
+            })
+        } else {
+            None
         };
         Ok(Self {
             devices_path: path,
             devices: Mutex::new(devices),
             conns: Mutex::new(HashMap::new()),
             open_pairs: Mutex::new(HashMap::new()),
+            bootstrap: Mutex::new(bootstrap),
         })
+    }
+
+    /// Bootstrap is armed only while no active (non-revoked) device
+    /// exists — the moment a founder registers, the window is closed.
+    fn bootstrap_session(&self) -> Option<DeviceId> {
+        let mut bs = self.bootstrap.lock().unwrap();
+        if bs.is_some() && !self.devices.lock().unwrap().values().all(|d| d.revoked) {
+            *bs = None;
+        }
+        bs.as_ref().map(|b| b.session)
     }
 
     fn persist(&self) {
@@ -536,6 +573,12 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
         shared.devices_path.display(),
         admin_path.display()
     );
+    if let Some(code) = shared.bootstrap.lock().unwrap().as_ref().map(|b| b.code.clone()) {
+        info!(
+            "family is empty — bootstrap code: {code}\n\
+             first device to `murmurd pair --server <this-url> --code {code}` becomes the founder"
+        );
+    }
 
     loop {
         tokio::select! {
@@ -708,7 +751,10 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 // that opened the session. No broadcast, no unicast,
                 // no other server ops.
                 let ok = matches!(env.to, Route::Server)
-                    && matches!(env.control_payload(), Ok(Control::PairHello { .. }));
+                    && matches!(
+                        env.control_payload(),
+                        Ok(Control::PairHello { .. }) | Ok(Control::PairConfirm)
+                    );
                 if !ok {
                     warn!("{device_id}: pairing conn sent a non-pair frame");
                     continue;
@@ -751,15 +797,23 @@ async fn handle_control(
         }
     };
     match ctl {
-        // A pairing conn's only @server op: the inviter registered this
+        // A pairing conn's only @server ops: the inviter registered this
         // session via PairOpen — forward the hello to it (env.from is
-        // already the session id).
-        Control::PairHello { .. } if pairing => {
+        // already the session id). If nobody opened it and the family is
+        // still empty, the session may be the bootstrap code — then the
+        // relay plays the inviter itself.
+        Control::PairHello { pubkey_b64, name } if pairing => {
             let inviter = shared.open_pairs.lock().unwrap().get(&from).copied();
             match inviter {
                 Some(inv) => shared.send_to(&inv, env),
+                None if shared.bootstrap_session() == Some(from) => {
+                    bootstrap_hello(shared, from, &pubkey_b64, &name).await?
+                }
                 None => warn!("{from}: PairHello for an unknown/expired session"),
             }
+        }
+        Control::PairConfirm if pairing => {
+            bootstrap_confirm(shared, from).await?;
         }
         _ if pairing => {
             warn!("{from}: pairing conn sent server op");
@@ -786,7 +840,7 @@ async fn handle_control(
             } else {
                 warn!("{from} tried to revoke {device_id} — self-revoke only");
                 let reply = Envelope::control(
-                    DeviceId([0; 8]),
+                    DeviceId::ZERO,
                     Route::device(from),
                     0,
                     &Control::Error {
@@ -806,7 +860,7 @@ async fn handle_control(
         }
         Control::ListDevices => {
             let reply = Envelope::control(
-                DeviceId([0; 8]),
+                DeviceId::ZERO,
                 Route::device(from),
                 0,
                 &Control::Devices {
@@ -817,6 +871,78 @@ async fn handle_control(
         }
         other => debug!("{from}: unhandled control {other:?}"),
     }
+    Ok(())
+}
+
+/// The relay answers a bootstrap PairHello itself: stores the joiner's
+/// pubkey and name, replies PairAccept, logs the SAS for the operator
+/// to eyeball against the joiner's screen.
+async fn bootstrap_hello(
+    shared: &Arc<Shared>,
+    session: DeviceId,
+    pubkey_b64: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    let joiner_pub = murmur_proto::PairKey::public_from_b64(pubkey_b64)?;
+    let reply = {
+        let mut guard = shared.bootstrap.lock().unwrap();
+        let Some(b) = guard.as_mut() else {
+            return Ok(());
+        };
+        b.joiner = Some((joiner_pub, name.to_owned()));
+        let sas =
+            murmur_proto::sas_code(&b.key.public, &joiner_pub, &session, &DeviceId::ZERO);
+        info!("bootstrap: '{name}' pairing — SAS {sas} (must match the joiner's screen)");
+        Envelope::control(
+            DeviceId::ZERO,
+            Route::device(session),
+            0,
+            &Control::PairAccept {
+                pubkey_b64: b.key.public_b64(),
+            },
+        )?
+    };
+    shared.send_to(&session, &reply);
+    Ok(())
+}
+
+/// Joiner confirmed the SAS — mint credentials and seal them to the
+/// joiner's DH half. `family_key_b64`/`server_url` are left empty: the
+/// founder generates the key locally and keeps the URL it used —
+/// the relay never learns either.
+async fn bootstrap_confirm(shared: &Arc<Shared>, session: DeviceId) -> anyhow::Result<()> {
+    let taken = shared.bootstrap.lock().unwrap().take();
+    let Some(b) = taken else {
+        warn!("{session}: PairConfirm with no pending bootstrap");
+        return Ok(());
+    };
+    let Some((joiner_pub, name)) = b.joiner else {
+        warn!("{session}: PairConfirm before PairHello");
+        *shared.bootstrap.lock().unwrap() = Some(b);
+        return Ok(());
+    };
+    let device_id = DeviceId::random();
+    let token = murmur_proto::AuthToken::random();
+    shared.register(device_id, name, token.hash_hex());
+
+    let blob = PairBlob {
+        device_id,
+        token_hex: token.to_hex(),
+        family_key_b64: None,
+        server_url: None,
+    };
+    let sealed = FamilyKey::from_raw(b.key.dh(&joiner_pub)).seal(&serde_json::to_vec(&blob)?)?;
+    use base64::Engine;
+    let reply = Envelope::control(
+        DeviceId::ZERO,
+        Route::device(session),
+        0,
+        &Control::PairData {
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(sealed),
+        },
+    )?;
+    shared.send_to(&session, &reply);
+    info!("bootstrap complete — {device_id} is the founder; window closed");
     Ok(())
 }
 
