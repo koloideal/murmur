@@ -14,13 +14,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -36,6 +44,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
+            var about by remember { mutableStateOf(false) }
             MurmurTheme {
                 Scaffold(
                     topBar = {
@@ -56,6 +65,14 @@ class MainActivity : ComponentActivity() {
                                     )
                                     Spacer(Modifier.width(4.dp))
                                     Text("🦀", style = MaterialTheme.typography.labelSmall)
+                                    Spacer(Modifier.width(8.dp))
+                                    FilledTonalIconButton(onClick = { about = true }) {
+                                        Icon(
+                                            Icons.AutoMirrored.Outlined.HelpOutline,
+                                            contentDescription = "what is murmur",
+                                        )
+                                    }
+                                    Spacer(Modifier.width(4.dp))
                                 }
                             },
                             colors = TopAppBarDefaults.topAppBarColors(
@@ -66,49 +83,23 @@ class MainActivity : ComponentActivity() {
                 ) { padding ->
                     HomeScreen(Modifier.padding(padding))
                 }
+                if (about) AboutSheet(onDismiss = { about = false })
             }
         }
     }
 }
 
 /** A column of feature cards — each lives in `ui/widgets/` and owns its
- *  own state; the screen itself knows nothing about the features. The
- *  footer explains what murmur is, pinned to the bottom on every state. */
+ *  own state; the screen itself knows nothing about the features. */
 @Composable
 private fun HomeScreen(modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxSize()) {
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Top,
-        ) {
-            homeWidgets.forEach { it() }
-        }
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 32.dp, top = 4.dp),
-        ) {
-            Text(
-                "your own relay · end-to-end encrypted",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "murmur quietly links this phone to your laptops: " +
-                    "notifications land on the desktop, the clipboard is shared, " +
-                    "and laptop media keys control playback here.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .padding(top = 10.dp)
-                    .fillMaxWidth(),
-            )
-        }
+    Column(
+        modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.Top,
+    ) {
+        homeWidgets.forEach { it() }
     }
 }

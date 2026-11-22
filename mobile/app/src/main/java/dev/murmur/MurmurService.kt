@@ -115,8 +115,12 @@ class MurmurService : Service() {
     }
 
     override fun onDestroy() {
-        status.value = Status(provisioned = secrets.provisioned, running = false)
-        relay.stop()
+        // Unprovisioned starts stopSelf() before relay/secrets exist.
+        status.value = Status(
+            provisioned = ::secrets.isInitialized && secrets.provisioned,
+            running = false,
+        )
+        if (::relay.isInitialized) relay.stop()
         runCatching {
             getSystemService(ConnectivityManager::class.java)
                 .unregisterNetworkCallback(networkCallback)

@@ -23,6 +23,15 @@ data class Provisioning(
 
 class PairingException(message: String) : Exception(message)
 
+/** Where the joiner is in the handshake — drives the UI's "what to do
+ *  on the laptop now" hints. */
+sealed interface PairStage {
+    /** Socket up, PairHello sent — the inviter has to accept. */
+    data class AwaitingAccept(val session: String) : PairStage
+    /** SAS matched here — the inviter has to confirm on their side. */
+    data class AwaitingConfirm(val session: String) : PairStage
+}
+
 /**
  * The joiner side of pairing — one suspend call:
  *
@@ -37,6 +46,7 @@ suspend fun pair(
     inviteCode: String,
     deviceName: String,
     serverUrl: String? = null,
+    onStage: (PairStage) -> Unit = {},
     onSas: suspend (code: String) -> Boolean,
 ): Provisioning {
     // Full invite carries server+session; a typeable XXXX-XXXX code
@@ -50,7 +60,7 @@ suspend fun pair(
     } else {
         session = sessionFromCode(inviteCode.trim())
         url = serverUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { if ("://" in it) it else "ws://$it" }
+            ?.let { if ("://" in it) it else "wss://$it" }
             ?: throw PairingException("short codes need a server address")
     }
     val sodium = LazySodiumAndroid(SodiumAndroid())
@@ -128,8 +138,18 @@ suspend fun pair(
                     ),
                 ).toJson(),
             )
+            onStage(PairStage.AwaitingAccept(session))
 
             val (inviter, frame) = next()
+            // The relay itself answering = this was the one-shot
+            // bootstrap code. The founder has to be a laptop (it mints
+            // the family key and confirms against the relay log).
+            if (inviter == ZERO_ID) {
+                throw PairingException(
+                    "that's the relay's bootstrap code — pair a laptop first, " +
+                        "then run murmurctl invite on it",
+                )
+            }
             val accept = frame as? Control.PairAccept
                 ?: throw PairingException("expected pair_accept")
             val peerPub = Base64.decode(accept.pubkey_b64, Base64.NO_WRAP)
@@ -143,6 +163,7 @@ suspend fun pair(
             if (!onSas(sas)) {
                 throw PairingException("rejected — codes didn't match")
             }
+            onStage(PairStage.AwaitingConfirm(session))
 
             // The inviter sends PairData only after *their* confirmation.
             val data = next().second as? Control.PairData
@@ -167,3 +188,4 @@ suspend fun pair(
 }
 
 private const val TIMEOUT_MS = 180_000L
+private const val ZERO_ID = "0000000000000000"

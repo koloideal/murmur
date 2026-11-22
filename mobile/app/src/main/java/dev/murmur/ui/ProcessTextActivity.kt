@@ -20,8 +20,12 @@ class ProcessTextActivity : Activity() {
             MurmurService.start(this)
             toast("murmur is starting — try again in a second")
         } else {
-            MurmurService.instance!!.pushClipboard(text)
-            toast("sent to laptop")
+            if (MurmurService.status.value.relay != dev.murmur.core.Relay.State.ONLINE) {
+                toast("relay offline — not sent")
+            } else {
+                MurmurService.instance!!.pushClipboard(text)
+                toast("sent to laptop")
+            }
         }
         setResult(RESULT_OK, Intent().putExtra(Intent.EXTRA_PROCESS_TEXT, text))
         finish()

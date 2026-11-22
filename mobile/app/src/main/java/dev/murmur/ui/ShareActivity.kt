@@ -23,8 +23,12 @@ class ShareActivity : Activity() {
                 toast("murmur is starting — share again in a second")
             }
             else -> {
-                MurmurService.instance!!.pushClipboard(text)
-                toast("sent to laptop")
+                if (MurmurService.status.value.relay != dev.murmur.core.Relay.State.ONLINE) {
+                    toast("relay offline — not sent")
+                } else {
+                    MurmurService.instance!!.pushClipboard(text)
+                    toast("sent to laptop")
+                }
             }
         }
         finish()

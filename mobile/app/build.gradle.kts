@@ -16,7 +16,7 @@ android {
         // CI runs increment it — Obtainium-style updaters compare this,
         // not the name. Local builds stay at 1.
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1.0"
+        versionName = "0.1.6"
     }
 
     signingConfigs {

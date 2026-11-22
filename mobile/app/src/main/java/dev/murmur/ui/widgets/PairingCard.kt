@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -48,13 +49,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import dev.murmur.MurmurService
+import dev.murmur.core.PairStage
 import dev.murmur.core.PairingException
 import dev.murmur.core.Secrets
 import dev.murmur.core.pair
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -75,7 +77,10 @@ fun PairingCard() {
     var inviteMode by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var invite by remember { mutableStateOf("") }
-    var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "ws://" }) }
+    var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "wss://" }) }
+    var session by remember { mutableStateOf("") }
+    var job by remember { mutableStateOf<Job?>(null) }
+    var scanning by remember { mutableStateOf(false) }
     var sas by remember { mutableStateOf("") }
     var sasAnswer by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -88,12 +93,21 @@ fun PairingCard() {
         phase = "connecting"
         error = null
         hint = null
-        scope.launch {
+        job = scope.launch {
             try {
                 val prov = pair(
                     input,
                     Build.MODEL,
                     serverUrl = if (short) server.trim() else null,
+                    onStage = { st ->
+                        when (st) {
+                            is PairStage.AwaitingAccept -> {
+                                session = st.session
+                                phase = "accept"
+                            }
+                            is PairStage.AwaitingConfirm -> phase = "confirm"
+                        }
+                    },
                 ) { s ->
                     sas = s
                     phase = "sas"
@@ -104,6 +118,9 @@ fun PairingCard() {
                 phase = "done"
                 celebrating = true
                 MurmurService.start(ctx)
+            } catch (e: CancellationException) {
+                phase = "idle"
+                throw e
             } catch (e: PairingException) {
                 error = e.message
                 if (short) hint = "check the code and the server address, then try again"
@@ -116,13 +133,10 @@ fun PairingCard() {
         }
     }
 
-    val scanner = rememberLauncherForActivityResult(ScanContract()) { res ->
-        res.contents?.let { runPairing(it) }
-    }
     val cameraPerm = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) scanner.launch(qrOptions())
+        if (granted) scanning = true
         else {
             manual = true
             hint = "no camera access — enter the code manually instead"
@@ -132,10 +146,34 @@ fun PairingCard() {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            scanner.launch(qrOptions())
+            scanning = true
         } else {
             cameraPerm.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    if (scanning) {
+        QrScanner(
+            onResult = {
+                scanning = false
+                runPairing(it)
+            },
+            onDismiss = { scanning = false },
+        )
+    }
+
+    val laptopSteps = listOf(
+        Step(
+            "on the laptop, accept this phone — `murmurctl pair` lists requests",
+            "murmurctl pair accept $session",
+        ),
+        Step("check the six digits match on both screens"),
+        Step("confirm on the laptop", "murmurctl pair confirm $session"),
+    )
+    fun cancel() {
+        job?.cancel()
+        sasAnswer?.complete(false)
+        phase = "idle"
     }
 
     AnimatedVisibility(
@@ -159,10 +197,30 @@ fun PairingCard() {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(12.dp))
                     Text(
-                        "contacting the inviter…",
+                        "connecting to the relay…",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+
+                phase == "accept" || phase == "confirm" -> Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.size(12.dp))
+                        Text(
+                            if (phase == "accept") "waiting for the laptop to accept…"
+                            else "waiting for the laptop to confirm…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    StepList(laptopSteps, current = if (phase == "accept") 0 else 2)
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(
+                        onClick = ::cancel,
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text("cancel") }
                 }
 
                 phase == "sas" -> Column(
@@ -172,6 +230,12 @@ fun PairingCard() {
                     Text(
                         "does this match the code on the laptop?",
                         style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "it's printed next to this phone in  murmurctl pair",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
@@ -196,22 +260,23 @@ fun PairingCard() {
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(onClick = {
-                            phase = "connecting"
+                            phase = "confirm"
                             sasAnswer?.complete(true)
                         }) { Text("match") }
                         TextButton(onClick = {
                             phase = "idle"
                             sasAnswer?.complete(false)
-                        }) { Text("reject") }
+                        }) { Text("don't match") }
                     }
                 }
 
                 else -> {
                     Text(
-                        "run  murmurctl invite  on a laptop",
+                        "on a laptop that's already in the family, run",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    CommandLine("murmurctl invite", Modifier.padding(top = 8.dp))
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = ::scan, modifier = Modifier.fillMaxWidth()) {
                         Text("scan QR code", textAlign = TextAlign.Center)
@@ -245,7 +310,7 @@ fun PairingCard() {
                                 onValueChange = { server = it },
                                 modifier = Modifier.fillMaxWidth(),
                                 label = { Text("server") },
-                                placeholder = { Text("ws://192.168.0.1:8770") },
+                                placeholder = { Text("wss://relay.example.com") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             )
@@ -354,11 +419,4 @@ private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier) {
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-}
-
-private fun qrOptions() = ScanOptions().apply {
-    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-    setPrompt("point at the laptop QR")
-    setBeepEnabled(false)
-    setOrientationLocked(false)
 }
