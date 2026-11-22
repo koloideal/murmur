@@ -144,6 +144,12 @@ fw_open() {
 banner
 [ "$(id -u)" -eq 0 ] || die "needs root — run: curl -fsSL ... | sudo sh"
 
+if ! have_tty; then
+    warn "no tty — running non-interactive: every question takes its default"
+    warn "re-run in a real terminal to be asked, or steer with flags (--domain/--addr/--no-proxy/--no-firewall)"
+    printf '\n' >&2
+fi
+
 # ---- questions first, so failures don't waste the user's time
 if [ -z "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
     DOMAIN=$(ask v_domain "" "public domain for the wss endpoint (empty = plain ws, no TLS)")
@@ -235,15 +241,19 @@ EOF
             fi
         fi
         if command -v certbot >/dev/null 2>&1; then
-            if [ -z "$EMAIL" ]; then
-                EMAIL=$(ask v_email "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
-            fi
-            [ -n "$EMAIL" ] && ef="--email $EMAIL" || ef="--register-unsafely-without-email"
-            # shellcheck disable=SC2086
-            if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $ef --redirect; then
-                ok "https://$DOMAIN — certificate installed"
+            if askyn y "issue/install a Let's Encrypt cert for $DOMAIN via certbot?"; then
+                if [ -z "$EMAIL" ]; then
+                    EMAIL=$(ask v_email "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
+                fi
+                [ -n "$EMAIL" ] && ef="--email $EMAIL" || ef="--register-unsafely-without-email"
+                # shellcheck disable=SC2086
+                if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $ef --redirect; then
+                    ok "https://$DOMAIN — certificate installed"
+                else
+                    warn "certbot failed — run it manually: certbot --nginx -d $DOMAIN"
+                fi
             else
-                warn "certbot failed — run it manually: certbot --nginx -d $DOMAIN"
+                warn "skipping TLS — vhost stays on :80; add the cert yourself when ready"
             fi
             printf '\n'
         else
