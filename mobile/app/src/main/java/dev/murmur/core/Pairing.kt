@@ -113,11 +113,17 @@ suspend fun pair(
 
     ws = OkHttpClient().newWebSocket(Request.Builder().url(url).build(), listener)
     try {
-        suspend fun next(): Pair<String, Control> =
-            kotlinx.coroutines.selects.select {
+        suspend fun next(): Pair<String, Control> {
+            val f = kotlinx.coroutines.selects.select {
                 frames.onReceive { it }
                 failure.onAwait { throw it }
             }
+            // The relay answers a PairHello for an unknown/expired
+            // session with PairReject — fail fast instead of waiting
+            // out the timeout for an inviter that will never come.
+            (f.second as? Control.PairReject)?.let { throw PairingException(it.reason) }
+            return f
+        }
 
         return withTimeout(TIMEOUT_MS) {
             when (val first = next().second) {

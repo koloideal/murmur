@@ -51,6 +51,13 @@ pub enum Control {
     PairData {
         blob_b64: String,
     },
+    /// @server → joiner: the session in the `PairHello` isn't registered
+    /// — invite expired, code mistyped, or a bootstrap code used after
+    /// the family stopped being empty. Fails the join fast instead of
+    /// leaving it staring at a spinner until its own timeout fires.
+    PairReject {
+        reason: String,
+    },
 
     /// Authed device → @server. Add a device to the registry (pairing result).
     RegisterDevice {

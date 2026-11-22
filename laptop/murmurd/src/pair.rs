@@ -307,6 +307,9 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         eprintln!("  │  confirm it on the inviter — `murmurctl pair` there");
                     }
                 }
+                Control::PairReject { reason } => {
+                    bail!("pairing rejected: {reason}")
+                }
                 Control::PairData { blob_b64 } => {
                     use base64::Engine;
                     let dk = dh_key.context("PairData before PairAccept")?;

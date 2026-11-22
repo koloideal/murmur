@@ -900,7 +900,22 @@ async fn handle_control(
                 None if shared.bootstrap_session() == Some(from) => {
                     bootstrap_hello(shared, from, &pubkey_b64, &name).await?
                 }
-                None => warn!("{from}: PairHello for an unknown/expired session"),
+                None => {
+                    warn!("{from}: PairHello for an unknown/expired session");
+                    // Tell the joiner — a silent drop leaves it waiting
+                    // for an inviter that will never come.
+                    if let Ok(reply) = Envelope::control(
+                        DeviceId::ZERO,
+                        Route::Device(from),
+                        0,
+                        &Control::PairReject {
+                            reason: "invite expired or mistyped — get a fresh `murmurctl invite`"
+                                .into(),
+                        },
+                    ) {
+                        shared.send_to(&from, &reply);
+                    }
+                }
             }
         }
         Control::PairConfirm if pairing => {

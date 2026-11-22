@@ -166,6 +166,9 @@ sealed class Control {
     @SerialName("pair_data")
     data class PairData(val blob_b64: String) : Control()
 
+    @SerialName("pair_reject")
+    data class PairReject(val reason: String) : Control()
+
     @Serializable
     @SerialName("list_devices")
     object ListDevices : Control()
