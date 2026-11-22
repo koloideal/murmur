@@ -348,21 +348,6 @@ const ART: &str = "   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
   | | | | | | |_| | |  | | | | | | |_| | |\n\
   |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
 
-/// Visible width of a possibly-ANSI-colored line.
-fn vlen(s: &str) -> usize {
-    let mut n = 0;
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (_, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            (false, _) => n += 1,
-        }
-    }
-    n
-}
-
 /// Installer-style banner: the logo bold in accent, a dim subtitle.
 fn banner(p: &Paint, sub: &str) {
     println!();
@@ -1326,6 +1311,7 @@ async fn bootstrap_confirm(shared: &Arc<Shared>, session: DeviceId) -> anyhow::R
         family_key_b64: None,
         server_url: None,
         key_epoch: 0,
+        family_name: shared.family_name.lock().unwrap().clone(),
     };
     let sealed = FamilyKey::from_raw(b.key.dh(&joiner_pub)).seal(&serde_json::to_vec(&blob)?)?;
     use base64::Engine;
