@@ -367,6 +367,7 @@ if [ -n "$code" ]; then
     short=${code##*bootstrap code: }
     lines="$lines|bootstrap   ${B}${C_GR}$short${R0}  ${D2}(one-shot — first device becomes the founder)${R0}"
     lines="$lines||${B}first laptop:${R0}  murmurd pair --server $EP --code $short"
+    lines="$lines|${D2}lost the code?  sudo murmur-server bootstrap-code${R0}"
 else
     lines="$lines||family exists — invite new devices via ${B}murmurctl invite${R0}"
 fi

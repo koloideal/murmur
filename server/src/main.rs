@@ -89,6 +89,8 @@ struct Bootstrap {
     session: DeviceId,
     key: murmur_proto::PairKey,
     joiner: Option<(murmur_proto::PublicKey, String)>,
+    /// SAS shown to the operator while a joiner is mid-handshake.
+    sas: Option<String>,
 }
 
 impl Shared {
@@ -115,6 +117,7 @@ impl Shared {
                 code,
                 key: murmur_proto::PairKey::generate(),
                 joiner: None,
+                sas: None,
             })
         } else {
             None
@@ -308,6 +311,7 @@ enum AdminReq {
     AddDevice { name: String },
     ListDevices,
     Revoke { device_id: DeviceId },
+    BootstrapCode,
 }
 
 /// One roundtrip against the running server's admin socket.
@@ -354,6 +358,19 @@ fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
                 "family": *shared.family_name.lock().unwrap(),
                 "data": shared.device_list(),
             })
+        }
+        AdminReq::BootstrapCode => {
+            // Same lazy disarm as bootstrap_session: a live device means
+            // the window is closed even if it was opened via add-device.
+            let mut bs = shared.bootstrap.lock().unwrap();
+            if bs.is_some() && !shared.devices.lock().unwrap().values().all(|d| d.revoked) {
+                *bs = None;
+            }
+            let (code, sas) = bs
+                .as_ref()
+                .map(|b| (Some(b.code.clone()), b.sas.clone()))
+                .unwrap_or((None, None));
+            serde_json::json!({"ok": true, "code": code, "sas": sas})
         }
         AdminReq::Revoke { device_id } => {
             if shared.revoke(&device_id) {
@@ -431,6 +448,19 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some("bootstrap-code") => {
+            let res = admin_req(&AdminReq::BootstrapCode, &args)?;
+            match res["code"].as_str() {
+                Some(c) => {
+                    println!("{c}");
+                    if let Some(s) = res["sas"].as_str() {
+                        println!("sas: {s}  (a joiner is pairing right now)");
+                    }
+                }
+                None => eprintln!("no bootstrap code — the family already has devices"),
+            }
+            Ok(())
+        }
         Some("install") => install(&args[1..]),
         Some(other) => bail!(
             "unknown command {other:?} — usage:\n\
@@ -438,6 +468,7 @@ async fn main() -> anyhow::Result<()> {
              \x20 murmur-server add-device --name X [--admin-sock P]\n\
              \x20 murmur-server list-devices [--admin-sock P]\n\
              \x20 murmur-server revoke --id ID [--admin-sock P]\n\
+             \x20 murmur-server bootstrap-code [--admin-sock P]\n\
              \x20 murmur-server install [--addr A] [--family-name N] [--user]"
         ),
     }
@@ -930,6 +961,7 @@ async fn bootstrap_hello(
         b.joiner = Some((joiner_pub, name.to_owned()));
         let sas =
             murmur_proto::sas_code(&b.key.public, &joiner_pub, &session, &DeviceId::ZERO);
+        b.sas = Some(sas.clone());
         info!("bootstrap: '{name}' pairing — SAS {sas} (must match the joiner's screen)");
         Envelope::control(
             DeviceId::ZERO,

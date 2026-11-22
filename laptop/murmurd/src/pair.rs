@@ -234,7 +234,8 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
         },
         _ => bail!("no hello reply"),
     }
-    eprintln!("connected to {server_url} as pair session {session}");
+    eprintln!("  ✓ connected to {server_url}");
+    eprintln!("  › pair session {session}");
 
     // PairHello goes to @server — it forwards to whoever PairOpen'd
     // this session, so the joiner never needs the inviter's id.
@@ -248,7 +249,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
         },
     )?;
     sink.send(Ws::Text(hello.to_json().into())).await?;
-    eprintln!("waiting for the inviter to accept — `murmurctl pair` there");
+    eprintln!("  › waiting for the inviter — `murmurctl pair` there");
 
     tokio::time::timeout(JOIN_TIMEOUT, async {
         let mut dh_key: Option<FamilyKey> = None;
@@ -267,11 +268,13 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                     // the joiner confirms right here.
                     let sas = sas_code(&key.public, &peer, &session, &env.from);
                     if env.from == DeviceId::ZERO {
-                        eprintln!("bootstrap pairing — verification code: {sas}");
-                        eprintln!(
-                            "compare it with the relay log: journalctl -u murmur-server"
-                        );
-                        eprint!("codes match? [y/N] ");
+                        eprintln!("  │");
+                        eprintln!("  │  verification code   {sas}");
+                        eprintln!("  │");
+                        eprintln!("  │  get it on the relay:");
+                        eprintln!("  │    sudo murmur-server bootstrap-code");
+                        eprintln!("  │");
+                        eprint!("  ? codes match? [y/N] ");
                         use std::io::Write;
                         std::io::stderr().flush()?;
                         // SAS is a human check — read the real terminal, not
@@ -295,12 +298,12 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         let confirm =
                             Envelope::control(session, Route::Server, 2, &Control::PairConfirm)?;
                         sink.send(Ws::Text(confirm.to_json().into())).await?;
-                        eprintln!("confirmed — receiving credentials");
+                        eprintln!("  ✓ confirmed — receiving credentials");
                     } else {
-                        eprintln!("verification code: {sas}");
-                        eprintln!(
-                            "confirm it matches on the inviter, it will then complete pairing"
-                        );
+                        eprintln!("  │");
+                        eprintln!("  │  verification code   {sas}");
+                        eprintln!("  │");
+                        eprintln!("  │  the inviter confirms it — pairing completes there");
                     }
                 }
                 Control::PairData { blob_b64 } => {
