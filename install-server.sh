@@ -27,6 +27,38 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# ---- pretty
+if [ -t 1 ]; then
+    B=$(printf '\033[1m') D2=$(printf '\033[2m') R0=$(printf '\033[0m')
+    C_AC=$(printf '\033[38;5;141m') C_CY=$(printf '\033[36m')
+    C_GR=$(printf '\033[32m') C_YL=$(printf '\033[33m') C_RD=$(printf '\033[31m')
+else
+    B= D2= R0= C_AC= C_CY= C_GR= C_YL= C_RD=
+fi
+
+step() { printf '%s  ›%s %s\n' "$C_AC$B" "$R0" "$*"; }
+ok()   { printf '%s  ✓%s %s\n' "$C_GR" "$R0" "$*"; }
+warn() { printf '%s  !%s %s\n' "$C_YL" "$R0" "$*" >&2; }
+die()  { printf '%s  ✗%s %s\n' "$C_RD" "$R0" "$*" >&2; exit 1; }
+
+banner() {
+    printf '%s%s' "$B" "$C_AC"
+    cat <<'EOF'
+
+   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __
+  | '_ ` _ \| | | | '__| '_ ` _ \| | | | '__|
+  | | | | | | |_| | |  | | | | | | |_| | |
+  |_| |_| |_|\__,_|_|  |_| |_| |_|\__,_|_|
+EOF
+    printf '%s' "$R0"
+    printf '  %srelay installer — private device sync, self-hosted%s\n\n' "$D2" "$R0"
+}
+
+dl() { # dl URL DEST
+    if [ -t 1 ]; then curl -fL --progress-bar "$1" -o "$2"
+    else curl -fsSL "$1" -o "$2"; fi
+}
+
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
 
 # ask DEFAULT IGNORED PROMPT — interactive unless --yes (then DEFAULT).
@@ -34,13 +66,13 @@ ask() {
     if [ -n "$YES" ] || ! have_tty; then
         echo "$1"; return
     fi
-    printf "%s [%s]: " "$3" "${1:-—}" > /dev/tty
+    printf '%s  ?%s %s %s[%s]%s ' "$C_CY" "$R0" "$3" "$D2" "${1:-—}" "$R0" > /dev/tty
     read -r a < /dev/tty || a=""
     echo "${a:-$1}"
 }
 
 askyn() {
-    a=$(ask "$1" "" "$2 (y/n)")
+    a=$(ask "$1" "" "$2")
     case "$a" in
         y|Y|yes) return 0 ;;
         n|N|no)  return 1 ;;
@@ -52,19 +84,21 @@ askyn() {
 fw_open() {
     port=$1
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow "$port/tcp"
+        ufw allow "$port/tcp" >/dev/null && ok "ufw: $port/tcp allowed"
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port="$port/tcp" && firewall-cmd --reload
+        firewall-cmd --permanent --add-port="$port/tcp" >/dev/null && \
+            firewall-cmd --reload >/dev/null && ok "firewalld: $port/tcp allowed"
     elif command -v nft >/dev/null 2>&1; then
-        echo "   open $port/tcp — e.g.: nft add rule inet filter input tcp dport $port accept"
+        warn "nftables: open $port/tcp — nft add rule inet filter input tcp dport $port accept"
     elif command -v iptables >/dev/null 2>&1; then
-        echo "   open $port/tcp — e.g.: iptables -A INPUT -p tcp --dport $port -j ACCEPT"
+        warn "iptables: open $port/tcp — iptables -A INPUT -p tcp --dport $port -j ACCEPT"
     else
-        echo "   open $port/tcp in your firewall"
+        warn "no firewall tool found — open $port/tcp manually if needed"
     fi
 }
 
-[ "$(id -u)" -eq 0 ] || { echo "needs root — run: curl -fsSL ... | sudo sh" >&2; exit 1; }
+banner
+[ "$(id -u)" -eq 0 ] || die "needs root — run: curl -fsSL ... | sudo sh"
 
 # ---- questions first, so failures don't waste the user's time
 if [ -z "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
@@ -82,7 +116,7 @@ if [ -n "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
     if [ -n "$found" ]; then
         askyn y "configure $found as TLS proxy for $DOMAIN?" && PROXY=$found || PROXY=none
     else
-        echo "note: no nginx/caddy found — relay stays plain ws, TLS is on you" >&2
+        warn "no nginx/caddy found — relay stays plain ws, TLS is on you"
         PROXY=none
     fi
 fi
@@ -96,18 +130,20 @@ esac
 case "$(uname -m)" in
     x86_64)        TARGET=x86_64-unknown-linux-musl ;;
     aarch64|arm64) TARGET=aarch64-unknown-linux-musl ;;
-    *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+    *) die "unsupported arch: $(uname -m)" ;;
 esac
 
 URL="https://github.com/$REPO/releases/latest/download/murmur-server-$TARGET"
-echo "==> $URL"
+step "downloading murmur-server ($TARGET)"
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
-curl -fsSL "$URL" -o "$tmp"
+dl "$URL" "$tmp"
 install -m 755 "$tmp" "$PREFIX/murmur-server"
+ok "$PREFIX/murmur-server"
 
 # ---- proxy config + TLS
 case "$PROXY" in
     nginx)
+        step "nginx vhost for $DOMAIN"
         vh="/etc/nginx/sites-available/$DOMAIN"
         cat > "$vh" <<EOF
 server {
@@ -127,11 +163,13 @@ server {
 EOF
         ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
         nginx -t && systemctl reload nginx
+        ok "$vh enabled"
 
         if ! command -v certbot >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1 && \
                askyn y "certbot not installed — install certbot + nginx plugin via apt?"; then
-                apt-get update && apt-get install -y certbot python3-certbot-nginx
+                apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
+                ok "certbot installed"
             fi
         fi
         if command -v certbot >/dev/null 2>&1; then
@@ -141,15 +179,16 @@ EOF
             [ -n "$EMAIL" ] && ef="--email $EMAIL" || ef="--register-unsafely-without-email"
             # shellcheck disable=SC2086
             if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $ef --redirect; then
-                echo "==> https://$DOMAIN ready"
+                ok "https://$DOMAIN — certificate installed"
             else
-                echo "!! certbot failed — run it manually: certbot --nginx -d $DOMAIN" >&2
+                warn "certbot failed — run it manually: certbot --nginx -d $DOMAIN"
             fi
         else
-            echo "!! no certbot — get the cert yourself, then add 443 to $vh" >&2
+            warn "no certbot — get the cert yourself, then add 443 to $vh"
         fi
         ;;
     caddy)
+        step "caddy site for $DOMAIN"
         cf="/etc/caddy/Caddyfile"
         if ! grep -q "^$DOMAIN" "$cf" 2>/dev/null; then
             cat >> "$cf" <<EOF
@@ -160,7 +199,7 @@ $DOMAIN {
 EOF
         fi
         systemctl reload caddy 2>/dev/null || caddy reload --config "$cf" 2>/dev/null || true
-        echo "==> caddy serves https://$DOMAIN (cert is automatic)"
+        ok "https://$DOMAIN — caddy issues the cert itself"
         ;;
 esac
 
@@ -183,25 +222,25 @@ if [ "$FW_CFG" != "no" ]; then
 fi
 
 # ---- systemd unit + start (idempotent)
-"$PREFIX/murmur-server" install --addr "$ADDR"
+step "systemd service"
+"$PREFIX/murmur-server" install --addr "$ADDR" >/dev/null
+ok "murmur-server.service enabled + started ($ADDR)"
 
 sleep 1
 code=$(journalctl -u murmur-server -n 30 --no-pager 2>/dev/null \
     | grep -o 'bootstrap code: [0-9A-Z-]*' | tail -1 || true)
 
-echo
-echo "=== murmur-server is up ==="
-if [ -n "$DOMAIN" ]; then
-    echo "public endpoint: wss://$DOMAIN/"
-else
-    echo "relay endpoint: ws://$ADDR  (no TLS — private nets only)"
-fi
+if [ -n "$DOMAIN" ]; then EP="wss://$DOMAIN"; else EP="ws://$ADDR"; fi
+
+printf '\n  %s┌─%s %s murmur-server is up %s\n' "$C_AC" "$R0" "$B" "$R0"
+printf '  %s│%s\n' "$C_AC" "$R0"
+printf '  %s│%s   endpoint     %s%s%s\n' "$C_AC" "$R0" "$C_CY" "$EP" "$R0"
 if [ -n "$code" ]; then
     short=${code##*bootstrap code: }
-    echo "$code"
-    echo
-    echo "first laptop — install then:"
-    echo "  murmurd pair --server wss://$DOMAIN --code $short"
+    printf '  %s│%s   bootstrap    %s%s%s%s  (one-shot, founder becomes the family)\n' "$C_AC" "$R0" "$B" "$C_GR" "$short" "$R0"
+    printf '  %s│%s\n' "$C_AC" "$R0"
+    printf '  %s│%s   first laptop:  %smurmurd pair --server %s --code %s%s\n' "$C_AC" "$R0" "$B" "$EP" "$short" "$R0"
 else
-    echo "registry already has devices — new ones pair via \`murmurctl invite\`"
+    printf '  %s│%s   family already exists — invite new devices via %smurmurctl invite%s\n' "$C_AC" "$R0" "$B" "$R0"
 fi
+printf '  %s└────────────────────────────────────────%s\n\n' "$C_AC" "$R0"
