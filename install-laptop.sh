@@ -73,6 +73,22 @@ else
 fi
 
 if [ $# -gt 0 ]; then
+    # sanity-check pair args before they hit murmurd
+    prev=""
+    for a in "$@"; do
+        case "$prev" in
+            --server)
+                case "$a" in
+                    ws://*|wss://*) ;;
+                    *) die "--server must be a ws:// or wss:// URL (got: $a)" ;;
+                esac ;;
+            --code)
+                printf '%s' "$a" | grep -Eq '^[A-Z0-9]{4}-[A-Z0-9]{4}$' || \
+                    warn "--code usually looks like XXXX-XXXX (got: $a) — continuing anyway"
+                ;;
+        esac
+        prev=$a
+    done
     echo
     exec "$BIN/murmurd" pair "$@"
 fi

@@ -61,24 +61,61 @@ dl() { # dl URL DEST
 
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
 
-# ask DEFAULT IGNORED PROMPT — interactive unless --yes (then DEFAULT).
-ask() {
-    if [ -n "$YES" ] || ! have_tty; then
-        echo "$1"; return
-    fi
-    printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${1:-—}" "$R0" > /dev/tty
-    printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
-    read -r a < /dev/tty || a=""
-    echo "${a:-$1}"
+# ---- validators: print a friendly hint to stderr, return 1 on bad input
+v_domain() {
+    [ -z "$1" ] && return 0
+    printf '%s' "$1" | grep -Eq '^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$' && return 0
+    printf '  %s✗%s expected a domain like relay.example.com (or empty)\n' "$C_RD" "$R0" >&2
+    return 1
 }
 
-askyn() {
-    a=$(ask "$1" "" "$2")
-    case "$a" in
-        y|Y|yes) return 0 ;;
-        n|N|no)  return 1 ;;
-        *)       [ "$1" = "y" ] ;;
+v_addr() {
+    case "$1" in
+        \[*\]:*) host=${1%\]:*}; port=${1##*:} ;;          # [v6]:port
+        *:*)     host=${1%:*};   port=${1##*:} ;;          # host:port / v4:port
+        *)       host=""; port="" ;;
     esac
+    [ -n "$host" ] || {
+        printf '  %s✗%s expected HOST:PORT — e.g. 127.0.0.1:8770\n' "$C_RD" "$R0" >&2; return 1; }
+    case "$port" in
+        ''|*[!0-9]*) printf '  %s✗%s port must be a number — e.g. 127.0.0.1:8770\n' "$C_RD" "$R0" >&2; return 1 ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && return 0
+    printf '  %s✗%s port must be between 1 and 65535\n' "$C_RD" "$R0" >&2
+    return 1
+}
+
+v_email() {
+    [ -z "$1" ] && return 0
+    printf '%s' "$1" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[A-Za-z]{2,}$' && return 0
+    printf '  %s✗%s that does not look like an email — e.g. you@example.com (or empty)\n' "$C_RD" "$R0" >&2
+    return 1
+}
+
+# ask VALIDATOR DEFAULT PROMPT — re-asks until valid; --yes/non-tty = DEFAULT.
+ask() {
+    _v=$1
+    while :; do
+        if [ -n "$YES" ] || ! have_tty; then echo "$2"; return; fi
+        printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${2:-—}" "$R0" > /dev/tty
+        printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
+        read -r _a < /dev/tty || _a=""
+        _a=${_a:-$2}
+        if [ -z "$_v" ] || "$_v" "$_a"; then echo "$_a"; return; fi
+    done
+}
+
+# askyn DEFAULT PROMPT — re-asks until y/n; empty = DEFAULT.
+askyn() {
+    while :; do
+        _a=$(ask "" "$1" "$2 (y/n)")
+        case "$_a" in
+            y|Y|yes) return 0 ;;
+            n|N|no)  return 1 ;;
+            "")      [ "$1" = "y" ]; return ;;
+            *)       printf '  %s✗%s answer y or n (Enter = %s)\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
+        esac
+    done
 }
 
 # fw_open PORT — ufw / firewalld / print the nft rule for the rest.
@@ -103,7 +140,7 @@ banner
 
 # ---- questions first, so failures don't waste the user's time
 if [ -z "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
-    DOMAIN=$(ask "" "" "public domain for the wss endpoint (empty = plain ws, no TLS)")
+    DOMAIN=$(ask v_domain "" "public domain for the wss endpoint (empty = plain ws, no TLS)")
 fi
 
 # Proxy detection: prefer what's already installed. nginx needs certbot
@@ -123,9 +160,14 @@ if [ -n "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
 fi
 
 case "$PROXY" in
-    nginx|caddy) ADDR=$(ask "127.0.0.1:8770" "" "relay listen address (localhost — proxy terminates TLS)") ;;
-    *)           ADDR=$(ask "0.0.0.0:8770" "" "relay listen address") ;;
+    nginx|caddy) ADDR=$(ask v_addr "127.0.0.1:8770" "relay listen address (localhost — proxy terminates TLS)") ;;
+    *)           ADDR=$(ask v_addr "0.0.0.0:8770" "relay listen address") ;;
 esac
+
+# flag-supplied values are validated too (interactive answers already are)
+v_domain "$DOMAIN" || exit 1
+v_addr "$ADDR"     || exit 1
+v_email "$EMAIL"   || exit 1
 
 # ---- binary
 case "$(uname -m)" in
@@ -175,7 +217,7 @@ EOF
         fi
         if command -v certbot >/dev/null 2>&1; then
             if [ -z "$EMAIL" ]; then
-                EMAIL=$(ask "" "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
+                EMAIL=$(ask v_email "" "email for Let's Encrypt (empty = --register-unsafely-without-email)")
             fi
             [ -n "$EMAIL" ] && ef="--email $EMAIL" || ef="--register-unsafely-without-email"
             # shellcheck disable=SC2086
