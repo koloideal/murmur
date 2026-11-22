@@ -66,7 +66,8 @@ ask() {
     if [ -n "$YES" ] || ! have_tty; then
         echo "$1"; return
     fi
-    printf '%s  ?%s %s %s[%s]%s ' "$C_CY" "$R0" "$3" "$D2" "${1:-—}" "$R0" > /dev/tty
+    printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${1:-—}" "$R0" > /dev/tty
+    printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
     read -r a < /dev/tty || a=""
     echo "${a:-$1}"
 }
