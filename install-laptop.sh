@@ -42,6 +42,7 @@ EOF
 dl() { # dl URL DEST
     if [ -t 1 ]; then curl -fL --progress-bar "$1" -o "$2"
     else curl -fsSL "$1" -o "$2"; fi
+    printf '\n'
 }
 
 banner

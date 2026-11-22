@@ -57,6 +57,7 @@ EOF
 dl() { # dl URL DEST
     if [ -t 1 ]; then curl -fL --progress-bar "$1" -o "$2"
     else curl -fsSL "$1" -o "$2"; fi
+    printf '\n'
 }
 
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
@@ -209,12 +210,14 @@ EOF
         ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
         nginx -t && systemctl reload nginx
         ok "$vh enabled"
+        printf '\n'
 
         if ! command -v certbot >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1 && \
                askyn y "certbot not installed — install certbot + nginx plugin via apt?"; then
                 apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
                 ok "certbot installed"
+                printf '\n'
             fi
         fi
         if command -v certbot >/dev/null 2>&1; then
@@ -228,6 +231,7 @@ EOF
             else
                 warn "certbot failed — run it manually: certbot --nginx -d $DOMAIN"
             fi
+            printf '\n'
         else
             warn "no certbot — get the cert yourself, then add 443 to $vh"
         fi
