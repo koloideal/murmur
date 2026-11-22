@@ -315,7 +315,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    // No subcommand (or a flag in first position) means "run the relay".
+    match args.first().filter(|a| !a.starts_with('-')).map(String::as_str) {
         None => serve(&args).await,
         Some("add-device") => {
             let name = flag_value(&args[1..], "--name")
