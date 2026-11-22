@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -63,7 +64,15 @@ fun NotificationsCard() {
                     )
                 }
                 Spacer(Modifier.width(12.dp))
-                Switch(checked = hide, onCheckedChange = { secrets.hideNotificationText = it })
+                Switch(
+                    checked = hide,
+                    onCheckedChange = { secrets.hideNotificationText = it },
+                    colors = SwitchDefaults.colors(
+                        uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                    ),
+                )
             }
         }
     }

@@ -27,7 +27,7 @@ use murmur_proto::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,9 @@ struct Shared {
     devices: Mutex<HashMap<DeviceId, DeviceRec>>,
     /// Family name — set via --family-name, stored in devices.json.
     family_name: Mutex<Option<String>>,
+    /// The URL devices actually dial (wss://…), shown in `status`.
+    /// Set once via --public-url / MURMUR_PUBLIC_URL, persisted.
+    public_url: Mutex<Option<String>>,
     /// Live connections.
     conns: Mutex<HashMap<DeviceId, Conn>>,
     /// Open pair sessions: session → inviter. Lets a joiner reach the
@@ -101,14 +104,19 @@ impl Shared {
     fn load(path: PathBuf) -> anyhow::Result<Self> {
         // devices.json is the device map + an optional "family_name" key.
         let mut family_name = None;
+        let mut public_url = None;
         let devices: HashMap<DeviceId, DeviceRec> = match std::fs::read_to_string(&path) {
             Ok(s) => {
                 let mut v: serde_json::Value =
                     serde_json::from_str(&s).context("parse devices.json")?;
-                family_name = v
-                    .as_object_mut()
-                    .and_then(|o| o.remove("family_name"))
-                    .and_then(|x| x.as_str().map(String::from));
+                if let Some(o) = v.as_object_mut() {
+                    family_name = o
+                        .remove("family_name")
+                        .and_then(|x| x.as_str().map(String::from));
+                    public_url = o
+                        .remove("public_url")
+                        .and_then(|x| x.as_str().map(String::from));
+                }
                 serde_json::from_value(v).context("parse devices.json")?
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
@@ -132,6 +140,7 @@ impl Shared {
             devices_path: path,
             devices: Mutex::new(devices),
             family_name: Mutex::new(family_name),
+            public_url: Mutex::new(public_url),
             conns: Mutex::new(HashMap::new()),
             open_pairs: Mutex::new(HashMap::new()),
             bootstrap: Mutex::new(bootstrap),
@@ -155,6 +164,9 @@ impl Shared {
             let mut m = v.as_object()?.clone();
             if let Some(n) = self.family_name.lock().unwrap().as_ref() {
                 m.insert("family_name".into(), n.clone().into());
+            }
+            if let Some(u) = self.public_url.lock().unwrap().as_ref() {
+                m.insert("public_url".into(), u.clone().into());
             }
             serde_json::to_string_pretty(&m).ok()
         });
@@ -299,6 +311,66 @@ impl Shared {
     }
 }
 
+
+// ---------- tiny ansi kit (colors only on a tty) ----------
+
+struct Paint(bool);
+impl Paint {
+    fn new() -> Self {
+        Self(std::io::stdout().is_terminal())
+    }
+    fn wrap(&self, code: &str, s: impl std::fmt::Display) -> String {
+        if self.0 {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+    fn accent(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("38;5;214", s) // the murmur amber
+    }
+    fn green(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("32", s)
+    }
+    fn red(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("31", s)
+    }
+    fn dim(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("2", s)
+    }
+    fn bold(&self, s: impl std::fmt::Display) -> String {
+        self.wrap("1", s)
+    }
+}
+
+const ART: &str = "   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
+  | \x27_ ` _ \\| | | | \x27__| \x27_ ` _ \\| | | | \x27__|\n\
+  | | | | | | |_| | |  | | | | | | |_| | |\n\
+  |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
+
+/// One framed block: `╭─ murmur ────╮` … `│ lines` … `╰────╯`,
+/// matching the installer boxes. Widths count chars, not bytes.
+fn frame(p: &Paint, title: &str, lines: &[String]) {
+    let w = lines
+        .iter()
+        .map(|l| l.chars().count() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 4)
+        + 2;
+    let head = format!("─ {title} ");
+    println!(
+        "  {}╭{}{}╮",
+        "",
+        p.accent(&head),
+        "─".repeat(w.saturating_sub(head.chars().count())),
+    );
+    for l in lines {
+        println!("  {}  {l}", p.accent("│"));
+    }
+    println!("  {}╰{}╯", "", "─".repeat(w));
+}
+
 // ---------- admin socket (CLI ↔ running server) ----------
 
 /// CLI flag beats env beats nothing. All paths are overridable three ways.
@@ -420,6 +492,7 @@ fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
                 "addr": *shared.addr.lock().unwrap(),
                 "uptime_secs": shared.started.elapsed().as_secs(),
                 "family": *shared.family_name.lock().unwrap(),
+                "public_url": *shared.public_url.lock().unwrap(),
                 "registered": devices.len(),
                 "active": active,
                 "online": online,
@@ -450,24 +523,37 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
 
-const USAGE: &str = "murmur-server — the murmur relay (sees only ciphertext)
+fn print_help(p: &Paint) {
+    let d = |s: &str| p.dim(s);
+    let lines: Vec<String> = [
+        ART.lines().map(|l| p.accent(l)).collect::<Vec<_>>(),
+        vec![String::new(), d("the murmur relay — it routes ciphertext, nothing else")],
+        vec![String::new()],
+        vec![
+            p.bold("service").to_string(),
+            format!("  {}  run the relay", p.accent("serve --addr A")),
+            format!("  {}  systemd unit + autostart", p.accent("install")),
+        ],
+        vec![String::new(), p.bold("admin").to_string()],
+        vec![
+            format!("  {}           what the relay is doing right now", p.accent("status")),
+            format!("  {}     device table · state · online · rtt", p.accent("list-devices")),
+            format!("  {}  register a device by hand", p.accent("add-device")),
+            format!("  {}         kick a device — members rotate the key", p.accent("revoke")),
+            format!("  {}   one-shot code while the family is empty", p.accent("bootstrap-code")),
+        ],
+        vec![
+            String::new(),
+            d("admin commands talk to the live relay over the admin socket —"),
+            d("no sudo needed once you're in the `murmur` group."),
+        ],
+    ]
+    .concat();
+    println!();
+    frame(p, "murmur-server", &lines);
+    println!();
+}
 
-usage:
-  murmur-server <command>
-
-service:
-  serve --addr A [--devices P] [--admin-sock P] [--admin-group G]   run the relay
-  install [--addr A] [--family-name N] [--user]                     systemd unit + autostart
-
-admin (talks to the running relay, no sudo needed if you're in the admin group):
-  status                 overview: family, devices, uptime, open invites
-  list-devices           device table: id · name · state · online · rtt
-  add-device --name N    register a device manually (prints one-shot token)
-  revoke --id ID         kick a device — members rotate the family key
-  bootstrap-code         the one-shot code, while the family is empty
-
-bare `murmur-server` prints this text. All commands accept
---admin-sock P / MURMUR_ADMIN_SOCK to reach a non-default socket.";
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     // A flag in first position means "run the relay" (the systemd
@@ -475,14 +561,14 @@ bare `murmur-server` prints this text. All commands accept
     // subcommand word → the CLI.
     match args.first().filter(|a| !a.starts_with('-')).map(String::as_str) {
         None if args.is_empty() => {
-            print!("{USAGE}");
+            print_help(&Paint::new());
             Ok(())
         }
         None => serve(&args).await,
         Some("serve") => serve(&args[1..]).await,
         Some("status") => status(&args),
         Some("-h") | Some("--help") | Some("help") => {
-            print!("{USAGE}");
+            print_help(&Paint::new());
             Ok(())
         }
         Some("add-device") => {
@@ -495,9 +581,14 @@ bare `murmur-server` prints this text. All commands accept
                 bail!("{}", res["error"].as_str().unwrap_or("add-device failed"));
             }
             let d = &res["data"];
-            println!("device_id: {}", d["device_id"].as_str().unwrap());
-            println!("token: {}", d["token"].as_str().unwrap());
-            eprintln!("(token is shown once — store it in secrets.toml on the device)");
+            let p = Paint::new();
+            println!();
+            frame(&p, "device added", &[
+                format!("id      {}", p.bold(d["device_id"].as_str().unwrap())),
+                format!("token   {}", p.dim(d["token"].as_str().unwrap())),
+                p.dim("token shown once — store it in secrets.toml on the device"),
+            ]);
+            println!();
             Ok(())
         }
         Some("list-devices") => {
@@ -508,24 +599,22 @@ bare `murmur-server` prints this text. All commands accept
             if let Some(fam) = res["family"].as_str() {
                 println!("family: {fam}");
             }
+            let p = Paint::new();
             for d in res["data"].as_array().into_iter().flatten() {
+                let (mark, state) = if d["revoked"].as_bool() == Some(true) {
+                    (p.red("✕"), p.dim("revoked"))
+                } else if d["online"].as_bool() == Some(true) {
+                    (p.green("●"), p.green("online"))
+                } else {
+                    (p.dim("○"), p.dim("offline"))
+                };
                 println!(
-                    "{}  {}  {}  {}  {}",
-                    d["device_id"].as_str().unwrap_or("?"),
-                    d["name"].as_str().unwrap_or("?"),
-                    if d["revoked"].as_bool() == Some(true) {
-                        "revoked"
-                    } else {
-                        "active"
-                    },
-                    if d["online"].as_bool() == Some(true) {
-                        "online"
-                    } else {
-                        "offline"
-                    },
+                    "  {mark}  {}  {:<20} {state}  {}",
+                    p.dim(d["device_id"].as_str().unwrap_or("?")),
+                    p.bold(d["name"].as_str().unwrap_or("?")),
                     d["rtt_ms"]
                         .as_u64()
-                        .map(|ms| format!("{ms}ms"))
+                        .map(|ms| p.dim(format!("{ms}ms")))
                         .unwrap_or_default(),
                 );
             }
@@ -538,7 +627,13 @@ bare `murmur-server` prints this text. All commands accept
                 .parse()?;
             let res = admin_req(&AdminReq::Revoke { device_id: id }, &args)?;
             match res["ok"].as_bool() {
-                Some(true) => println!("{id} revoked — live connection dropped"),
+                Some(true) => {
+                    let p = Paint::new();
+                    println!();
+                    println!("  {} {id} revoked", p.green("✓"));
+                    println!("  {}", p.dim("live connection dropped · members rotate the family key"));
+                    println!();
+                }
                 _ => bail!("{}", res["error"].as_str().unwrap_or("failed")),
             }
             Ok(())
@@ -548,24 +643,29 @@ bare `murmur-server` prints this text. All commands accept
             if res["ok"].as_bool() != Some(true) {
                 bail!("{}", res["error"].as_str().unwrap_or("bootstrap-code failed"));
             }
+            let p = Paint::new();
             match res["code"].as_str() {
                 Some(c) => {
-                    println!("{c}");
+                    println!("{}", p.bold(c));
                     if let Some(s) = res["sas"].as_str() {
-                        println!("sas: {s}  (a joiner is pairing right now)");
+                        println!("{}", p.dim(format!("sas: {s}  (a joiner is pairing right now)")));
                     }
                 }
-                None => eprintln!("no bootstrap code — the family already has devices"),
+                None => println!("{}", p.dim("no bootstrap code — the family already has devices")),
             }
             Ok(())
         }
         Some("install") => install(&args[1..]),
-        Some(other) => bail!("unknown command {other:?}\n\n{USAGE}"),
+        Some(other) => {
+            print_help(&Paint::new());
+            bail!("unknown command {other:?}")
+        }
     }
 }
 
-/// `murmur-server status` — one screen of what the relay is doing.
+/// `murmur-server status` — one framed screen of what the relay is doing.
 fn status(args: &[String]) -> anyhow::Result<()> {
+    let p = Paint::new();
     let res = admin_req(&AdminReq::Status, args)?;
     if res["ok"].as_bool() != Some(true) {
         bail!(
@@ -586,40 +686,51 @@ fn status(args: &[String]) -> anyhow::Result<()> {
         .filter_map(|x| x.as_str())
         .collect();
     let pairs = res["open_pairs"].as_u64().unwrap_or(0);
+    let public = res["public_url"].as_str().unwrap_or("");
 
-    println!("murmur-server · up {uptime}");
-    println!("  relay      {}", res["addr"].as_str().unwrap_or("?"));
-    match res["family"].as_str() {
-        Some(f) => println!("  family     {f}"),
-        None => println!("  family     (unnamed)"),
+    let mut lines: Vec<String> = Vec::new();
+    let side = [
+        format!("listen    {}", p.bold(res["addr"].as_str().unwrap_or("?"))),
+        format!("public    {}", p.bold(if public.is_empty() { "—" } else { public })),
+        format!("family    {}", p.bold(res["family"].as_str().unwrap_or("(unnamed)"))),
+        format!("up        {uptime}"),
+    ];
+    let art_w = ART.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+    for (l, side) in ART.lines().zip(side) {
+        lines.push(format!("{l:<art_w$}   {side}"));
     }
-    println!(
-        "  devices    {} registered · {} active · {} online{}",
+    lines.push(String::new());
+    let online_str = if online.is_empty() {
+        p.dim("nobody")
+    } else {
+        online.join(", ")
+    };
+    lines.push(format!(
+        "devices   {} registered · {} active · {}",
         res["registered"].as_u64().unwrap_or(0),
         res["active"].as_u64().unwrap_or(0),
-        online.len(),
-        if online.is_empty() {
-            String::new()
-        } else {
-            format!("  ({})", online.join(", "))
-        },
-    );
-    println!(
-        "  invites    {pairs} open pair session{}",
-        if pairs == 1 { "" } else { "s" },
-    );
+        if online.is_empty() { p.dim("0 online") } else { p.green(format!("{} online · {online_str}", online.len())) },
+    ));
+    lines.push(format!(
+        "invites   {}",
+        if pairs == 0 { p.dim("none") } else { p.bold(format!("{pairs} open pair session{}", if pairs == 1 { "" } else { "s" })) },
+    ));
     match &res["bootstrap"] {
         b if b.is_object() => {
             let code = b["code"].as_str().unwrap_or("?");
             match b["sas"].as_str() {
-                Some(sas) => {
-                    println!("  bootstrap  armed · {code} · sas {sas} (a joiner is pairing)")
-                }
-                None => println!("  bootstrap  armed · {code}"),
+                Some(sas) => lines.push(format!(
+                    "bootstrap {} {code} · sas {sas} {}",
+                    p.accent("armed ·"), p.dim("(a joiner is pairing)")
+                )),
+                None => lines.push(format!("bootstrap {} {code}", p.accent("armed ·"))),
             }
         }
-        _ => println!("  bootstrap  closed — the family has devices"),
+        _ => lines.push(format!("bootstrap {}", p.dim("closed — the family has devices"))),
     }
+    println!();
+    frame(&p, "murmur · relay", &lines);
+    println!();
     Ok(())
 }
 
@@ -788,6 +899,12 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
         *shared.family_name.lock().unwrap() = Some(fam);
         shared.persist();
     }
+    if let Some(url) = flag_value(args, "--public-url")
+        .or_else(|| std::env::var("MURMUR_PUBLIC_URL").ok())
+    {
+        *shared.public_url.lock().unwrap() = Some(url);
+        shared.persist();
+    }
 
     let listener = TcpListener::bind(addr).await?;
     *shared.addr.lock().unwrap() = addr.to_string();
@@ -928,6 +1045,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
             // Same conn id claimed twice (duplicate login or reused pair
             // session): newest wins, the stale conn is terminated.
             let _ = old.close.try_send(());
+            eprintln!("device {device_id} reconnected — dropped the previous conn");
         }
         conns.insert(
             device_id,
