@@ -55,7 +55,7 @@ $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-ser
 **2. Первый ноут** (под юзером, без рута):
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-laptop.sh | sh
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 $ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
 bootstrap pairing — verification code: 452690       # совпадает с логом релея
 $ systemctl --user start murmurd && murmurd doctor
