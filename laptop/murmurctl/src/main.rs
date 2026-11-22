@@ -120,13 +120,15 @@ fn ago(ts: u64) -> String {
 }
 
 fn print_qr(data: &str) {
-    match qrcode::QrCode::new(data) {
+    // EcLevel::L packs the same payload into the fewest modules —
+    // the invite string is long, every module is screen space.
+    match qrcode::QrCode::with_error_correction_level(data, qrcode::EcLevel::L) {
         Ok(code) => {
             let img = code
                 .render::<qrcode::render::unicode::Dense1x2>()
                 .quiet_zone(false)
                 .build();
-            println!("{img}");
+            println!("\n{img}\n");
         }
         Err(e) => eprintln!("(qr render failed: {e})"),
     }
@@ -258,14 +260,15 @@ fn cmd_invite() -> anyhow::Result<()> {
         println!("  {}", p.dim("expires in 10 minutes"));
         println!(
             "\n  {}",
-            p.dim("phone:  open murmur → enter code manually · or scan the QR")
+            p.dim("phone:  open murmur → enter the code · or scan the QR")
         );
         println!(
             "  {}",
-            p.dim("laptop: murmurd pair --code <full invite below>")
+            p.dim(format!(
+                "laptop: murmurd pair --server {server} --code {short}"
+            ))
         );
     }
-    println!("\n{code}");
     Ok(())
 }
 
