@@ -21,6 +21,7 @@ data class Provisioning(
     val familyKey: ByteArray,
     val serverUrl: String,
     val keyEpoch: Long,
+    val familyName: String?,
 )
 
 class PairingException(message: String) : Exception(message)
@@ -207,6 +208,7 @@ suspend fun pair(
                 // this network (e.g. a LAN IP behind a firewall).
                 serverUrl = url,
                 keyEpoch = blob.key_epoch,
+                familyName = blob.family_name,
             )
         }
     } finally {

@@ -223,4 +223,5 @@ data class PairBlob(
     val family_key_b64: String,
     val server_url: String,
     val key_epoch: Long = 0,
+    val family_name: String? = null,
 )

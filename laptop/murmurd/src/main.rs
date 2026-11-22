@@ -223,7 +223,7 @@ async fn doctor() -> anyhow::Result<()> {
             _ => ok(
                 false,
                 String::new(),
-                "relay unreachable — check server_url, DNS, TLS and that murmur-server is up",
+                "relay unreachable — check server_url, DNS, TLS and that murmurs is up",
             ),
         }
     }
@@ -281,53 +281,33 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------- pretty help (same boxes as murmurctl / murmur-server) ----------
+// ---------- pretty help (same banner as the installers) ----------
 
 fn print_help() {
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let ac = |s: &str| if tty { format!("\x1b[38;5;141m{s}\x1b[0m") } else { s.into() };
+    let ac = |s: &str| if tty { format!("\x1b[1;38;5;141m{s}\x1b[0m") } else { s.into() };
     let dm = |s: &str| if tty { format!("\x1b[2m{s}\x1b[0m") } else { s.into() };
     let bd = |s: &str| if tty { format!("\x1b[1m{s}\x1b[0m") } else { s.into() };
+    let cc = |s: &str| if tty { format!("\x1b[38;5;141m{s}\x1b[0m") } else { s.into() };
     let art = "   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n  | \x27_ ` _ \\| | | | \x27__| \x27_ ` _ \\| | | | \x27__|\n  | | | | | | |_| | |  | | | | | | |_| | |\n  |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
-    let mut lines: Vec<String> = art.lines().map(&ac).collect();
-    lines.extend([
-        String::new(),
-        dm("the murmur client daemon".into()),
-        String::new(),
-        bd("run".into()),
-        format!("  {} run the daemon", ac(&format!("{:<18}", "murmurd"))),
-        String::new(),
-        bd("setup".into()),
-        format!("  {} name, server, credentials", ac(&format!("{:<18}", "murmurd init"))),
-        format!("  {} join via invite code", ac(&format!("{:<18}", "murmurd pair"))),
-        format!("  {} systemd user unit", ac(&format!("{:<18}", "murmurd install"))),
-        format!("  {} check config + relay", ac(&format!("{:<18}", "murmurd doctor"))),
-        String::new(),
-        dm("control a running daemon with murmurctl".into()),
-    ]);
-    let w = lines.iter().map(|l| vlen(l)).max().unwrap_or(0).max(12);
     println!();
-    let head = "─ murmurd ";
-    println!("  {}", ac(&format!("╭{}{}╮", head, "─".repeat(w - head.chars().count()))));
-    for l in &lines {
-        let pad = " ".repeat(w - vlen(l));
-        println!("  {} {l}{pad} {}", ac("│"), ac("│"));
+    for l in art.lines() {
+        println!("  {}", ac(l));
     }
-    println!("  {}", ac(&format!("╰{}╯", "─".repeat(w + 1))));
+    println!("  {}", dm("the murmur client daemon"));
     println!();
-}
-
-/// Visible width of a possibly-ANSI-colored line.
-fn vlen(s: &str) -> usize {
-    let mut n = 0;
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (_, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            (false, _) => n += 1,
-        }
+    let rows: &[(&str, &str)] = &[
+        ("murmurd", "run the daemon"),
+        ("murmurd init", "name, server, credentials"),
+        ("murmurd pair", "join via invite code"),
+        ("murmurd install", "systemd user unit"),
+        ("murmurd doctor", "check config + relay"),
+    ];
+    println!("  {}", bd("commands"));
+    for (c, d) in rows {
+        println!("  {} {}", cc(&format!("{c:<18}")), dm(d));
     }
-    n
+    println!();
+    println!("  {}", dm("control a running daemon with murmurctl"));
+    println!();
 }

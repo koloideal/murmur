@@ -51,6 +51,8 @@ pub struct Shared {
     pub id: DeviceId,
     /// Current family key + epoch + a few superseded ones.
     pub keys: RwLock<Keyring>,
+    /// Family name from the latest `Devices` push — for status/blobs.
+    pub family_name: Mutex<Option<String>>,
     /// Long-term identity key — rotations are sealed to it.
     pub identity: PairKey,
     /// Pinned identities of the other members.
@@ -89,6 +91,7 @@ impl Shared {
         Ok(Self {
             id: secrets.device_id()?,
             keys: RwLock::new(Keyring::load(&secrets)?),
+            family_name: Mutex::new(None),
             identity,
             roster: Mutex::new(crate::keyring::load_roster()),
             last_rekey: Mutex::new(HashMap::new()),

@@ -37,12 +37,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -84,6 +91,7 @@ fun PairingCard() {
     var error by remember { mutableStateOf<String?>(null) }
     var hint by remember { mutableStateOf<String?>(null) }
     var celebrating by remember { mutableStateOf(false) }
+    var burstFamily by remember { mutableStateOf<String?>(null) }
 
     val codeReady = code.length == 8
 
@@ -109,7 +117,8 @@ fun PairingCard() {
                     val answer = CompletableDeferred<Boolean>().also { sasAnswer = it }
                     answer.await()
                 }
-                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch)
+                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch, prov.familyName)
+                burstFamily = prov.familyName
                 phase = "done"
                 // Service starts only after the burst finishes — it
                 // constructs a Secrets whose init flips settledFlow,
@@ -187,7 +196,7 @@ fun PairingCard() {
                     Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    PairDoneBurst(onFinished = {
+                    PairDoneBurst(familyName = burstFamily, onFinished = {
                         celebrating = false
                         phase = "idle"
                         code = ""
@@ -379,23 +388,41 @@ private val CYRILLIC_TO_LATIN = mapOf(
 
 /** Eight cells with the dash fixed in the middle — the XXXX-XXXX
  *  shape is the form, not something the user types. A single invisible
- *  text field drives input; the cells are pure presentation. */
+ *  text field drives input; the cells are pure presentation. Tapping a
+ *  cell moves the caret there — the focused cell gets the accent ring. */
 @Composable
 private fun ShortCodeField(code: String, onCode: (String) -> Unit) {
+    val focus = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    // The field's own value carries the caret; `code` is the parent copy.
+    var tfv by remember { mutableStateOf(TextFieldValue(code, TextRange(code.length))) }
+    if (tfv.text != code) { // parent reset (pair failed / left the family)
+        tfv = TextFieldValue(code, TextRange(code.length))
+    }
     BasicTextField(
-        value = code,
+        value = tfv,
         onValueChange = { v ->
             // Only the invite alphabet counts. Cyrillic homoglyphs map to
             // their Latin lookalikes — a Cyrillic Е hashes to a different
             // session id and the relay rejects it as an unknown invite.
-            onCode(
-                v.map { CYRILLIC_TO_LATIN[it] ?: it.uppercaseChar() }
-                    .filter { it in CODE_ALPHABET }
-                    .take(8)
-                    .joinToString(""),
-            )
+            val clean = v.text
+                .map { CYRILLIC_TO_LATIN[it] ?: it.uppercaseChar() }
+                .filter { it in CODE_ALPHABET }
+                .take(8)
+                .joinToString("")
+            val caret = v.text
+                .take(v.selection.start)
+                .map { CYRILLIC_TO_LATIN[it] ?: it.uppercaseChar() }
+                .filter { it in CODE_ALPHABET }
+                .take(8)
+                .size
+            tfv = TextFieldValue(clean, TextRange(caret))
+            onCode(clean)
         },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focus)
+            .onFocusChanged { focused = it.isFocused },
         keyboardOptions = KeyboardOptions(
             capitalization = KeyboardCapitalization.Characters,
             keyboardType = KeyboardType.Ascii,
@@ -410,14 +437,24 @@ private fun ShortCodeField(code: String, onCode: (String) -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    repeat(4) { i -> Cell(code.getOrNull(i), i == code.length, Modifier.weight(1f)) }
+                    val caret = tfv.selection.start
+                    repeat(4) { i ->
+                        Cell(code.getOrNull(i), focused && i == caret, Modifier.weight(1f)) {
+                            tfv = tfv.copy(selection = TextRange(i))
+                            focus.requestFocus()
+                        }
+                    }
                     Text(
                         "–",
                         style = MaterialTheme.typography.headlineSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     repeat(4) { i ->
-                        Cell(code.getOrNull(i + 4), i + 4 == code.length, Modifier.weight(1f))
+                        val idx = i + 4
+                        Cell(code.getOrNull(idx), focused && idx == caret, Modifier.weight(1f)) {
+                            tfv = tfv.copy(selection = TextRange(idx))
+                            focus.requestFocus()
+                        }
                     }
                 }
             }
@@ -426,10 +463,15 @@ private fun ShortCodeField(code: String, onCode: (String) -> Unit) {
 }
 
 @Composable
-private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier) {
+private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier, onTap: () -> Unit = {}) {
     Box(
         modifier
             .height(58.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onTap,
+            )
             .background(
                 MaterialTheme.colorScheme.surfaceContainerHigh,
                 MaterialTheme.shapes.medium,

@@ -25,7 +25,7 @@ import kotlin.math.min
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * The deep module: persistent WSS connection to murmur-server.
+ * The deep module: persistent WSS connection to murmurs.
  *
  * Interface for the rest of the app:
  *   val relay = Relay(url, helloJson = { Control.Hello(...) }, scope)

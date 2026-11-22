@@ -76,6 +76,7 @@ class Secrets(private val ctx: Context) {
         familyKeyBytes: ByteArray,
         serverUrl: String,
         keyEpoch: Long,
+        familyName: String? = null,
     ) {
         prefs.edit {
             putLong(KEY_EPOCH, keyEpoch)
@@ -83,11 +84,15 @@ class Secrets(private val ctx: Context) {
             putString(KEY_URL, serverUrl)
             putString(KEY_TOKEN, cipher.seal(authTokenHex.encodeToByteArray()))
             putString(KEY_FAMILY, cipher.seal(familyKeyBytes))
+            if (familyName != null) putString(KEY_FAMILY_NAME, familyName)
         }
     }
 
     fun authTokenHex(): String? =
         prefs.getString(KEY_TOKEN, null)?.let { cipher.open(it)?.decodeToString() }
+
+    val familyName: String?
+        get() = prefs.getString(KEY_FAMILY_NAME, null)
 
     fun familyKey(): FamilyKey? =
         prefs.getString(KEY_FAMILY, null)?.let { cipher.open(it)?.let(FamilyKey::fromBytes) }
@@ -172,6 +177,7 @@ class Secrets(private val ctx: Context) {
         private const val KEY_DEVICE = "device_id"
         private const val KEY_TOKEN = "auth_token_enc"
         private const val KEY_FAMILY = "family_key_enc"
+        private const val KEY_FAMILY_NAME = "family_name"
         private const val KEY_URL = "server_url"
         private const val KEY_NAME = "device_name"
         private const val KEY_MUTED = "notif_muted"

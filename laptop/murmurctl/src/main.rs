@@ -117,45 +117,22 @@ const ART: &str = "   _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
   | | | | | | |_| | |  | | | | | | |_| | |\n\
   |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
 
-/// Visible width of a possibly-ANSI-colored line.
-fn vlen(s: &str) -> usize {
-    let mut n = 0;
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (_, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            (false, _) => n += 1,
-        }
+/// Installer-style banner: the logo bold in accent, a dim subtitle.
+fn banner(p: &Paint, sub: &str) {
+    println!();
+    for l in ART.lines() {
+        println!("  {}", p.wrap("1;38;5;141", l));
     }
-    n
-}
-
-/// Full-perimeter box, same as the installer and murmur-server.
-fn frame(p: &Paint, title: &str, lines: &[String]) {
-    let w = lines
-        .iter()
-        .map(|l| vlen(l))
-        .max()
-        .unwrap_or(0)
-        .max(title.chars().count() + 2);
-    let head = format!("─ {title} ");
-    let top = format!("╭{}{}╮", head, "─".repeat(w.saturating_sub(head.chars().count())));
-    println!("  {}", p.accent(top));
-    for l in lines {
-        let pad = " ".repeat(w.saturating_sub(vlen(l)));
-        println!("  {} {l}{pad} {}", p.accent("│"), p.accent("│"));
+    if !sub.is_empty() {
+        println!("  {}", p.dim(sub));
     }
-    println!("  {}", p.accent(format!("╰{}╯", "─".repeat(w + 1))));
+    println!();
 }
 
 fn print_help(p: &Paint) {
     let d = |s: &str| p.dim(s);
     let c = |s: &str| p.accent(format!("{s:<12}"));
     let lines: Vec<String> = [
-        ART.lines().map(|l| p.accent(l)).collect::<Vec<_>>(),
-        vec![String::new(), d("control the running murmurd")],
         vec![String::new()],
         vec![
             format!("  {} connection, presence, active node", c("status")),
@@ -168,12 +145,14 @@ fn print_help(p: &Paint) {
         vec![
             String::new(),
             d("kick other devices from the relay host:"),
-            d("murmur-server revoke --id <device>"),
+            d("murmurs revoke --id <device>"),
         ],
     ]
     .concat();
-    println!();
-    frame(p, "murmurctl", &lines);
+    banner(p, "control the running murmurd");
+    for l in &lines[1..] {
+        println!("  {l}");
+    }
     println!();
 }
 
@@ -222,6 +201,7 @@ fn cmd_status() -> anyhow::Result<()> {
         p.red("offline")
     };
 
+    banner(&p, "");
     println!(
         "{} {} {}",
         p.bold(d["name"].as_str().unwrap_or("?")),
@@ -499,7 +479,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(_) => println!("{device_id} revoked — live connection dropped"),
                 Err(e) => anyhow::bail!(
                     "{e}\n  devices can only self-revoke over the wire — \
-                     kick others from the relay host: `murmur-server revoke --id {device_id}`"
+                     kick others from the relay host: `murmurs revoke --id {device_id}`"
                 ),
             }
             Ok(())

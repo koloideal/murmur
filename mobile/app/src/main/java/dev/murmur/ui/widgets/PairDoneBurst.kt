@@ -31,7 +31,7 @@ private const val DURATION = 2800
  * [onFinished] fires once at the end — the caller swaps in the dashboard.
  */
 @Composable
-fun PairDoneBurst(onFinished: () -> Unit = {}) {
+fun PairDoneBurst(familyName: String? = null, onFinished: () -> Unit = {}) {
     val t = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         t.animateTo(1f, tween(DURATION, easing = LinearEasing))
@@ -86,7 +86,7 @@ fun PairDoneBurst(onFinished: () -> Unit = {}) {
         // Greeting fades in once the wave has spoken.
         val greet = ((t.value - 0.52f) / 0.30f).coerceIn(0f, 1f)
         Text(
-            "welcome to the family",
+            familyName?.let { "welcome to $it" } ?: "welcome to the family",
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier

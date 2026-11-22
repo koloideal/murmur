@@ -147,7 +147,7 @@ impl Secrets {
 }
 
 /// `murmurd init` — provision this laptop from credentials printed by
-/// `murmur-server add-device`. Writes config.toml + secrets.toml (0600) and
+/// `murmurs add-device`. Writes config.toml + secrets.toml (0600) and
 /// generates the family key locally — it never touches the server.
 pub fn init(args: &[String]) -> anyhow::Result<()> {
     fn flag<'a>(args: &'a [String], name: &str) -> anyhow::Result<&'a str> {

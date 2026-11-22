@@ -129,4 +129,7 @@ pub struct PairBlob {
     /// it never accepts an older rotation. Absent on bootstrap (0).
     #[serde(default)]
     pub key_epoch: u64,
+    /// Family name as the relay knows it — shown in the joiner's UI.
+    #[serde(default)]
+    pub family_name: Option<String>,
 }

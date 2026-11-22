@@ -15,7 +15,7 @@ murmur — это **«самый тихий»**, **«самый приватны
 ---
 
 ```
-  телефон (Kotlin-агент) ──WSS──▶ murmur-server ◀──WSS── murmurd × N ноутов
+  телефон (Kotlin-агент) ──WSS──▶ murmurs ◀──WSS── murmurd × N ноутов
                                    тупой релей              Arch / Hyprland
 ```
 
@@ -34,7 +34,7 @@ murmur — это **«самый тихий»**, **«самый приватны
 
 | Пакет | Стек | Роль |
 |---|---|---|
-| `server/` | Rust | `murmur-server` — тупой авторизованный релей. Только live, ноль хранимого контента. |
+| `server/` | Rust | `murmurs` — тупой авторизованный релей. Только live, ноль хранимого контента. |
 | `laptop/` | Rust | демон `murmurd` (фича = модуль) + CLI `murmurctl`. Вся настройка — только терминал. |
 | `mobile/` | Kotlin | Фоновый агент: notification/media-слушатели, share и selection-таргеты. |
 | `shared/` | Rust | `murmur-proto` — конверт, крипто и типы сообщений, общие для сервера и ноутов. |
@@ -57,7 +57,7 @@ $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-ser
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 $ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
-bootstrap pairing — verification code: 452690       # сверить: murmur-server bootstrap-code
+bootstrap pairing — verification code: 452690       # сверить: murmurs bootstrap-code
 $ systemctl --user start murmurd && murmurd doctor
 ```
 

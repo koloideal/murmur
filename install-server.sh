@@ -221,9 +221,9 @@ case "$(uname -m)" in
     *) die "unsupported arch: $(uname -m)" ;;
 esac
 
-URL="https://github.com/$REPO/releases/latest/download/murmur-server-$TARGET"
-step "murmur-server binary ($TARGET)"
-dl_cached "$URL" "$PREFIX/murmur-server"
+URL="https://github.com/$REPO/releases/latest/download/murmurs-$TARGET"
+step "murmurs binary ($TARGET)"
+dl_cached "$URL" "$PREFIX/murmurs"
 
 # ---- proxy config + TLS
 case "$PROXY" in
@@ -327,18 +327,25 @@ fi
 # ---- systemd unit + start (idempotent)
 step "systemd service"
 was_active=""
-if systemctl is-active --quiet murmur-server 2>/dev/null; then was_active=yes; fi
+if systemctl is-active --quiet murmurs 2>/dev/null; then was_active=yes; fi
+# upgrade path: the unit used to be murmur-server.service
+if [ -f /etc/systemd/system/murmur-server.service ]; then
+    systemctl disable --now murmur-server 2>/dev/null
+    rm -f /etc/systemd/system/murmur-server.service
+    systemctl daemon-reload
+    was_active=yes
+fi
 if [ -n "$FAMILY" ]; then
-    "$PREFIX/murmur-server" install --addr "$ADDR" --family-name "$FAMILY" >/dev/null
+    "$PREFIX/murmurs" install --addr "$ADDR" --family-name "$FAMILY" >/dev/null
 else
-    "$PREFIX/murmur-server" install --addr "$ADDR" >/dev/null
+    "$PREFIX/murmurs" install --addr "$ADDR" >/dev/null
 fi
 # enable --now only starts an inactive unit — restart when upgrading in place
-if [ -n "$was_active" ]; then systemctl restart murmur-server; fi
-ok "murmur-server.service enabled + started ($ADDR)"
+if [ -n "$was_active" ]; then systemctl restart murmurs; fi
+ok "murmurs.service enabled + started ($ADDR)"
 
 sleep 1
-code=$(journalctl -u murmur-server -n 30 --no-pager 2>/dev/null \
+code=$(journalctl -u murmurs -n 30 --no-pager 2>/dev/null \
     | grep -o 'bootstrap code: [0-9A-Z-]*' | tail -1 || true)
 
 if [ -n "$DOMAIN" ]; then EP="wss://$DOMAIN"; else EP="ws://$ADDR"; fi
@@ -361,13 +368,13 @@ box() {
     printf '  %s╰%s╯%s\n\n' "$C_AC" "$bar" "$R0"
 }
 
-lines="${B}murmur-server is up${R0}|endpoint    ${C_CY}$EP${R0}"
+lines="${B}murmurs is up${R0}|endpoint    ${C_CY}$EP${R0}"
 if [ -n "$FAMILY" ]; then lines="$lines|family      $FAMILY"; fi
 if [ -n "$code" ]; then
     short=${code##*bootstrap code: }
     lines="$lines|bootstrap   ${B}${C_GR}$short${R0}  ${D2}(one-shot — first device becomes the founder)${R0}"
     lines="$lines||${B}first laptop:${R0}  murmurd pair --server $EP --code $short"
-    lines="$lines|${D2}lost the code?  sudo murmur-server bootstrap-code${R0}"
+    lines="$lines|${D2}lost the code?  sudo murmurs bootstrap-code${R0}"
 else
     lines="$lines||family exists — invite new devices via ${B}murmurctl invite${R0}"
 fi

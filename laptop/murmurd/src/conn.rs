@@ -102,6 +102,9 @@ async fn connect_once(
                 // an E2E payload.
                 match env.control_payload() {
                     Ok(ctl) => {
+                        if let Control::Devices { family_name, .. } = &ctl {
+                            *shared.family_name.lock().unwrap() = family_name.clone();
+                        }
                         let _ = shared.ctl_events.send((env.from, ctl));
                     }
                     Err(_) => {

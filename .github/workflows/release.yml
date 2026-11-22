@@ -20,11 +20,11 @@ jobs:
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             RUSTFLAGS="-C linker=rust-lld" \
               cargo build --release --manifest-path server/Cargo.toml --target "$t"
-            cp "server/target/$t/release/murmur-server" "murmur-server-$t"
+            cp "server/target/$t/release/murmurs" "murmurs-$t"
           done
       - uses: softprops/action-gh-release@v2
         with:
-          files: murmur-server-*-linux-musl
+          files: murmurs-*-linux-musl
 
   laptop:
     # Native runners per arch — no cross toolchain to babysit.

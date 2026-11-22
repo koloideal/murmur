@@ -1,4 +1,4 @@
-//! murmur-server: dumb authenticated relay.
+//! murmurs: dumb authenticated relay.
 //!
 //! - Every device connects outbound with WS and says `Control::Hello` first.
 //! - `role=auth`: token hash checked against the registry, conn bound to id.
@@ -14,10 +14,10 @@
 //! startup, persisted on every mutation. The socket is the only seam.
 //!
 //! Commands (same binary):
-//!   murmur-server                    — run the relay
-//!   murmur-server add-device --name X
-//!   murmur-server list-devices
-//!   murmur-server revoke --id ID
+//!   murmurs                    — run the relay
+//!   murmurs add-device --name X
+//!   murmurs list-devices
+//!   murmurs revoke --id ID
 
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -363,27 +363,16 @@ fn vlen(s: &str) -> usize {
     n
 }
 
-/// Full-perimeter box like the installer's `box()`:
-/// `╭─ title ─╮`, `│ line … │`, `╰───╯` — border all in accent.
-fn frame(p: &Paint, title: &str, lines: &[String]) {
-    let w = lines
-        .iter()
-        .map(|l| vlen(l))
-        .max()
-        .unwrap_or(0)
-        .max(title.chars().count() + 2);
-    let head = format!("─ {title} ");
-    let top = format!(
-        "╭{}{}╮",
-        head,
-        "─".repeat(w.saturating_sub(head.chars().count()))
-    );
-    println!("  {}", p.accent(top));
-    for l in lines {
-        let pad = " ".repeat(w.saturating_sub(vlen(l)));
-        println!("  {} {l}{pad} {}", p.accent("│"), p.accent("│"));
+/// Installer-style banner: the logo bold in accent, a dim subtitle.
+fn banner(p: &Paint, sub: &str) {
+    println!();
+    for l in ART.lines() {
+        println!("  {}", p.wrap("1;38;5;141", l));
     }
-    println!("  {}", p.accent(format!("╰{}╯", "─".repeat(w + 1))));
+    if !sub.is_empty() {
+        println!("  {}", p.dim(sub));
+    }
+    println!();
 }
 
 // ---------- admin socket (CLI ↔ running server) ----------
@@ -404,7 +393,7 @@ fn devices_path(args: &[String]) -> PathBuf {
         return sys;
     }
     std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".local/share/murmur-server/devices.json"))
+        .map(|h| PathBuf::from(h).join(".local/share/murmurs/devices.json"))
         .unwrap_or_else(|| PathBuf::from("devices.json"))
 }
 
@@ -417,8 +406,8 @@ fn admin_sock_path(args: &[String]) -> PathBuf {
         return sys;
     }
     std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|p| PathBuf::from(p).join("murmur-server.sock"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/murmur-server.sock"))
+        .map(|p| PathBuf::from(p).join("murmurs.sock"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/murmurs.sock"))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -435,7 +424,7 @@ enum AdminReq {
 fn admin_req(req: &AdminReq, args: &[String]) -> anyhow::Result<serde_json::Value> {
     let path = admin_sock_path(args);
     let mut stream = std::os::unix::net::UnixStream::connect(&path)
-        .with_context(|| format!("connect {} — is murmur-server running?", path.display()))?;
+        .with_context(|| format!("connect {} — is murmurs running?", path.display()))?;
     stream.write_all(serde_json::to_string(req)?.as_bytes())?;
     stream.write_all(b"\n")?;
     let mut line = String::new();
@@ -549,8 +538,6 @@ fn print_help(p: &Paint) {
     let d = |s: &str| p.dim(s);
     let c = |s: &str| p.accent(format!("{s:<20}"));
     let lines: Vec<String> = [
-        ART.lines().map(|l| p.accent(l)).collect::<Vec<_>>(),
-        vec![String::new(), d("the murmur relay — routes ciphertext only")],
         vec![String::new()],
         vec![
             p.bold("service").to_string(),
@@ -572,8 +559,10 @@ fn print_help(p: &Paint) {
         ],
     ]
     .concat();
-    println!();
-    frame(p, "murmur-server", &lines);
+    banner(p, "the murmur relay — routes ciphertext only");
+    for l in &lines[1..] {
+        println!("  {l}");
+    }
     println!();
 }
 
@@ -597,7 +586,7 @@ fn print_help(p: &Paint) {
             let name = flag_value(&args[1..], "--name")
                 .or_else(|| args.get(1).cloned())
                 .or_else(|| prompt_line("device name"))
-                .context("usage: murmur-server add-device --name NAME")?;
+                .context("usage: murmurs add-device --name NAME")?;
             let res = admin_req(&AdminReq::AddDevice { name }, &args)?;
             if res["ok"].as_bool() != Some(true) {
                 bail!("{}", res["error"].as_str().unwrap_or("add-device failed"));
@@ -605,15 +594,13 @@ fn print_help(p: &Paint) {
             let d = &res["data"];
             let p = Paint::new();
             println!();
-            let mut lines = vec![
-                format!("id      {}", p.bold(d["device_id"].as_str().unwrap())),
-                format!("token   {}", p.dim(d["token"].as_str().unwrap())),
-                p.dim("token shown once — store it in secrets.toml on the device"),
-            ];
+            banner(&p, "device added");
+            println!("  id      {}", p.bold(d["device_id"].as_str().unwrap()));
+            println!("  token   {}", p.dim(d["token"].as_str().unwrap()));
+            println!("  {}", p.dim("token shown once — store it in secrets.toml on the device"));
             if d["name_exists"].as_bool() == Some(true) {
-                lines.push(p.dim("heads-up: an active device already has this name"));
+                println!("  {}", p.dim("heads-up: an active device already has this name"));
             }
-            frame(&p, "device added", &lines);
             println!();
             Ok(())
         }
@@ -649,7 +636,7 @@ fn print_help(p: &Paint) {
         Some("revoke") => {
             let id: DeviceId = flag_value(&args[1..], "--id")
                 .or_else(|| args.get(1).cloned())
-                .context("usage: murmur-server revoke --id DEVICE_ID")?
+                .context("usage: murmurs revoke --id DEVICE_ID")?
                 .parse()?;
             let res = admin_req(&AdminReq::Revoke { device_id: id }, &args)?;
             match res["ok"].as_bool() {
@@ -713,8 +700,7 @@ fn status(args: &[String]) -> anyhow::Result<()> {
     let pairs = res["open_pairs"].as_u64().unwrap_or(0);
     let public = res["public_url"].as_str().unwrap_or("");
 
-    let mut lines: Vec<String> = ART.lines().map(|l| p.accent(l)).collect();
-    lines.push(String::new());
+    let mut lines: Vec<String> = Vec::new();
     lines.push(format!("listen    {}", p.bold(res["addr"].as_str().unwrap_or("?"))));
     lines.push(format!("public    {}", p.bold(if public.is_empty() { "—" } else { public })));
     lines.push(format!("family    {}", p.bold(res["family"].as_str().unwrap_or("(unnamed)"))));
@@ -748,13 +734,15 @@ fn status(args: &[String]) -> anyhow::Result<()> {
         }
         _ => lines.push(format!("bootstrap {}", p.dim("closed — the family has devices"))),
     }
-    println!();
-    frame(&p, "murmur · relay", &lines);
+    banner(&p, "the murmur relay — routes ciphertext only");
+    for l in &lines {
+        println!("  {l}");
+    }
     println!();
     Ok(())
 }
 
-/// `murmur-server install [--addr A] [--user]` — write a systemd unit and
+/// `murmurs install [--addr A] [--user]` — write a systemd unit and
 /// enable the relay. System unit when /etc/systemd is writable (DynamicUser,
 /// state under /var/lib/murmur, admin socket under /run/murmur); otherwise a
 /// user unit + linger. Always prints the Caddy reverse-proxy snippet —
@@ -792,7 +780,7 @@ fn install(args: &[String]) -> anyhow::Result<()> {
 fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]\n\
-         Description=murmur relay server\n\
+         Description=murmurs — the murmur relay\n\
          After=network-online.target\n\
          Wants=network-online.target\n\n\
          [Service]\n\
@@ -809,10 +797,10 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
          [Install]\n\
          WantedBy=multi-user.target\n"
     );
-    let path = PathBuf::from("/etc/systemd/system/murmur-server.service");
+    let path = PathBuf::from("/etc/systemd/system/murmurs.service");
     std::fs::write(&path, &unit).context("write unit file")?;
     // The admin socket is group-writable: anyone in `murmur` can run
-    // `murmur-server status|bootstrap-code|...` without sudo.
+    // `murmurs status|bootstrap-code|...` without sudo.
     if run("groupadd", &["-f", "murmur"]).is_err() {
         eprintln!("hint: create a `murmur` group to use admin commands without sudo");
     }
@@ -826,10 +814,10 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
     // `enable --now` skips a start when the unit is already active —
     // on upgrades the old binary would keep serving forever. Restart
     // unconditionally: it starts a stopped service and swaps a stale one.
-    run("systemctl", &["enable", "murmur-server.service"])?;
-    run("systemctl", &["restart", "murmur-server.service"])?;
+    run("systemctl", &["enable", "murmurs.service"])?;
+    run("systemctl", &["restart", "murmurs.service"])?;
     eprintln!("installed + started: {path:?}");
-    eprintln!("admin commands: murmur-server status · list-devices · bootstrap-code · revoke --id …");
+    eprintln!("admin commands: murmurs status · list-devices · bootstrap-code · revoke --id …");
     eprintln!("  (no sudo — the admin socket is writable by the `murmur` group)");
     Ok(())
 }
@@ -837,10 +825,10 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
 fn install_user(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]\n\
-         Description=murmur relay server\n\
+         Description=murmurs — the murmur relay\n\
          After=network-online.target\n\n\
          [Service]\n\
-         ExecStart={exe} --addr {addr} --devices %h/.local/share/murmur-server/devices.json{family_arg}\n\
+         ExecStart={exe} --addr {addr} --devices %h/.local/share/murmurs/devices.json{family_arg}\n\
          Restart=on-failure\n\
          RestartSec=3\n\n\
          [Install]\n\
@@ -849,15 +837,15 @@ fn install_user(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()> {
     let dir =
         PathBuf::from(std::env::var_os("HOME").context("no HOME")?).join(".config/systemd/user");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("murmur-server.service");
+    let path = dir.join("murmurs.service");
     std::fs::write(&path, &unit)?;
     std::fs::create_dir_all(
-        PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/share/murmur-server"),
+        PathBuf::from(std::env::var_os("HOME").unwrap()).join(".local/share/murmurs"),
     )?;
     run("systemctl", &["--user", "daemon-reload"])?;
     run(
         "systemctl",
-        &["--user", "enable", "--now", "murmur-server.service"],
+        &["--user", "enable", "--now", "murmurs.service"],
     )?;
     // Survives logout; failure is non-fatal — needs polkit/root on some systems.
     if run("loginctl", &["enable-linger"]).is_err() {
@@ -928,13 +916,13 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(addr)
         .await
-        .with_context(|| format!("bind {addr} — is a relay already running there? `murmur-server status` will tell you"))?;
+        .with_context(|| format!("bind {addr} — is a relay already running there? `murmurs status` will tell you"))?;
     *shared.addr.lock().unwrap() = addr.to_string();
     let admin_path = admin_sock_path(args);
     let _ = std::fs::remove_file(&admin_path);
     let admin_listener = UnixListener::bind(&admin_path)?;
     // The socket grants full registry control. With --admin-group the
-    // admin group gets rw — `murmur-server status` et al. without sudo.
+    // admin group gets rw — `murmurs status` et al. without sudo.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -958,7 +946,7 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
         }
     }
     info!(
-        "murmur-server on {addr}, registry {}, admin {}",
+        "murmurs on {addr}, registry {}, admin {}",
         shared.devices_path.display(),
         admin_path.display()
     );
@@ -1238,7 +1226,7 @@ async fn handle_control(
         Control::RevokeDevice { device_id } => {
             // Self-revoke only — a compromised device must not be able to
             // kick others out of the family. Admin revokes go through the
-            // unix socket (`murmur-server revoke`).
+            // unix socket (`murmurs revoke`).
             if device_id == from {
                 info!("{from} revoked itself");
                 shared.revoke(&device_id);

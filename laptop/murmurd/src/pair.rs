@@ -174,6 +174,7 @@ impl Shared {
             }),
             server_url: Some(self.cfg.server_url.clone()),
             key_epoch: self.keys.read().unwrap().epoch,
+            family_name: self.family_name.lock().unwrap().clone(),
         };
         let dh = pending.key.dh(&pending.peer_pub);
         let blob_b64 = {
@@ -273,7 +274,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         eprintln!("  │  verification code   {sas}");
                         eprintln!("  │");
                         eprintln!("  │  get it on the relay:");
-                        eprintln!("  │    sudo murmur-server bootstrap-code");
+                        eprintln!("  │    sudo murmurs bootstrap-code");
                         eprintln!("  │");
                         eprint!("  ? codes match? [y/N] ");
                         use std::io::Write;

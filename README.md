@@ -15,7 +15,7 @@ murmur is the **"quietest"**, **"most private"**, and **"most modular"** way to 
 ---
 
 ```
-  phone (Kotlin agent) ──WSS──▶ murmur-server ◀──WSS── murmurd × N laptops
+  phone (Kotlin agent) ──WSS──▶ murmurs ◀──WSS── murmurd × N laptops
                                 dumb relay                Arch / Hyprland
 ```
 
@@ -34,7 +34,7 @@ The phone is a thin background agent — it only reports events and obeys comman
 
 | Package | Stack | Role |
 |---|---|---|
-| `server/` | Rust | `murmur-server` — the dumb authenticated relay. Live-only, zero stored content. |
+| `server/` | Rust | `murmurs` — the dumb authenticated relay. Live-only, zero stored content. |
 | `laptop/` | Rust | `murmurd` daemon (feature-per-module) + `murmurctl` CLI. All configuration is terminal-only. |
 | `mobile/` | Kotlin | Foreground agent: notification/media listeners, share & selection targets. |
 | `shared/` | Rust | `murmur-proto` — envelope, crypto, message types shared by server and laptops. |
@@ -57,7 +57,7 @@ Point a TLS reverse proxy (caddy/nginx) at `127.0.0.1:8770` — laptops will use
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 $ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
-bootstrap pairing — verification code: 452690       # verify: murmur-server bootstrap-code
+bootstrap pairing — verification code: 452690       # verify: murmurs bootstrap-code
 $ systemctl --user start murmurd && murmurd doctor
 ```
 

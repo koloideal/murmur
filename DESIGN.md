@@ -9,7 +9,7 @@ Arch/Hyprland через домашний сервер-релей. Без общ
 | Компонент      | Язык  | Роль |
 |----------------|-------|------|
 | `murmur-proto` | Rust  | Общий крейт: конверт, крипто, типы сообщений. Используется сервером и murmurd. |
-| `murmur-server`| Rust  | Тупой WSS-релей: auth по токену, маршрутизация фреймов, реестр устройств. Live-only, без очередей. |
+| `murmurs`| Rust  | Тупой WSS-релей: auth по токену, маршрутизация фреймов, реестр устройств. Live-only, без очередей. |
 | `murmurd`      | Rust  | Демон ноута: WS-клиент + подсистемы (уведомления, MPRIS, буфер, presence). |
 | `murmurctl`    | Rust  | CLI ноута: pair, status, devices, revoke. Вся настройка ноута — терминал. |
 | `murmur` (app) | Kotlin| Android-агент: foreground service, источник событий, приёмник команд. |
@@ -17,7 +17,7 @@ Arch/Hyprland через домашний сервер-релей. Без общ
 ## Топология
 
 ```
- phone ──WSS──► murmur-server ◄──WSS── murmurd × N
+ phone ──WSS──► murmurs ◄──WSS── murmurd × N
 ```
 
 Все устройства держат постоянные исходящие WSS-соединения к серверу.
@@ -157,9 +157,9 @@ murmurd вычисляет локальное состояние:
 newline-JSON, CLI ходит туда. Файлы конфигурации/реестров — только
 persistence, а не шов (один писатель — сам демон).
 
-- `murmur-server`: `add-device --name X` (bootstrap первого устройства —
+- `murmurs`: `add-device --name X` (bootstrap первого устройства —
   выдаёт device_id+token), `list-devices`, `revoke --id X`. Сокет:
-  `$XDG_RUNTIME_DIR/murmur-server.sock` (`MURMUR_ADMIN_SOCK` для override).
+  `$XDG_RUNTIME_DIR/murmurs.sock` (`MURMUR_ADMIN_SOCK` для override).
   Revoke убивает живой коннект мгновенно.
 - `murmurd init --server … --name … --device-id … --token …` — провижининг
   ноута: пишет config.toml + secrets.toml (0600), семейный ключ генерится
@@ -182,7 +182,7 @@ persistence, а не шов (один писатель — сам демон).
 
 ```
 DESIGN.md
-server/                # murmur-server — релей (самостоятельный cargo-проект)
+server/                # murmurs — релей (самостоятельный cargo-проект)
 laptop/                # cargo workspace ноута
   murmurd/             #   демон
   murmurctl/           #   CLI
@@ -198,7 +198,7 @@ shared/
 
 ## Деплой (детали позже)
 
-- `murmur-server`: systemd unit на домашнем сервере, WSS за Caddy/nginx
+- `murmurs`: systemd unit на домашнем сервере, WSS за Caddy/nginx
   (auto-HTTPS по домену) или rustls+acme.
 - `murmurd`: `systemd --user` unit, autostart с сессией.
 - Приложение: sideload APK.

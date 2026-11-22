@@ -245,7 +245,7 @@ fun StatusCard() {
                             color = MaterialTheme.colorScheme.error,
                         )
                         Spacer(Modifier.height(8.dp))
-                        CommandLine("sudo murmur-server revoke --id ${secrets.deviceId}")
+                        CommandLine("sudo murmurs revoke --id ${secrets.deviceId}")
                     }
                 }
             },
