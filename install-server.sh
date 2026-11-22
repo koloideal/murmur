@@ -100,6 +100,7 @@ ask() {
         printf '%s  ?%s %s %s[%s]%s\n' "$C_CY" "$R0" "$3" "$D2" "${2:-—}" "$R0" > /dev/tty
         printf '%s  ›%s ' "$C_AC" "$R0" > /dev/tty
         read -r _a < /dev/tty || _a=""
+        printf '\n' > /dev/tty
         _a=${_a:-$2}
         if [ -z "$_v" ] || "$_v" "$_a"; then echo "$_a"; return; fi
     done
