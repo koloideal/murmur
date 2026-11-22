@@ -57,7 +57,7 @@ $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-ser
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 $ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
-bootstrap pairing — verification code: 452690       # совпадает с логом релея
+bootstrap pairing — verification code: 452690       # сверить: murmur-server bootstrap-code
 $ systemctl --user start murmurd && murmurd doctor
 ```
 

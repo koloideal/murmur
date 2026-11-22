@@ -57,7 +57,7 @@ Point a TLS reverse proxy (caddy/nginx) at `127.0.0.1:8770` — laptops will use
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 $ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
-bootstrap pairing — verification code: 452690       # matches the relay log
+bootstrap pairing — verification code: 452690       # verify: murmur-server bootstrap-code
 $ systemctl --user start murmurd && murmurd doctor
 ```
 
