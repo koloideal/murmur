@@ -446,12 +446,19 @@ async fn handle_admin(stream: UnixStream, shared: Arc<Shared>) -> anyhow::Result
 fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
     match req {
         AdminReq::AddDevice { name } => {
+            let name_exists = shared
+                .devices
+                .lock()
+                .unwrap()
+                .values()
+                .any(|r| r.name == name && !r.revoked);
             let id = DeviceId::random();
             let token = murmur_proto::AuthToken::random();
             shared.register(id, name, token.hash_hex());
             serde_json::json!({
                 "ok": true,
-                "data": {"device_id": id.to_string(), "token": token.to_hex()}
+                "data": {"device_id": id.to_string(), "token": token.to_hex(),
+                         "name_exists": name_exists}
             })
         }
         AdminReq::ListDevices => {
@@ -531,16 +538,16 @@ fn print_help(p: &Paint) {
         vec![String::new()],
         vec![
             p.bold("service").to_string(),
-            format!("  {}  run the relay", p.accent("serve --addr A")),
-            format!("  {}  systemd unit + autostart", p.accent("install")),
+            format!("  {}  run the relay", p.accent(format!("{:<24}", "serve --addr A"))),
+            format!("  {}  systemd unit + autostart", p.accent(format!("{:<24}", "install [--addr A]"))),
         ],
         vec![String::new(), p.bold("admin").to_string()],
         vec![
-            format!("  {}           what the relay is doing right now", p.accent("status")),
-            format!("  {}     device table · state · online · rtt", p.accent("list-devices")),
-            format!("  {}  register a device by hand", p.accent("add-device")),
-            format!("  {}         kick a device — members rotate the key", p.accent("revoke")),
-            format!("  {}   one-shot code while the family is empty", p.accent("bootstrap-code")),
+            format!("  {}  what the relay is doing right now", p.accent(format!("{:<24}", "status"))),
+            format!("  {}  device table · state · online · rtt", p.accent(format!("{:<24}", "list-devices"))),
+            format!("  {}  register a device by hand", p.accent(format!("{:<24}", "add-device --name N"))),
+            format!("  {}  kick a device — members rotate the key", p.accent(format!("{:<24}", "revoke --id ID"))),
+            format!("  {}  one-shot code while the family is empty", p.accent(format!("{:<24}", "bootstrap-code"))),
         ],
         vec![
             String::new(),
@@ -583,11 +590,15 @@ fn print_help(p: &Paint) {
             let d = &res["data"];
             let p = Paint::new();
             println!();
-            frame(&p, "device added", &[
+            let mut lines = vec![
                 format!("id      {}", p.bold(d["device_id"].as_str().unwrap())),
                 format!("token   {}", p.dim(d["token"].as_str().unwrap())),
                 p.dim("token shown once — store it in secrets.toml on the device"),
-            ]);
+            ];
+            if d["name_exists"].as_bool() == Some(true) {
+                lines.push(p.dim("heads-up: an active device already has this name"));
+            }
+            frame(&p, "device added", &lines);
             println!();
             Ok(())
         }
@@ -596,10 +607,9 @@ fn print_help(p: &Paint) {
             if res["ok"].as_bool() != Some(true) {
                 bail!("{}", res["error"].as_str().unwrap_or("list-devices failed"));
             }
-            if let Some(fam) = res["family"].as_str() {
-                println!("family: {fam}");
-            }
             let p = Paint::new();
+            println!();
+            println!("  {}", p.dim(format!("family · {}", res["family"].as_str().unwrap_or("(unnamed)"))));
             for d in res["data"].as_array().into_iter().flatten() {
                 let (mark, state) = if d["revoked"].as_bool() == Some(true) {
                     (p.red("✕"), p.dim("revoked"))
@@ -609,15 +619,16 @@ fn print_help(p: &Paint) {
                     (p.dim("○"), p.dim("offline"))
                 };
                 println!(
-                    "  {mark}  {}  {:<20} {state}  {}",
+                    "  {mark}  {}  {} {state}  {}",
                     p.dim(d["device_id"].as_str().unwrap_or("?")),
-                    p.bold(d["name"].as_str().unwrap_or("?")),
+                    p.bold(format!("{:<20}", d["name"].as_str().unwrap_or("?"))),
                     d["rtt_ms"]
                         .as_u64()
                         .map(|ms| p.dim(format!("{ms}ms")))
                         .unwrap_or_default(),
                 );
             }
+            println!();
             Ok(())
         }
         Some("revoke") => {
@@ -688,17 +699,12 @@ fn status(args: &[String]) -> anyhow::Result<()> {
     let pairs = res["open_pairs"].as_u64().unwrap_or(0);
     let public = res["public_url"].as_str().unwrap_or("");
 
-    let mut lines: Vec<String> = Vec::new();
-    let side = [
-        format!("listen    {}", p.bold(res["addr"].as_str().unwrap_or("?"))),
-        format!("public    {}", p.bold(if public.is_empty() { "—" } else { public })),
-        format!("family    {}", p.bold(res["family"].as_str().unwrap_or("(unnamed)"))),
-        format!("up        {uptime}"),
-    ];
-    let art_w = ART.lines().map(|l| l.chars().count()).max().unwrap_or(0);
-    for (l, side) in ART.lines().zip(side) {
-        lines.push(format!("{l:<art_w$}   {side}"));
-    }
+    let mut lines: Vec<String> = ART.lines().map(|l| p.accent(l)).collect();
+    lines.push(String::new());
+    lines.push(format!("listen    {}", p.bold(res["addr"].as_str().unwrap_or("?"))));
+    lines.push(format!("public    {}", p.bold(if public.is_empty() { "—" } else { public })));
+    lines.push(format!("family    {}", p.bold(res["family"].as_str().unwrap_or("(unnamed)"))));
+    lines.push(format!("up        {uptime}"));
     lines.push(String::new());
     let online_str = if online.is_empty() {
         p.dim("nobody")
@@ -906,7 +912,9 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
         shared.persist();
     }
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind {addr} — is a relay already running there? `murmur-server status` will tell you"))?;
     *shared.addr.lock().unwrap() = addr.to_string();
     let admin_path = admin_sock_path(args);
     let _ = std::fs::remove_file(&admin_path);
