@@ -491,6 +491,9 @@ bare `murmur-server` prints this text. All commands accept
                 .or_else(|| prompt_line("device name"))
                 .context("usage: murmur-server add-device --name NAME")?;
             let res = admin_req(&AdminReq::AddDevice { name }, &args)?;
+            if res["ok"].as_bool() != Some(true) {
+                bail!("{}", res["error"].as_str().unwrap_or("add-device failed"));
+            }
             let d = &res["data"];
             println!("device_id: {}", d["device_id"].as_str().unwrap());
             println!("token: {}", d["token"].as_str().unwrap());
@@ -499,6 +502,9 @@ bare `murmur-server` prints this text. All commands accept
         }
         Some("list-devices") => {
             let res = admin_req(&AdminReq::ListDevices, &args)?;
+            if res["ok"].as_bool() != Some(true) {
+                bail!("{}", res["error"].as_str().unwrap_or("list-devices failed"));
+            }
             if let Some(fam) = res["family"].as_str() {
                 println!("family: {fam}");
             }
@@ -539,6 +545,9 @@ bare `murmur-server` prints this text. All commands accept
         }
         Some("bootstrap-code") => {
             let res = admin_req(&AdminReq::BootstrapCode, &args)?;
+            if res["ok"].as_bool() != Some(true) {
+                bail!("{}", res["error"].as_str().unwrap_or("bootstrap-code failed"));
+            }
             match res["code"].as_str() {
                 Some(c) => {
                     println!("{c}");
@@ -558,6 +567,12 @@ bare `murmur-server` prints this text. All commands accept
 /// `murmur-server status` — one screen of what the relay is doing.
 fn status(args: &[String]) -> anyhow::Result<()> {
     let res = admin_req(&AdminReq::Status, args)?;
+    if res["ok"].as_bool() != Some(true) {
+        bail!(
+            "{}",
+            res["error"].as_str().unwrap_or("status failed — is the relay on an older binary?")
+        );
+    }
     let up = res["uptime_secs"].as_u64().unwrap_or(0);
     let uptime = match up {
         s if s < 90 => format!("{s}s"),
@@ -677,7 +692,11 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
         }
     }
     run("systemctl", &["daemon-reload"])?;
-    run("systemctl", &["enable", "--now", "murmur-server.service"])?;
+    // `enable --now` skips a start when the unit is already active —
+    // on upgrades the old binary would keep serving forever. Restart
+    // unconditionally: it starts a stopped service and swaps a stale one.
+    run("systemctl", &["enable", "murmur-server.service"])?;
+    run("systemctl", &["restart", "murmur-server.service"])?;
     eprintln!("installed + started: {path:?}");
     eprintln!("admin commands: murmur-server status · list-devices · bootstrap-code · revoke --id …");
     eprintln!("  (no sudo — the admin socket is writable by the `murmur` group)");

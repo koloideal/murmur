@@ -111,8 +111,10 @@ fun PairingCard() {
                 }
                 secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch)
                 phase = "done"
+                // Service starts only after the burst finishes — it
+                // constructs a Secrets whose init flips settledFlow,
+                // which would collapse this card before frame one.
                 celebrating = true
-                MurmurService.start(ctx)
             } catch (e: CancellationException) {
                 phase = "idle"
                 throw e
@@ -187,7 +189,11 @@ fun PairingCard() {
                 ) {
                     PairDoneBurst(onFinished = {
                         celebrating = false
+                        phase = "idle"
+                        code = ""
+                        invite = ""
                         Secrets.settledFlow.value = true
+                        MurmurService.start(ctx)
                     })
                 }
 
