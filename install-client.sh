@@ -188,6 +188,7 @@ if [ $# -gt 0 ]; then
         prev=$a
     done
     echo
+    if have_tty; then exec "$BIN/murmurd" pair "$@" < /dev/tty; fi
     exec "$BIN/murmurd" pair "$@"
 fi
 
@@ -198,8 +199,10 @@ if have_tty && askyn n "join the family now?"; then
     if [ -n "$SERVER" ]; then pair_args="--server $SERVER"; fi
     if [ -n "$CODE" ];   then pair_args="$pair_args --code $CODE"; fi
     if [ -n "$pair_args" ]; then
+        # murmurd's SAS prompt reads stdin — hand it the real terminal,
+        # not the exhausted curl pipe.
         # shellcheck disable=SC2086
-        exec "$BIN/murmurd" pair $pair_args
+        exec "$BIN/murmurd" pair $pair_args < /dev/tty
     fi
     warn "nothing entered — nothing paired"
 fi

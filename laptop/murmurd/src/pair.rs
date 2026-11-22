@@ -274,8 +274,21 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         eprint!("codes match? [y/N] ");
                         use std::io::Write;
                         std::io::stderr().flush()?;
+                        // SAS is a human check — read the real terminal, not
+                        // stdin: under `curl | sh` stdin is the dead pipe.
                         let mut line = String::new();
-                        std::io::stdin().read_line(&mut line)?;
+                        match std::fs::File::open("/dev/tty") {
+                            Ok(f) => {
+                                use std::io::BufRead;
+                                std::io::BufReader::new(f).read_line(&mut line)?;
+                            }
+                            Err(_) => {
+                                std::io::stdin().read_line(&mut line)?;
+                            }
+                        }
+                        if line.is_empty() {
+                            eprintln!();
+                        }
                         if !line.trim().eq_ignore_ascii_case("y") {
                             bail!("pairing aborted — SAS not confirmed");
                         }
