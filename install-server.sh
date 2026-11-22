@@ -103,6 +103,7 @@ ask() {
         printf '\n' > /dev/tty
         _a=${_a:-$2}
         if [ -z "$_v" ] || "$_v" "$_a"; then echo "$_a"; return; fi
+        printf '\n' > /dev/tty
     done
 }
 
@@ -114,7 +115,7 @@ askyn() {
             y|Y|yes) return 0 ;;
             n|N|no)  return 1 ;;
             "")      [ "$1" = "y" ]; return ;;
-            *)       printf '  %s✗%s answer y or n (Enter = %s)\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
+            *)       printf '  %s✗%s answer y or n (Enter = %s)\n\n' "$C_RD" "$R0" "$1" > /dev/tty ;;
         esac
     done
 }
