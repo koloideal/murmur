@@ -173,6 +173,24 @@ else
     warn "unit install failed — the daemon can still run bare: murmurd"
 fi
 
+# ---- after a successful pair: daemon up + framed success + phone hint
+post_pair() {
+    step "starting murmurd"
+    if systemctl --user start murmurd 2>/dev/null; then
+        ok "murmurd is running"
+    else
+        warn "couldn't start it here — run inside your graphical session:"
+        printf '      systemctl --user start murmurd\n'
+    fi
+
+    echo
+    lines="${B}${C_GR}you're in the family${R0}"
+    lines="$lines||the phone isn't connected yet —"
+    lines="$lines|invite it from this machine:"
+    lines="$lines|  ${B}murmurctl invite${R0}   ${D2}→ one-shot code / QR for the app${R0}"
+    box "murmur" "$lines"
+}
+
 # ---- join: args beat questions beat the hint box
 if [ $# -gt 0 ]; then
     # sanity-check pair args before they hit murmurd
@@ -188,8 +206,15 @@ if [ $# -gt 0 ]; then
         prev=$a
     done
     echo
-    if have_tty; then exec "$BIN/murmurd" pair "$@" < /dev/tty; fi
-    exec "$BIN/murmurd" pair "$@"
+    # murmurd's SAS prompt reads stdin — hand it the real terminal,
+    # not the exhausted curl pipe.
+    if have_tty; then
+        "$BIN/murmurd" pair "$@" < /dev/tty || die "pairing failed"
+    else
+        "$BIN/murmurd" pair "$@" || die "pairing failed"
+    fi
+    post_pair
+    exit 0
 fi
 
 if have_tty && askyn n "join the family now?"; then
@@ -199,10 +224,10 @@ if have_tty && askyn n "join the family now?"; then
     if [ -n "$SERVER" ]; then pair_args="--server $SERVER"; fi
     if [ -n "$CODE" ];   then pair_args="$pair_args --code $CODE"; fi
     if [ -n "$pair_args" ]; then
-        # murmurd's SAS prompt reads stdin — hand it the real terminal,
-        # not the exhausted curl pipe.
         # shellcheck disable=SC2086
-        exec "$BIN/murmurd" pair $pair_args < /dev/tty
+        "$BIN/murmurd" pair $pair_args < /dev/tty || die "pairing failed"
+        post_pair
+        exit 0
     fi
     warn "nothing entered — nothing paired"
 fi
