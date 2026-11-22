@@ -46,6 +46,28 @@ dl() { # dl URL DEST
     printf '\n'
 }
 
+# remote_etag URL — last ETag header from a HEAD request, empty on failure
+remote_etag() {
+    curl -fsSIL "$1" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1) == "etag:" {e=$2} END {print e}'
+}
+
+# dl_cached URL DEST — skip the download when DEST's stored etag
+# already matches the remote one; installs atomically otherwise.
+dl_cached() {
+    _url=$1 _dest=$2 _etagf="$_dest.etag"
+    _etag=$(remote_etag "$_url")
+    if [ -f "$_dest" ] && [ -n "$_etag" ] && \
+       [ "$_etag" = "$(cat "$_etagf" 2>/dev/null)" ]; then
+        ok "$_dest — already latest, skipping download"
+        return 0
+    fi
+    dl "$_url" "$_dest.new"
+    install -m 755 "$_dest.new" "$_dest" && rm -f "$_dest.new"
+    if [ -n "$_etag" ]; then printf '%s' "$_etag" > "$_etagf"; fi
+    ok "$_dest"
+}
+
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
 
 v_url() {
@@ -115,11 +137,8 @@ banner
 
 mkdir -p "$BIN"
 for tool in murmurd murmurctl; do
-    step "downloading $tool"
-    dl "https://github.com/$REPO/releases/latest/download/$tool-$TARGET" "$BIN/$tool.new"
-    chmod +x "$BIN/$tool.new"
-    mv "$BIN/$tool.new" "$BIN/$tool"
-    ok "$BIN/$tool"
+    step "$tool binary"
+    dl_cached "https://github.com/$REPO/releases/latest/download/$tool-$TARGET" "$BIN/$tool"
 done
 
 # ---- PATH

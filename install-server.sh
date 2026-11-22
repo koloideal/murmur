@@ -61,6 +61,28 @@ dl() { # dl URL DEST
     printf '\n'
 }
 
+# remote_etag URL — last ETag header from a HEAD request, empty on failure
+remote_etag() {
+    curl -fsSIL "$1" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1) == "etag:" {e=$2} END {print e}'
+}
+
+# dl_cached URL DEST — skip the download when DEST's stored etag
+# already matches the remote one; installs atomically otherwise.
+dl_cached() {
+    _url=$1 _dest=$2 _etagf="$_dest.etag"
+    _etag=$(remote_etag "$_url")
+    if [ -f "$_dest" ] && [ -n "$_etag" ] && \
+       [ "$_etag" = "$(cat "$_etagf" 2>/dev/null)" ]; then
+        ok "$_dest — already latest, skipping download"
+        return 0
+    fi
+    dl "$_url" "$_dest.new"
+    install -m 755 "$_dest.new" "$_dest" && rm -f "$_dest.new"
+    if [ -n "$_etag" ]; then printf '%s' "$_etag" > "$_etagf"; fi
+    ok "$_dest"
+}
+
 have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
 
 # ---- validators: print a friendly hint to stderr, return 1 on bad input
@@ -126,12 +148,20 @@ askyn() {
 fw_open() {
     port=$1
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow "$port/tcp" >/dev/null && ok "ufw: $port/tcp allowed" || \
-            warn "ufw allow $port/tcp failed"
+        if ufw status 2>/dev/null | grep -q "^$port/tcp"; then
+            ok "ufw: $port/tcp already open"
+        else
+            ufw allow "$port/tcp" >/dev/null && ok "ufw: $port/tcp allowed" || \
+                warn "ufw allow $port/tcp failed"
+        fi
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port="$port/tcp" >/dev/null && \
-            firewall-cmd --reload >/dev/null && ok "firewalld: $port/tcp allowed" || \
-            warn "firewalld rule for $port/tcp failed"
+        if firewall-cmd --query-port="$port/tcp" >/dev/null 2>&1; then
+            ok "firewalld: $port/tcp already open"
+        else
+            firewall-cmd --permanent --add-port="$port/tcp" >/dev/null && \
+                firewall-cmd --reload >/dev/null && ok "firewalld: $port/tcp allowed" || \
+                warn "firewalld rule for $port/tcp failed"
+        fi
     elif command -v nft >/dev/null 2>&1; then
         warn "nftables: open $port/tcp — nft add rule inet filter input tcp dport $port accept"
     elif command -v iptables >/dev/null 2>&1; then
@@ -193,18 +223,16 @@ case "$(uname -m)" in
 esac
 
 URL="https://github.com/$REPO/releases/latest/download/murmur-server-$TARGET"
-step "downloading murmur-server ($TARGET)"
-tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
-dl "$URL" "$tmp"
-install -m 755 "$tmp" "$PREFIX/murmur-server"
-ok "$PREFIX/murmur-server"
+step "murmur-server binary ($TARGET)"
+dl_cached "$URL" "$PREFIX/murmur-server"
 
 # ---- proxy config + TLS
 case "$PROXY" in
     nginx)
         step "nginx vhost for $DOMAIN"
         vh="/etc/nginx/sites-available/$DOMAIN"
-        cat > "$vh" <<EOF
+        vh_tmp=$(mktemp)
+        cat > "$vh_tmp" <<EOF
 server {
     server_name $DOMAIN;
     location / {
@@ -220,11 +248,17 @@ server {
     listen [::]:80;
 }
 EOF
-        ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
-        if nginx -t && systemctl reload nginx; then
-            ok "$vh enabled"
+        if cmp -s "$vh_tmp" "$vh" 2>/dev/null; then
+            rm -f "$vh_tmp"
+            ok "$vh unchanged"
         else
-            warn "nginx -t failed — vhost written but not enabled; fix nginx and reload manually"
+            mv "$vh_tmp" "$vh"
+            ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
+            if nginx -t && systemctl reload nginx; then
+                ok "$vh enabled"
+            else
+                warn "nginx -t failed — vhost written but not enabled; fix nginx and reload manually"
+            fi
         fi
 
         if ! command -v certbot >/dev/null 2>&1; then
