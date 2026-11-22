@@ -28,6 +28,7 @@ class MurmurTileService : TileService() {
                         dev.murmur.core.Relay.State.ONLINE -> "online"
                         dev.murmur.core.Relay.State.CONNECTING -> "connecting"
                         dev.murmur.core.Relay.State.OFFLINE -> "offline"
+                        dev.murmur.core.Relay.State.REVOKED -> "removed"
                     }
                     tile.updateTile()
                 }

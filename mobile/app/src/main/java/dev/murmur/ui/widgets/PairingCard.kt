@@ -2,7 +2,6 @@ package dev.murmur.ui.widgets
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -78,7 +77,6 @@ fun PairingCard() {
     var code by remember { mutableStateOf("") }
     var invite by remember { mutableStateOf("") }
     var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "wss://" }) }
-    var session by remember { mutableStateOf("") }
     var job by remember { mutableStateOf<Job?>(null) }
     var scanning by remember { mutableStateOf(false) }
     var sas by remember { mutableStateOf("") }
@@ -97,14 +95,11 @@ fun PairingCard() {
             try {
                 val prov = pair(
                     input,
-                    Build.MODEL,
+                    secrets.deviceName,
                     serverUrl = if (short) server.trim() else null,
                     onStage = { st ->
                         when (st) {
-                            is PairStage.AwaitingAccept -> {
-                                session = st.session
-                                phase = "accept"
-                            }
+                            is PairStage.AwaitingAccept -> phase = "accept"
                             is PairStage.AwaitingConfirm -> phase = "confirm"
                         }
                     },
@@ -114,7 +109,7 @@ fun PairingCard() {
                     val answer = CompletableDeferred<Boolean>().also { sasAnswer = it }
                     answer.await()
                 }
-                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl)
+                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch)
                 phase = "done"
                 celebrating = true
                 MurmurService.start(ctx)
@@ -162,13 +157,16 @@ fun PairingCard() {
         )
     }
 
+    // The laptop side is one interactive command: `murmurctl invite`
+    // keeps waiting after the QR and walks accept → code → confirm.
     val laptopSteps = listOf(
         Step(
-            "on the laptop, accept this phone — `murmurctl pair` lists requests",
-            "murmurctl pair accept $session",
+            "accept on the laptop — answer y to “accept it?”. " +
+                "Closed the invite already? Run",
+            "murmurctl pair",
         ),
-        Step("check the six digits match on both screens"),
-        Step("confirm on the laptop", "murmurctl pair confirm $session"),
+        Step("compare the six digits here and on the laptop"),
+        Step("confirm on the laptop — answer y to “codes match?”"),
     )
     fun cancel() {
         job?.cancel()
@@ -234,7 +232,7 @@ fun PairingCard() {
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "it's printed next to this phone in  murmurctl pair",
+                        "the laptop shows them under “verification code”",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

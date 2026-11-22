@@ -57,6 +57,7 @@ impl NotifyBus {
     async fn notify(
         &self,
         replaces_id: u32,
+        app: &str,
         pkg: &str,
         title: &str,
         body: &str,
@@ -73,7 +74,7 @@ impl NotifyBus {
             .call(
                 "Notify",
                 &(
-                    APP,
+                    app,
                     replaces_id,
                     icon_path.unwrap_or_default(),
                     title,
@@ -162,9 +163,10 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             m = inbox.recv() => {
                 let Some((_from, msg)) = m else { return Ok(()) };
                 match msg {
-                    Message::Notification { key, pkg, title, body, icon_b64, .. } => {
+                    Message::Notification { key, pkg, app, title, body, icon_b64, .. } => {
                         let replaces = ids.get(&key).copied().unwrap_or(0);
-                        match bus.notify(replaces, &pkg, &title, &body, icon_b64.as_deref()).await {
+                        let app = app.as_deref().unwrap_or(APP);
+                        match bus.notify(replaces, app, &pkg, &title, &body, icon_b64.as_deref()).await {
                             Ok(id) => {
                                 ids.insert(key.clone(), id);
                                 keys.insert(id, key);

@@ -17,7 +17,14 @@ object ClipboardBridge {
         val data = Base64.decode(msg.data_b64, Base64.NO_WRAP)
         val clip = when (msg.mime) {
             "text/plain", "text/uri-list" ->
-                ClipData.newPlainText("murmur", data.decodeToString())
+                ClipData.newPlainText("murmur", data.decodeToString()).apply {
+                    // Passive sync lands while the phone may be face-up on
+                    // a desk — keep the system's copy preview from
+                    // flashing laptop clipboard contents on screen.
+                    description.extras = android.os.PersistableBundle().apply {
+                        putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
+                }
             "image/png" -> {
                 // TODO: write to cache, hand out a content Uri via FileProvider
                 return

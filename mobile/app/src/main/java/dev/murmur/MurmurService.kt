@@ -26,6 +26,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 
@@ -46,6 +48,7 @@ class MurmurService : Service() {
     private lateinit var key: FamilyKey
     private lateinit var relay: Relay
     private lateinit var media: MediaBridge
+    private lateinit var identity: dev.murmur.core.IdentityKey
 
     /** device → (state, ts), mirrored from Presence broadcasts. */
     private val presence = mutableMapOf<String, Pair<String, Long>>()
@@ -65,9 +68,9 @@ class MurmurService : Service() {
         instance = this
         // startForegroundService() owes a call within 5s even on the
         // early-return path — promote first, decide later.
-        startForeground(NOTIF_ID, statusNotification("murmur"))
+        startForeground(NOTIF_ID, statusNotification("starting…"))
         secrets = Secrets(this)
-        key = secrets.familyKey() ?: run {
+        key = secrets.familyKey()?.takeIf { !secrets.removed } ?: run {
             // Not provisioned — sit idle; the service is (re)started after
             // pairing completes.
             stopSelf()
@@ -85,13 +88,49 @@ class MurmurService : Service() {
                 )
             },
             scope = scope,
-            onAuthed = { media.publishNow() },
+            onAuthed = {
+                announceIdentity()
+                media.publishNow()
+                pollDevices()
+            },
         )
+        identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
         status.value = Status(provisioned = true, running = true)
         relay.start()
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
-        scope.launch { relay.state.collect { status.value = status.value.copy(relay = it) } }
+        scope.launch {
+            relay.state.collect { st ->
+                status.value = status.value.copy(relay = st)
+                if (st == Relay.State.REVOKED) {
+                    // The relay forgot us — nothing to retry. Keep the keys
+                    // off the wire and let the dashboard offer re-pairing.
+                    secrets.removed = true
+                    stopSelf()
+                }
+            }
+        }
+        // The shade notification mirrors the link, so the phone's state is
+        // readable without opening the app.
+        scope.launch {
+            status.collect { st ->
+                val laptops = st.devices.count {
+                    it.online && !it.revoked && it.device_id != secrets.deviceId
+                }
+                val text = when (st.relay) {
+                    Relay.State.ONLINE -> when (laptops) {
+                        0 -> "online · no laptop around"
+                        1 -> "online · 1 device"
+                        else -> "online · $laptops devices"
+                    }
+                    Relay.State.CONNECTING -> "connecting…"
+                    Relay.State.OFFLINE -> "offline — retrying"
+                    Relay.State.REVOKED -> "removed from the family"
+                }
+                getSystemService(NotificationManager::class.java)
+                    .notify(NOTIF_ID, statusNotification(text))
+            }
+        }
 
         // Push our display name (idempotent server-side upsert) and keep
         // the family list + server ping fresh while online.
@@ -100,14 +139,16 @@ class MurmurService : Service() {
                 if (st == Relay.State.ONLINE) pushName()
             }
         }
+        // Device list + ping only matter while someone looks at them —
+        // poll while the dashboard is visible, stay silent otherwise.
         scope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(DEVICES_POLL_MS)
-                if (status.value.relay == Relay.State.ONLINE) {
-                    listSentAt.set(android.os.SystemClock.elapsedRealtimeNanos())
-                    relay.sendControl(Control.ListDevices, secrets.deviceId ?: return@launch)
+            combine(uiVisible, relay.state) { v, st -> v && st == Relay.State.ONLINE }
+                .collectLatest { live ->
+                    while (live) {
+                        pollDevices()
+                        kotlinx.coroutines.delay(DEVICES_POLL_MS)
+                    }
                 }
-            }
         }
 
         getSystemService(ConnectivityManager::class.java)
@@ -130,7 +171,49 @@ class MurmurService : Service() {
         super.onDestroy()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_PAUSE) stopSelf()
+        return START_STICKY
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun pollDevices() {
+        val id = secrets.deviceId ?: return
+        listSentAt.set(android.os.SystemClock.elapsedRealtimeNanos())
+        relay.sendControl(Control.ListDevices, id)
+    }
+
+    private fun announceIdentity(to: String = Envelope.ALL) =
+        send(Msg.Identity(identity.publicB64, "phone"), to)
+
+    /** TOFU: the first identity a member announces under the current
+     *  family key is the one we trust for its key rotations. */
+    private fun pin(from: String, id: Msg.Identity) {
+        if (from == secrets.deviceId || from in secrets.revokedIds) return
+        val roster = secrets.roster
+        if (roster.containsKey(from)) return
+        secrets.roster = roster + (from to (id.pub_b64 to id.kind))
+        announceIdentity(to = from) // they may have missed ours
+    }
+
+    /** Adopt a rotation sealed to our identity by a pinned laptop.
+     *  Newer epoch wins; same epoch → smaller rotator id (two laptops
+     *  rotating at once still converge). */
+    private fun applyRotation(from: String, r: Msg.KeyRotate) {
+        val cur = secrets.keyEpoch
+        val rot = secrets.keyRotator
+        val newer = r.epoch > cur || (r.epoch == cur && rot != null && from < rot)
+        if (!newer) return
+        val rotatorPub = secrets.roster[from]?.first ?: return
+        val mine = r.keys.firstOrNull { it.device_id == secrets.deviceId } ?: return
+        val newKey = identity.openRekey(rotatorPub, r.epoch, mine.sealed_b64) ?: return
+        secrets.rotateFamilyKey(newKey, r.epoch, from, r.revoked)
+        key = FamilyKey.fromBytes(newKey)
+        r.revoked.forEach { presence.remove(it) }
+        status.value = status.value.copy(keyEpoch = r.epoch)
+        announceIdentity()
+    }
 
     /** Push the locally edited name to the registry. */
     fun pushName() {
@@ -188,6 +271,7 @@ class MurmurService : Service() {
                 val sent = listSentAt.getAndSet(0)
                 status.value = status.value.copy(
                     devices = ctl.devices,
+                    familyName = ctl.family_name,
                     serverRttMs = if (sent != 0L)
                         (android.os.SystemClock.elapsedRealtimeNanos() - sent) / 1_000_000
                     else null,
@@ -210,13 +294,8 @@ class MurmurService : Service() {
                 if (msg.origin == activeDevice()) ClipboardBridge.apply(this, msg)
             }
             is Msg.NotificationDismiss -> NotificationBridge.requestCancel(msg.key)
-            is Msg.KeyRotate -> {
-                val newKey = runCatching {
-                    Base64.decode(msg.new_key_b64, Base64.NO_WRAP)
-                }.getOrNull() ?: return
-                secrets.rotateFamilyKey(newKey)
-                key = FamilyKey.fromBytes(newKey)
-            }
+            is Msg.Identity -> pin(env.from, msg)
+            is Msg.KeyRotate -> applyRotation(env.from, msg)
             else -> Unit // Notification/MediaState are phone-originated
         }
     }
@@ -226,10 +305,22 @@ class MurmurService : Service() {
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "murmur", NotificationManager.IMPORTANCE_MIN),
         )
+        val open = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, dev.murmur.ui.MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val pause = android.app.PendingIntent.getService(
+            this, 1,
+            Intent(this, MurmurService::class.java).setAction(ACTION_PAUSE),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("murmur")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat)
+            .setContentIntent(open)
+            .addAction(Notification.Action.Builder(null, "pause", pause).build())
             .setOngoing(true)
             .build()
     }
@@ -242,12 +333,18 @@ class MurmurService : Service() {
         /** ListDevices round-trip — the phone's own ping to the relay. */
         val serverRttMs: Long? = null,
         val devices: List<DeviceInfo> = emptyList(),
+        val familyName: String? = null,
+        val keyEpoch: Long = 0,
     )
 
     companion object {
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
         private const val DEVICES_POLL_MS = 12_000L
+        private const val ACTION_PAUSE = "dev.murmur.PAUSE"
+
+        /** The dashboard is on screen — gates the device-list poller. */
+        val uiVisible = MutableStateFlow(false)
 
         var instance: MurmurService? = null
             private set

@@ -27,20 +27,28 @@ jobs:
           files: murmur-server-*-linux-musl
 
   laptop:
-    runs-on: ubuntu-latest
+    # Native runners per arch — no cross toolchain to babysit.
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-      - name: build murmurd + murmurctl (glibc — Arch laptops)
+      - name: build murmurd + murmurctl (glibc — Arch machines)
         run: |
           cargo build --release --manifest-path laptop/Cargo.toml
           for b in murmurd murmurctl; do
-            cp "laptop/target/release/$b" "$b-x86_64-unknown-linux-gnu"
+            cp "laptop/target/release/$b" "$b-${{ matrix.target }}"
           done
       - uses: softprops/action-gh-release@v2
         with:
-          files: "*-x86_64-unknown-linux-gnu"
+          files: "*-${{ matrix.target }}"
 
   android:
     runs-on: ubuntu-latest

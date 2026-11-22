@@ -19,6 +19,7 @@ enum Req {
         device_id: String,
     },
     Invite,
+    Rotate,
     Pair,
     PairAccept {
         session: String,
@@ -131,7 +132,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "name": shared.cfg.name,
                 "server": shared.cfg.server_url,
                 "online": shared.online.load(std::sync::atomic::Ordering::Relaxed),
+                "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "active_node": shared.active_node().map(|i| i.to_string()),
+                "key_epoch": shared.keys.read().unwrap().epoch,
+                "members": shared.roster.lock().unwrap().len(),
                 "presence": presence,
             }))
         }
@@ -214,6 +218,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "server": shared.cfg.server_url,
             }))
         }
+        Req::Rotate => match shared.rotate(vec![]) {
+            Ok(epoch) => Res::ok(serde_json::json!({"epoch": epoch})),
+            Err(e) => Res::err(e),
+        },
         Req::Pair => Res::ok(serde_json::json!({"pending": shared.pair_pending()})),
         Req::PairAccept { session } => match session.parse::<murmur_proto::DeviceId>() {
             Ok(session) => match shared.pair_accept(session) {

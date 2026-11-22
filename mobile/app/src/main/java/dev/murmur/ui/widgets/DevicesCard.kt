@@ -36,11 +36,12 @@ fun DevicesCard() {
     val selfId = remember { Secrets(ctx).deviceId }
     val status by MurmurService.status.collectAsState()
     val settled by Secrets.settledFlow.collectAsState()
+    val removed by Secrets.removedFlow.collectAsState()
 
     val others = status.devices.filter { it.device_id != selfId && !it.revoked }
 
     AnimatedVisibility(
-        visible = settled,
+        visible = settled && !removed,
         enter = fadeIn(tween(600)) + expandVertically(tween(600)),
     ) {
         FeatureCard("family", Icons.Outlined.Devices) {

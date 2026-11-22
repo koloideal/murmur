@@ -20,6 +20,11 @@ fn data_dir() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share").join("murmur")
 }
 
+/// ~/.local/share/murmur — secrets, roster.
+pub(crate) fn data_path(name: &str) -> PathBuf {
+    data_dir().join(name)
+}
+
 /// ~/.cache/murmur — artwork and other transient payloads.
 pub(crate) fn cache_dir() -> PathBuf {
     xdg_dir("XDG_CACHE_HOME", ".cache").join("murmur")
@@ -84,11 +89,30 @@ impl Config {
 }
 
 /// Provisioning material from pairing. Stored 0600.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Secrets {
     pub device_id: String,
     pub auth_token_hex: String,
     pub family_key_hex: String,
+    /// Rotation epoch of `family_key_hex` (0 = never rotated).
+    #[serde(default)]
+    pub key_epoch: u64,
+    /// Device that set the current epoch — tie-break for two laptops
+    /// rotating at once (smaller id wins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_rotator: Option<String>,
+    /// A few previous family keys, newest first — only to recognise a
+    /// member still on an old key and re-key it. Never used to accept
+    /// messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub old_keys_hex: Vec<String>,
+    /// Members excluded by past rotations — passed along with every
+    /// re-key so late joiners drop them too, never re-pinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<String>,
+    /// Long-term X25519 identity secret (generated on first start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_hex: Option<String>,
 }
 
 impl Secrets {
@@ -97,6 +121,16 @@ impl Secrets {
         let s = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
         Ok(toml::from_str(&s)?)
+    }
+
+    /// Rewrite secrets.toml in place (atomic rename, 0600).
+    pub fn save(&self) -> anyhow::Result<()> {
+        let dir = data_dir();
+        let tmp = dir.join("secrets.toml.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        write_new(&tmp, &toml::to_string_pretty(self)?, 0o600)?;
+        std::fs::rename(&tmp, dir.join("secrets.toml"))?;
+        Ok(())
     }
 
     pub fn device_id(&self) -> anyhow::Result<DeviceId> {
@@ -146,6 +180,7 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
         device_id: id.to_string(),
         auth_token_hex: token_hex.into(),
         family_key_hex: hex::encode(FamilyKey::random().0),
+        ..Secrets::default()
     };
     provision(&cfg, &secrets)?;
     eprintln!("device {id} provisioned");

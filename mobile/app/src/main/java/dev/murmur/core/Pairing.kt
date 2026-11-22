@@ -19,6 +19,7 @@ data class Provisioning(
     val tokenHex: String,
     val familyKey: ByteArray,
     val serverUrl: String,
+    val keyEpoch: Long,
 )
 
 class PairingException(message: String) : Exception(message)
@@ -180,6 +181,7 @@ suspend fun pair(
                 // the inviter's advertised URL may be unreachable from
                 // this network (e.g. a LAN IP behind a firewall).
                 serverUrl = url,
+                keyEpoch = blob.key_epoch,
             )
         }
     } finally {

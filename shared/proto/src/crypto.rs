@@ -72,6 +72,17 @@ impl PairKey {
         Self { secret, public }
     }
 
+    /// Restore a persisted (identity) key.
+    pub fn from_secret(bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(bytes);
+        let public = PublicKey::from(&secret);
+        Self { secret, public }
+    }
+
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.secret.to_bytes()
+    }
+
     /// DH result used both as SAS input and as AEAD key for PairData.
     pub fn dh(&self, peer: &PublicKey) -> [u8; 32] {
         self.secret.diffie_hellman(peer).to_bytes()

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plain ws:// is allowed for self-hosted relays without TLS (LAN, a
+     bare IP). Payloads are end-to-end sealed either way; the dashboard
+     warns that the relay login itself travels in the clear. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

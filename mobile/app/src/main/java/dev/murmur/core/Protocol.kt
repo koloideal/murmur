@@ -69,6 +69,7 @@ sealed class Msg {
     data class Notification(
         val key: String,
         val pkg: String,
+        val app: String? = null,
         val title: String,
         val body: String,
         val icon_b64: String? = null,
@@ -114,10 +115,23 @@ sealed class Msg {
         val ts: Long,
     ) : Msg()
 
+    /** Long-term identity pubkey, announced after every connect. */
+    @Serializable
+    @SerialName("identity")
+    data class Identity(val pub_b64: String, val kind: String) : Msg()
+
+    /** New family key, sealed once per member to its identity key. */
     @Serializable
     @SerialName("key_rotate")
-    data class KeyRotate(val new_key_b64: String) : Msg()
+    data class KeyRotate(
+        val epoch: Long,
+        val revoked: List<String> = emptyList(),
+        val keys: List<SealedKey>,
+    ) : Msg()
 }
+
+@Serializable
+data class SealedKey(val device_id: String, val sealed_b64: String)
 
 /** Cleartext control-plane. Rust serde `tag = "c"`. */
 @Serializable
@@ -158,7 +172,10 @@ sealed class Control {
 
     @Serializable
     @SerialName("devices")
-    data class Devices(val devices: List<DeviceInfo>) : Control()
+    data class Devices(
+        val devices: List<DeviceInfo>,
+        val family_name: String? = null,
+    ) : Control()
 
     @Serializable
     @SerialName("rename_device")
@@ -202,4 +219,5 @@ data class PairBlob(
     val token_hex: String,
     val family_key_b64: String,
     val server_url: String,
+    val key_epoch: Long = 0,
 )

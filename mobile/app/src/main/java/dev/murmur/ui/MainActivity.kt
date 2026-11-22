@@ -39,6 +39,17 @@ import dev.murmur.ui.widgets.homeWidgets
 
 class MainActivity : ComponentActivity() {
 
+    // The device list/ping poller runs only while this is on screen.
+    override fun onResume() {
+        super.onResume()
+        dev.murmur.MurmurService.uiVisible.value = true
+    }
+
+    override fun onPause() {
+        dev.murmur.MurmurService.uiVisible.value = false
+        super.onPause()
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

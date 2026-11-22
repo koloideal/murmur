@@ -15,6 +15,10 @@ pub enum Message {
     Notification {
         key: String,
         pkg: String,
+        /// Human app name ("Telegram") — the laptop's notification
+        /// daemon groups and labels by it. Older phones omit it.
+        #[serde(default)]
+        app: Option<String>,
         title: String,
         body: String,
         icon_b64: Option<String>,
@@ -26,7 +30,7 @@ pub enum Message {
     NotificationDismiss { key: String },
 
     /// Phone → all laptops. Sent on metadata/status changes, on seeks and
-    /// ~every 5s while playing; laptops extrapolate position between updates.
+    /// ~every 20s while playing; laptops extrapolate position between updates.
     MediaState {
         player: String,
         title: String,
@@ -63,10 +67,36 @@ pub enum Message {
         ts: u64,
     },
 
-    /// Authed device → "*". New family key after a device was revoked.
-    /// Everyone switches immediately; the revoked device can't read this
-    /// because it doesn't have the new key — it only sees ciphertext.
-    KeyRotate { new_key_b64: String },
+    /// Authed device → "*" after every (re)connect: its long-term X25519
+    /// identity pubkey. Peers pin the first key per device (TOFU), and
+    /// only from frames that opened under the *current* family key.
+    Identity { pub_b64: String, kind: DeviceKind },
+
+    /// New family key after a revocation (or `murmurctl rotate`), sealed
+    /// once per remaining member to its identity key — see
+    /// [`crate::rekey`]. `revoked` are dropped from everyone's roster.
+    /// Also re-sent unicast to a member caught talking on an old key.
+    KeyRotate {
+        epoch: u64,
+        #[serde(default)]
+        revoked: Vec<DeviceId>,
+        keys: Vec<SealedKey>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealedKey {
+    pub device_id: DeviceId,
+    pub sealed_b64: String,
+}
+
+/// What a device is — rotation is only ever run by laptops; the phone
+/// stays a thin agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Laptop,
+    Phone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

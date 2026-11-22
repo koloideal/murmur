@@ -19,7 +19,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -54,12 +57,14 @@ fun StatusCard() {
     val secrets = remember { Secrets(ctx) }
     val status by MurmurService.status.collectAsState()
     val settled by Secrets.settledFlow.collectAsState()
+    val removed by Secrets.removedFlow.collectAsState()
 
     var editingName by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var deviceName by remember { mutableStateOf(secrets.deviceName) }
 
     val (color, label) = when {
+        removed -> MaterialTheme.colorScheme.error to "removed"
         !status.running -> MaterialTheme.colorScheme.onSurfaceVariant to "paused"
         status.relay == Relay.State.ONLINE ->
             MaterialTheme.colorScheme.secondary to "online"
@@ -110,6 +115,19 @@ fun StatusCard() {
                     style = MaterialTheme.typography.displaySmall,
                     color = color,
                 )
+                if (removed) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "the relay no longer knows this phone — it was removed " +
+                            "from the family. Its keys are useless now.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Button(onClick = { secrets.clear() }) { Text("pair again") }
+                    return@Column
+                }
                 if (status.running && status.relay == Relay.State.OFFLINE) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -119,6 +137,7 @@ fun StatusCard() {
                     )
                 }
                 Spacer(Modifier.height(16.dp))
+                status.familyName?.let { StatusRow("family", it) }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -134,6 +153,15 @@ fun StatusCard() {
                 }
                 StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
                 StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
+                if (secrets.serverUrl.startsWith("ws://")) {
+                    Text(
+                        "plain ws — messages stay end-to-end sealed, but the " +
+                            "relay login travels unencrypted. Prefer wss://.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                    )
+                }
                 StatusRow(
                     "ping",
                     status.serverRttMs?.let { "$it ms" } ?: "—",
@@ -197,14 +225,29 @@ fun StatusCard() {
     }
 
     if (confirmLeave) {
+        val online = status.running && status.relay == Relay.State.ONLINE
         AlertDialog(
             onDismissRequest = { confirmLeave = false },
             title = { Text("leave the family?") },
             text = {
-                Text(
-                    "This wipes the phone's keys and revokes it on the relay. " +
-                        "You'll need a fresh invite to pair again.",
-                )
+                Column {
+                    Text(
+                        "This wipes the phone's keys and revokes it on the relay; " +
+                            "the laptops then rotate the family key. You'll need a " +
+                            "fresh invite to pair again.",
+                    )
+                    if (!online) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "You're offline, so the relay won't hear about it — this " +
+                                "phone stays in the family until you remove it on the " +
+                                "relay host:",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        CommandLine("sudo murmur-server revoke --id ${secrets.deviceId}")
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -213,7 +256,10 @@ fun StatusCard() {
                     MurmurService.stop(ctx)
                     secrets.clear()
                 }) {
-                    Text("leave", color = MaterialTheme.colorScheme.error)
+                    Text(
+                        if (online) "leave" else "leave anyway",
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             },
             dismissButton = {

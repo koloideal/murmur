@@ -11,7 +11,6 @@ set -eu
 
 REPO="${MURMUR_REPO:-koloideal/murmur}"
 BIN="${BIN_DIR:-$HOME/.local/bin}"
-TARGET=x86_64-unknown-linux-gnu
 
 # ---- pretty
 if [ -t 1 ]; then
@@ -131,8 +130,11 @@ hint_box() {
 }
 
 banner
-[ "$(uname -m)" = "x86_64" ] || \
-    die "releases only ship x86_64 client binaries — build from source instead"
+case "$(uname -m)" in
+    x86_64)        TARGET=x86_64-unknown-linux-gnu ;;
+    aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+    *) die "no prebuilt client for $(uname -m) — build from source: cargo build --release --manifest-path laptop/Cargo.toml" ;;
+esac
 
 mkdir -p "$BIN"
 for tool in murmurd murmurctl; do
@@ -196,7 +198,7 @@ post_pair() {
         "" \
         "the phone isn't connected yet —" \
         "invite it from this machine:" \
-        "  ${B}murmurctl invite${R0}   ${D2}→ one-shot code / QR for the app${R0}"
+        "  ${B}murmurctl invite${R0}   ${D2}→ QR for the app, then answer y twice${R0}"
 }
 
 # ---- join: args beat questions beat the hint box

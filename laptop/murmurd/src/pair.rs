@@ -170,9 +170,10 @@ impl Shared {
             token_hex: token.to_hex(),
             family_key_b64: Some({
                 use base64::Engine;
-                base64::engine::general_purpose::STANDARD.encode(self.key.0)
+                base64::engine::general_purpose::STANDARD.encode(self.keys.read().unwrap().current.0)
             }),
             server_url: Some(self.cfg.server_url.clone()),
+            key_epoch: self.keys.read().unwrap().epoch,
         };
         let dh = pending.key.dh(&pending.peer_pub);
         let blob_b64 = {
@@ -193,6 +194,7 @@ pub struct Paired {
     pub device_id: DeviceId,
     pub token_hex: String,
     pub family_key_hex: String,
+    pub key_epoch: u64,
 }
 
 /// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
@@ -324,6 +326,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                             }
                             None => hex::encode(FamilyKey::random().0),
                         },
+                        key_epoch: blob.key_epoch,
                     });
                 }
                 _ => {}

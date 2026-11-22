@@ -12,13 +12,14 @@ pub mod envelope;
 pub mod id;
 pub mod invite;
 pub mod msg;
+pub mod rekey;
 
 pub use control::Control;
 pub use crypto::{FamilyKey, PairKey, sas_code};
 pub use envelope::{Envelope, Route};
 pub use id::{AuthToken, DeviceId, pair_code};
 pub use invite::Invite;
-pub use msg::{MediaOp, Message, PlayStatus, PresenceState};
+pub use msg::{DeviceKind, MediaOp, Message, PlayStatus, PresenceState, SealedKey};
 pub use x25519_dalek::PublicKey;
 
 /// Protocol version. Bump on incompatible wire changes.

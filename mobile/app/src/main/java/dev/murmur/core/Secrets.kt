@@ -5,6 +5,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.content.edit
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -25,6 +27,9 @@ class Secrets(private val ctx: Context) {
     init {
         // Cold start already provisioned → dashboard may show immediately.
         if (provisioned) settledFlow.value = true
+        mutedFlow.value = mutedApps
+        removedFlow.value = removed
+        hideTextFlow.value = hideNotificationText
     }
 
     val provisioned: Boolean
@@ -62,10 +67,18 @@ class Secrets(private val ctx: Context) {
         prefs.edit { clear() }
         KeystoneCipher.deleteKey()
         settledFlow.value = false
+        removedFlow.value = false
     }
 
-    fun save(deviceId: String, authTokenHex: String, familyKeyBytes: ByteArray, serverUrl: String) {
+    fun save(
+        deviceId: String,
+        authTokenHex: String,
+        familyKeyBytes: ByteArray,
+        serverUrl: String,
+        keyEpoch: Long,
+    ) {
         prefs.edit {
+            putLong(KEY_EPOCH, keyEpoch)
             putString(KEY_DEVICE, deviceId)
             putString(KEY_URL, serverUrl)
             putString(KEY_TOKEN, cipher.seal(authTokenHex.encodeToByteArray()))
@@ -79,15 +92,69 @@ class Secrets(private val ctx: Context) {
     fun familyKey(): FamilyKey? =
         prefs.getString(KEY_FAMILY, null)?.let { cipher.open(it)?.let(FamilyKey::fromBytes) }
 
-    /** App-package filter for notifications: allowlist, empty = all. */
-    var notificationAllowlist: Set<String>
-        get() = prefs.getStringSet(KEY_ALLOW, emptySet()) ?: emptySet()
-        set(v) = prefs.edit { putStringSet(KEY_ALLOW, v) }
+    /** Apps whose notifications never leave the phone. */
+    var mutedApps: Set<String>
+        get() = prefs.getStringSet(KEY_MUTED, emptySet()) ?: emptySet()
+        set(v) {
+            prefs.edit { putStringSet(KEY_MUTED, v) }
+            mutedFlow.value = v
+        }
 
-    /** Rotate the family key in place (KeyRotate broadcast). */
-    fun rotateFamilyKey(newKey: ByteArray) {
-        prefs.edit { putString(KEY_FAMILY, cipher.seal(newKey)) }
+    /** Laptops get the app + title only, never the message text. */
+    var hideNotificationText: Boolean
+        get() = prefs.getBoolean(KEY_HIDE_TEXT, false)
+        set(v) {
+            prefs.edit { putBoolean(KEY_HIDE_TEXT, v) }
+            hideTextFlow.value = v
+        }
+
+    /** Long-term identity key, created on first use, Keystore-sealed. */
+    fun identity(): IdentityKey {
+        prefs.getString(KEY_IDENTITY, null)?.let { cipher.open(it) }?.let { return IdentityKey(it) }
+        return IdentityKey.generate().also {
+            prefs.edit { putString(KEY_IDENTITY, cipher.seal(it.secret)) }
+        }
     }
+
+    /** The relay said this phone is revoked/unknown — sticky until the
+     *  user re-pairs (which [clear]s everything). */
+    var removed: Boolean
+        get() = prefs.getBoolean(KEY_REMOVED, false)
+        set(v) {
+            prefs.edit { putBoolean(KEY_REMOVED, v) }
+            removedFlow.value = v
+        }
+
+    val keyEpoch: Long get() = prefs.getLong(KEY_EPOCH, 0)
+    val keyRotator: String? get() = prefs.getString(KEY_ROTATOR, null)
+
+    /** Adopt a rotated family key (KeyRotate). */
+    fun rotateFamilyKey(newKey: ByteArray, epoch: Long, rotator: String, revoked: List<String>) {
+        prefs.edit {
+            putString(KEY_FAMILY, cipher.seal(newKey))
+            putLong(KEY_EPOCH, epoch)
+            putString(KEY_ROTATOR, rotator)
+            putStringSet(KEY_REVOKED, revokedIds + revoked)
+        }
+        roster = roster - revoked.toSet()
+    }
+
+    val revokedIds: Set<String> get() = prefs.getStringSet(KEY_REVOKED, emptySet()) ?: emptySet()
+
+    /** Pinned identities of the other members: id → (pubkey b64, kind). */
+    var roster: Map<String, Pair<String, String>>
+        get() = prefs.getString(KEY_ROSTER, null)?.let { s ->
+            runCatching {
+                protoJson.decodeFromString<Map<String, List<String>>>(s)
+                    .mapValues { (_, v) -> v[0] to v[1] }
+            }.getOrNull()
+        } ?: emptyMap()
+        set(v) = prefs.edit {
+            putString(
+                KEY_ROSTER,
+                protoJson.encodeToString(v.mapValues { (_, p) -> listOf(p.first, p.second) }),
+            )
+        }
 
     companion object {
         /** UI gate: true once the dashboard may be shown. Set on cold
@@ -96,12 +163,25 @@ class Secrets(private val ctx: Context) {
          *  burst gets its moment before the swap. */
         val settledFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
 
+        val removedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val hideTextFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+        /** Muted-apps set, observable by the notifications card. */
+        val mutedFlow = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
+
         private const val KEY_DEVICE = "device_id"
         private const val KEY_TOKEN = "auth_token_enc"
         private const val KEY_FAMILY = "family_key_enc"
         private const val KEY_URL = "server_url"
         private const val KEY_NAME = "device_name"
-        private const val KEY_ALLOW = "notif_allowlist"
+        private const val KEY_MUTED = "notif_muted"
+        private const val KEY_HIDE_TEXT = "notif_hide_text"
+        private const val KEY_IDENTITY = "identity_enc"
+        private const val KEY_EPOCH = "key_epoch"
+        private const val KEY_ROTATOR = "key_rotator"
+        private const val KEY_REVOKED = "revoked_ids"
+        private const val KEY_ROSTER = "roster"
+        private const val KEY_REMOVED = "removed"
     }
 }
 

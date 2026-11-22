@@ -1,9 +1,10 @@
 use crate::config::{Config, Secrets};
+use crate::keyring::{Keyring, Roster};
 use murmur_proto::{
-    Control, DeviceId, Envelope, FamilyKey, Message, PairKey, PresenceState, PublicKey, Route,
+    Control, DeviceId, Envelope, Message, PairKey, PresenceState, PublicKey, Route,
 };
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
@@ -48,7 +49,16 @@ pub struct Pending {
 pub struct Shared {
     pub cfg: Config,
     pub id: DeviceId,
-    pub key: FamilyKey,
+    /// Current family key + epoch + a few superseded ones.
+    pub keys: RwLock<Keyring>,
+    /// Long-term identity key — rotations are sealed to it.
+    pub identity: PairKey,
+    /// Pinned identities of the other members.
+    pub roster: Mutex<Roster>,
+    /// secrets.toml as loaded — rewritten when the key rotates.
+    pub secrets: Mutex<Secrets>,
+    pub last_rekey: Mutex<HashMap<DeviceId, std::time::Instant>>,
+    pub rotating: Mutex<()>,
     token_hex: String,
     seq: AtomicU64,
     pub out: mpsc::UnboundedSender<Envelope>,
@@ -64,19 +74,27 @@ pub struct Shared {
     pub pair: Mutex<Pairing>,
     /// True between HelloOk and the socket's death — for `murmurctl status`.
     pub online: AtomicBool,
+    /// The relay said this device is revoked / unknown.
+    pub revoked: AtomicBool,
 }
 
 impl Shared {
     pub fn new(
         cfg: Config,
-        secrets: Secrets,
+        mut secrets: Secrets,
         out: mpsc::UnboundedSender<Envelope>,
     ) -> anyhow::Result<Self> {
         let (ctl_events, _) = broadcast::channel(64);
+        let identity = crate::keyring::load_identity(&mut secrets)?;
         Ok(Self {
             id: secrets.device_id()?,
-            key: secrets.family_key()?,
+            keys: RwLock::new(Keyring::load(&secrets)?),
+            identity,
+            roster: Mutex::new(crate::keyring::load_roster()),
+            last_rekey: Mutex::new(HashMap::new()),
+            rotating: Mutex::new(()),
             token_hex: secrets.auth_token_hex.clone(),
+            secrets: Mutex::new(secrets),
             cfg,
             seq: AtomicU64::new(1),
             out,
@@ -84,16 +102,17 @@ impl Shared {
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
             online: AtomicBool::new(false),
+            revoked: AtomicBool::new(false),
         })
     }
 
-    fn next_seq(&self) -> u64 {
+    pub fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Seal and enqueue a message for the given route.
     pub fn send(&self, to: Route, msg: &Message) -> anyhow::Result<()> {
-        let env = Envelope::seal(self.id, to, self.next_seq(), &self.key, msg)?;
+        let env = Envelope::seal(self.id, to, self.next_seq(), &self.keys.read().unwrap().current, msg)?;
         let _ = self.out.send(env);
         Ok(())
     }

@@ -76,7 +76,9 @@ class MediaBridge(
         if (controller?.playbackState?.state != PlaybackState.STATE_PLAYING) return
         ticker = scope.launch {
             while (true) {
-                delay(5_000)
+                // Laptops extrapolate position between updates; this is
+                // only drift correction, so keep the radio mostly idle.
+                delay(20_000)
                 publishNow()
             }
         }

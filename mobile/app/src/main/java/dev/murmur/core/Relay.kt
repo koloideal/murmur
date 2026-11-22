@@ -42,7 +42,8 @@ class Relay(
     private val scope: CoroutineScope,
     private val onAuthed: suspend () -> Unit = {},
 ) {
-    enum class State { CONNECTING, ONLINE, OFFLINE }
+    /** REVOKED is terminal: the relay no longer knows this device. */
+    enum class State { CONNECTING, ONLINE, OFFLINE, REVOKED }
 
     // WS pings keep mobile NATs from silently dropping an idle conn;
     // the server pings too — belt and suspenders for flaky networks.
@@ -104,8 +105,16 @@ class Relay(
                 // Suspends until the socket dies. `true` = we got through auth,
                 // so the link itself was healthy → reset backoff.
                 if (connectOnce()) backoff = 1.seconds
+            } catch (e: RelayAuthException) {
+                // Revoked / forgotten by the relay: retrying can't help —
+                // stop and let the UI offer a fresh pairing.
+                if (e.reason == "revoked" || e.reason == "unknown device") {
+                    running.set(false)
+                    _state.emit(State.REVOKED)
+                    return
+                }
             } catch (_: Throwable) {
-                // auth rejection, DNS, TLS — all the same: back off and retry
+                // DNS, TLS, network — back off and retry
             }
             _state.emit(State.OFFLINE)
             // Sleep out the backoff unless kicked by a connectivity change.
@@ -172,4 +181,4 @@ class Relay(
         }
 }
 
-class RelayAuthException(reason: String) : Exception("server rejected auth: $reason")
+class RelayAuthException(val reason: String) : Exception("server rejected auth: $reason")

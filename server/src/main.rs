@@ -190,6 +190,7 @@ impl Shared {
                 drop(devices);
                 self.persist();
                 self.drop_conn(id); // live conn dies immediately
+                self.push_devices(); // members rotate the family key on this
                 true
             }
             None => false,
@@ -208,6 +209,28 @@ impl Shared {
                 rtt_ms: conns.get(id).and_then(|c| c.rtt.lock().unwrap().ms),
             })
             .collect()
+    }
+
+    /// Unsolicited `Devices` to every authed conn — how members learn
+    /// about a revocation the moment it happens.
+    fn push_devices(&self) {
+        let ctl = Control::Devices {
+            devices: self.device_list(),
+            family_name: self.family_name.lock().unwrap().clone(),
+        };
+        if let Ok(env) = Envelope::control(DeviceId::ZERO, Route::All, 0, &ctl) {
+            self.broadcast(&DeviceId::ZERO, &env, true);
+        }
+    }
+
+    /// Why `check_auth` would fail — told to the device so it can stop
+    /// retrying ("revoked") instead of hammering the relay forever.
+    fn auth_failure(&self, id: &DeviceId) -> &'static str {
+        match self.devices.lock().unwrap().get(id) {
+            Some(r) if r.revoked => "revoked",
+            Some(_) => "bad token",
+            None => "unknown device",
+        }
     }
 
     fn rename(&self, id: &DeviceId, name: String) {
@@ -699,7 +722,7 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                     send_ctl(
                         &mut sink,
                         &Control::HelloErr {
-                            reason: "auth failed".into(),
+                            reason: shared.auth_failure(&device_id).into(),
                         },
                     )
                     .await?;
@@ -1000,6 +1023,7 @@ async fn bootstrap_confirm(shared: &Arc<Shared>, session: DeviceId) -> anyhow::R
         token_hex: token.to_hex(),
         family_key_b64: None,
         server_url: None,
+        key_epoch: 0,
     };
     let sealed = FamilyKey::from_raw(b.key.dh(&joiner_pub)).seal(&serde_json::to_vec(&blob)?)?;
     use base64::Engine;

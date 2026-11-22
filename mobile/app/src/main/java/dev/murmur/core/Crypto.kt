@@ -91,6 +91,42 @@ fun sasCode(pubA: ByteArray, pubB: ByteArray, idA: ByteArray, idB: ByteArray): S
     return "%06d".format(n)
 }
 
+/** Long-term X25519 identity key — rotations are sealed to it. Mirrors
+ *  murmur_proto::rekey: wrap key = SHA-256("murmur/rekey/v1" ‖ DH),
+ *  sealed plaintext = epoch (u64 BE) ‖ new family key. */
+class IdentityKey(val secret: ByteArray) {
+
+    private val sodium = LazySodiumAndroid(SodiumAndroid())
+
+    val public: ByteArray = ByteArray(32).also {
+        check(sodium.cryptoScalarMultBase(it, secret)) { "identity pubkey failed" }
+    }
+    val publicB64: String
+        get() = android.util.Base64.encodeToString(public, android.util.Base64.NO_WRAP)
+
+    /** Open a rotation entry sealed for us; null if it isn't ours,
+     *  is tampered, or claims a different epoch. */
+    fun openRekey(rotatorPubB64: String, epoch: Long, sealedB64: String): ByteArray? =
+        runCatching {
+            val peer = android.util.Base64.decode(rotatorPubB64, android.util.Base64.NO_WRAP)
+            val dh = ByteArray(32)
+            check(sodium.cryptoScalarMult(dh, secret, peer))
+            val wrap = java.security.MessageDigest.getInstance("SHA-256").apply {
+                update("murmur/rekey/v1".toByteArray()); update(dh)
+            }.digest()
+            val pt = FamilyKey.fromBytes(wrap).open(
+                android.util.Base64.decode(sealedB64, android.util.Base64.NO_WRAP),
+            )
+            require(pt.size == 40)
+            require(java.nio.ByteBuffer.wrap(pt, 0, 8).long == epoch)
+            pt.copyOfRange(8, 40)
+        }.getOrNull()
+
+    companion object {
+        fun generate() = IdentityKey(ByteArray(32).also(SecureRandom()::nextBytes))
+    }
+}
+
 fun hexToBytes(hex: String): ByteArray =
     hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 

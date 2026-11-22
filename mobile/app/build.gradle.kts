@@ -16,7 +16,10 @@ android {
         // CI runs increment it — Obtainium-style updaters compare this,
         // not the name. Local builds stay at 1.
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1.6"
+        versionName = "0.2.0"
+        // Every phone murmur targets is arm64; the other ABIs only
+        // bloated the APK with unused libsodium/JNA builds.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     signingConfigs {
@@ -41,7 +44,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("release")
         }
     }

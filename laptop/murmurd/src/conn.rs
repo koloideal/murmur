@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::Message as Ws;
 use tracing::{debug, info, warn};
 
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+const REVOKED_RETRY: Duration = Duration::from_secs(1800);
 
 pub async fn run(
     shared: Arc<Shared>,
@@ -26,7 +27,13 @@ pub async fn run(
         }
         shared.online.store(false, std::sync::atomic::Ordering::Relaxed);
         shared.note_presence_offline();
-        tokio::time::sleep(backoff).await;
+        // Revoked is final until re-paired — check back rarely instead
+        // of hammering the relay every minute.
+        let revoked = shared.revoked.load(std::sync::atomic::Ordering::Relaxed);
+        if revoked {
+            warn!("this device was revoked — re-pair it: murmurd pair --code …");
+        }
+        tokio::time::sleep(if revoked { REVOKED_RETRY } else { backoff }).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
 }
@@ -50,17 +57,27 @@ async fn connect_once(
     match source.next().await {
         Some(Ok(Ws::Text(t))) => match serde_json::from_str::<Control>(&t) {
             Ok(Control::HelloOk) => {
+                shared.revoked.store(false, std::sync::atomic::Ordering::Relaxed);
                 shared.online.store(true, std::sync::atomic::Ordering::Relaxed);
                 info!("authed to {}", shared.cfg.server_url);
             }
-            Ok(Control::HelloErr { reason }) => anyhow::bail!("auth rejected: {reason}"),
+            Ok(Control::HelloErr { reason }) => {
+                if reason == "revoked" || reason == "unknown device" {
+                    shared.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                anyhow::bail!("auth rejected: {reason}")
+            }
             other => anyhow::bail!("unexpected hello reply: {other:?}"),
         },
         _ => anyhow::bail!("no hello reply"),
     }
 
-    // Reannounce our presence after every (re)connect.
+    // Reannounce presence + identity after every (re)connect, and pull
+    // the device list — a revocation that happened while we were away
+    // still has to trigger a rotation.
     shared.broadcast_presence();
+    shared.announce_identity();
+    let _ = shared.send_control(&Control::ListDevices);
 
     loop {
         tokio::select! {
@@ -87,13 +104,31 @@ async fn connect_once(
                     Ok(ctl) => {
                         let _ = shared.ctl_events.send((env.from, ctl));
                     }
-                    Err(_) => match env.open(&shared.key) {
-                        Ok(msg) => {
-                            debug!("{} → {msg:?}", env.from);
-                            hub.dispatch(env.from, &msg);
+                    Err(_) => {
+                        let opened = env.open(&shared.keys.read().unwrap().current);
+                        match opened {
+                            Ok(msg) => {
+                                debug!("{} → {msg:?}", env.from);
+                                hub.dispatch(env.from, &msg);
+                            }
+                            // An old key opening it = the sender missed a
+                            // rotation. Never dispatch it — just re-key.
+                            Err(e) => {
+                                let old = shared
+                                    .keys
+                                    .read()
+                                    .unwrap()
+                                    .old()
+                                    .iter()
+                                    .find(|k| env.open(k).is_ok())
+                                    .cloned();
+                                match old {
+                                    Some(k) => shared.on_stale(env.from, &k),
+                                    None => warn!("decrypt from {} failed: {e}", env.from),
+                                }
+                            }
                         }
-                        Err(e) => warn!("decrypt from {} failed: {e}", env.from),
-                    },
+                    }
                 }
             }
         }

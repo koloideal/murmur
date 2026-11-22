@@ -26,9 +26,14 @@ enum Cmd {
     },
     /// Revoke a device by id (kills it instantly on the server).
     Revoke { device_id: String },
-    /// Issue an invite code for a new device (QR + pasteable string).
+    /// Invite a new device: QR + code, then walk its request through
+    /// accept → code check → confirm right here.
     Invite,
-    /// Pairing requests: list pending / accept / confirm after SAS check.
+    /// Mint a fresh family key and hand it to every member (automatic
+    /// after a revocation — this is the manual lever).
+    Rotate,
+    /// Pairing requests: interactive walkthrough (no args), or the
+    /// scriptable accept / confirm steps.
     Pair {
         #[command(subcommand)]
         op: Option<PairOp>,
@@ -140,8 +145,11 @@ fn cmd_status() -> anyhow::Result<()> {
     let p = Paint::new();
     let d = ask(serde_json::json!({"cmd": "status"}))?;
     let online = d["online"].as_bool() == Some(true);
+    let revoked = d["revoked"].as_bool() == Some(true);
     let state = if online {
         p.green("online")
+    } else if revoked {
+        p.red("revoked")
     } else {
         p.red("offline")
     };
@@ -153,6 +161,17 @@ fn cmd_status() -> anyhow::Result<()> {
         state,
     );
     println!("  relay   {}", d["server"].as_str().unwrap_or("?"));
+    if revoked {
+        println!(
+            "  {}",
+            p.red("this machine was removed from the family — re-pair: murmurd pair --code …"),
+        );
+    }
+    println!(
+        "  key     epoch {}  {}",
+        d["key_epoch"].as_u64().unwrap_or(0),
+        p.dim(format!("· {} pinned member(s)", d["members"].as_u64().unwrap_or(0))),
+    );
 
     let selfid = d["self"].as_str().unwrap_or_default();
     match d["active_node"].as_str() {
@@ -269,11 +288,113 @@ fn cmd_invite() -> anyhow::Result<()> {
             ))
         );
     }
+    if std::io::stdout().is_terminal() {
+        let session = d["session"].as_str().unwrap_or_default().to_owned();
+        println!();
+        wait_and_walk(&p, Some(&session))?;
+    }
+    Ok(())
+}
+
+/// Read one answer from the terminal itself — works under pipes too.
+fn tty_yes(p: &Paint, q: &str, default_yes: bool) -> anyhow::Result<bool> {
+    use std::io::Write;
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("  {} {q} {}  ", p.yellow("?"), p.dim(hint));
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    let tty = std::fs::File::open("/dev/tty")?;
+    BufReader::new(tty).read_line(&mut line)?;
+    Ok(match line.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        a => a == "y" || a == "yes",
+    })
+}
+
+/// Block until a pairing request shows up (for `only` session, or any),
+/// then walk it: accept → show the code → confirm.
+fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
+    use std::io::Write;
+    let started = std::time::Instant::now();
+    let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let mut i = 0;
+    let req = loop {
+        // Spinner ticks every 120ms; the daemon is asked every 6th tick.
+        if i % 6 == 0 {
+            let d = ask(serde_json::json!({"cmd": "pair"}))?;
+            let found = d["pending"].as_array().into_iter().flatten().find(|x| {
+                only.is_none_or(|s| x["session"].as_str() == Some(s))
+            });
+            if let Some(x) = found {
+                print!("\r\x1b[2K");
+                break x.clone();
+            }
+        }
+        if started.elapsed() > std::time::Duration::from_secs(600) {
+            print!("\r\x1b[2K");
+            println!("  {}", p.dim("no request within 10 minutes — the invite expired"));
+            return Ok(());
+        }
+        print!(
+            "\r  {} {}",
+            p.yellow(frames[i % frames.len()]),
+            p.dim("waiting for the device to scan or type the code…  Ctrl-C = finish later with `murmurctl pair`"),
+        );
+        std::io::stdout().flush()?;
+        i += 1;
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    };
+    let session = req["session"].as_str().unwrap_or_default();
+    let name = req["name"].as_str().unwrap_or("a device");
+    let sas = req["sas"].as_str().unwrap_or("??????");
+
+    println!("  {} {} wants to join", p.green("›"), p.bold(name));
+    println!();
+    if !tty_yes(p, "accept it?", true)? {
+        println!("  {}", p.dim("left pending — nothing was shared"));
+        return Ok(());
+    }
+    ask(serde_json::json!({"cmd": "pair_accept", "session": session}))?;
+    let pretty = format!("{} {}", &sas[..3.min(sas.len())], &sas[3.min(sas.len())..]);
+    println!();
+    println!("  │");
+    println!("  │  verification code   {}", p.bold(p.yellow(pretty)));
+    println!("  │");
+    println!("  │  {}", p.dim(format!("{name} shows six digits now — they must be the same")));
+    println!("  │");
+    if !tty_yes(p, "codes match?", false)? {
+        println!(
+            "  {} {}",
+            p.red("✗"),
+            p.dim("not confirmed — tap “don't match” on the device, then start over"),
+        );
+        return Ok(());
+    }
+    let d = ask(serde_json::json!({"cmd": "pair_confirm", "session": session}))?;
+    println!();
+    println!(
+        "  {} {} joined the family  {}",
+        p.green("✓"),
+        p.bold(name),
+        p.dim(d["device_id"].as_str().unwrap_or("?")),
+    );
     Ok(())
 }
 
 fn cmd_pair() -> anyhow::Result<()> {
     let p = Paint::new();
+    if std::io::stdout().is_terminal() {
+        let d = ask(serde_json::json!({"cmd": "pair"}))?;
+        if d["pending"].as_array().is_none_or(|a| a.is_empty()) {
+            println!(
+                "  {}",
+                p.dim("no pending pairings — the device must scan or type the code first"),
+            );
+            println!("  {}", p.dim("need an invite?  murmurctl invite"));
+            return Ok(());
+        }
+        return wait_and_walk(&p, None);
+    }
     let d = ask(serde_json::json!({"cmd": "pair"}))?;
     let pending = d["pending"].as_array().cloned().unwrap_or_default();
     if pending.is_empty() {
@@ -312,6 +433,16 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Invite => cmd_invite(),
+        Cmd::Rotate => {
+            let d = ask(serde_json::json!({"cmd": "rotate"}))?;
+            let p = Paint::new();
+            println!(
+                "  {} family key rotated → epoch {}",
+                p.green("✓"),
+                d["epoch"].as_u64().unwrap_or(0),
+            );
+            Ok(())
+        }
         Cmd::Pair { op: None } => cmd_pair(),
         Cmd::Pair {
             op: Some(PairOp::Accept { session }),

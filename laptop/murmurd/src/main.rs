@@ -9,6 +9,7 @@ mod conn;
 mod ctl;
 mod feature;
 mod install;
+mod keyring;
 mod lockproc;
 mod logind;
 mod mpris;
@@ -33,6 +34,7 @@ fn registry() -> Vec<Feature> {
         mpris::feature(),
         clipboard::feature(),
         pair::feature(),
+        keyring::feature(),
         ctl::feature(),
     ]
 }
@@ -257,6 +259,12 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
     let name = flag(args, "--name")
         .map(str::to_owned)
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "murmur-laptop".into());
 
     let paired = pair::join(code, &name, server.as_deref()).await?;
@@ -269,6 +277,8 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         device_id: paired.device_id.to_string(),
         auth_token_hex: paired.token_hex,
         family_key_hex: paired.family_key_hex,
+        key_epoch: paired.key_epoch,
+        ..config::Secrets::default()
     };
     config::provision(&cfg, &secrets)?;
     eprintln!("  │");

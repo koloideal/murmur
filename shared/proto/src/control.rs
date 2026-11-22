@@ -118,4 +118,8 @@ pub struct PairBlob {
     /// connected to; the relay doesn't know its own public name.
     #[serde(default)]
     pub server_url: Option<String>,
+    /// Rotation epoch of `family_key_b64` — the joiner starts there so
+    /// it never accepts an older rotation. Absent on bootstrap (0).
+    #[serde(default)]
+    pub key_epoch: u64,
 }
