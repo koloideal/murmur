@@ -235,7 +235,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
         _ => bail!("no hello reply"),
     }
     eprintln!("  ✓ connected to {server_url}");
-    eprintln!("  › pair session {session}");
+    eprintln!("  › pair session {session} — waiting for the other side");
 
     // PairHello goes to @server — it forwards to whoever PairOpen'd
     // this session, so the joiner never needs the inviter's id.
@@ -249,7 +249,6 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
         },
     )?;
     sink.send(Ws::Text(hello.to_json().into())).await?;
-    eprintln!("  › waiting for the inviter — `murmurctl pair` there");
 
     tokio::time::timeout(JOIN_TIMEOUT, async {
         let mut dh_key: Option<FamilyKey> = None;
@@ -303,7 +302,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         eprintln!("  │");
                         eprintln!("  │  verification code   {sas}");
                         eprintln!("  │");
-                        eprintln!("  │  the inviter confirms it — pairing completes there");
+                        eprintln!("  │  confirm it on the inviter — `murmurctl pair` there");
                     }
                 }
                 Control::PairData { blob_b64 } => {

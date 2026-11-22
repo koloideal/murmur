@@ -193,9 +193,9 @@ pub fn provision(cfg: &Config, secrets: &Secrets) -> anyhow::Result<()> {
         &toml::to_string_pretty(secrets)?,
         0o600,
     )?;
-    eprintln!("wrote {}", cfg_dir.join("config.toml").display());
+    eprintln!("  │    wrote {}", cfg_dir.join("config.toml").display());
     eprintln!(
-        "wrote {} (mode 0600)",
+        "  │    wrote {} (mode 0600)",
         data_dir.join("secrets.toml").display()
     );
     Ok(())

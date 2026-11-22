@@ -271,9 +271,10 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         family_key_hex: paired.family_key_hex,
     };
     config::provision(&cfg, &secrets)?;
-    eprintln!("paired as {}", paired.device_id);
+    eprintln!("  │");
+    eprintln!("  ✓ paired as {}", paired.device_id);
     if let Err(e) = install::install_user_unit() {
-        eprintln!("(unit install skipped: {e:#} — start murmurd manually)");
+        eprintln!("  ! unit install skipped: {e:#} — start murmurd manually");
     }
     Ok(())
 }

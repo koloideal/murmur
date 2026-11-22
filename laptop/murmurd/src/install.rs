@@ -34,8 +34,8 @@ pub fn install_user_unit() -> anyhow::Result<()> {
     let _ = run("systemctl", &["--user", "daemon-reload"]);
     run("systemctl", &["--user", "enable", "murmurd.service"])
         .context("systemctl --user enable")?;
-    eprintln!("systemd user unit installed — starts with the graphical session");
-    eprintln!("  start it now: systemctl --user start murmurd");
+    eprintln!("  › unit installed — starts with the graphical session:");
+    eprintln!("      systemctl --user start murmurd");
     Ok(())
 }
 
