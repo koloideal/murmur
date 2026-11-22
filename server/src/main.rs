@@ -94,9 +94,15 @@ impl Shared {
         let tmp = self.devices_path.with_extension("tmp");
         match serde_json::to_string_pretty(&*devices) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&tmp, json)
-                    .and_then(|_| std::fs::rename(&tmp, &self.devices_path))
-                {
+                let res = self
+                    .devices_path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .map(std::fs::create_dir_all)
+                    .unwrap_or(Ok(()))
+                    .and_then(|_| std::fs::write(&tmp, json))
+                    .and_then(|_| std::fs::rename(&tmp, &self.devices_path));
+                if let Err(e) = res {
                     warn!("persist devices.json: {e}");
                 }
             }
@@ -206,18 +212,36 @@ impl Shared {
 
 // ---------- admin socket (CLI ↔ running server) ----------
 
-fn devices_path() -> PathBuf {
-    PathBuf::from(std::env::var("MURMUR_DEVICES").unwrap_or_else(|_| "devices.json".into()))
+/// CLI flag beats env beats nothing. All paths are overridable three ways.
+fn arg_or_env(args: &[String], flag: &str, env: &str) -> Option<PathBuf> {
+    flag_value(args, flag)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os(env).map(PathBuf::from))
 }
 
-fn admin_sock_path() -> PathBuf {
-    std::env::var_os("MURMUR_ADMIN_SOCK")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .map(|p| p.join("murmur-server.sock"))
-        })
+fn devices_path(args: &[String]) -> PathBuf {
+    if let Some(p) = arg_or_env(args, "--devices", "MURMUR_DEVICES") {
+        return p;
+    }
+    let sys = PathBuf::from("/var/lib/murmur/devices.json");
+    if sys.parent().is_some_and(|d| d.is_dir()) {
+        return sys;
+    }
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".local/share/murmur-server/devices.json"))
+        .unwrap_or_else(|| PathBuf::from("devices.json"))
+}
+
+fn admin_sock_path(args: &[String]) -> PathBuf {
+    if let Some(p) = arg_or_env(args, "--admin-sock", "MURMUR_ADMIN_SOCK") {
+        return p;
+    }
+    let sys = PathBuf::from("/run/murmur/admin.sock");
+    if sys.parent().is_some_and(|d| d.is_dir()) {
+        return sys;
+    }
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|p| PathBuf::from(p).join("murmur-server.sock"))
         .unwrap_or_else(|| PathBuf::from("/tmp/murmur-server.sock"))
 }
 
@@ -230,8 +254,8 @@ enum AdminReq {
 }
 
 /// One roundtrip against the running server's admin socket.
-fn admin_req(req: &AdminReq) -> anyhow::Result<serde_json::Value> {
-    let path = admin_sock_path();
+fn admin_req(req: &AdminReq, args: &[String]) -> anyhow::Result<serde_json::Value> {
+    let path = admin_sock_path(args);
     let mut stream = std::os::unix::net::UnixStream::connect(&path)
         .with_context(|| format!("connect {} — is murmur-server running?", path.display()))?;
     stream.write_all(serde_json::to_string(req)?.as_bytes())?;
@@ -292,13 +316,13 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => serve().await,
+        None => serve(&args).await,
         Some("add-device") => {
             let name = flag_value(&args[1..], "--name")
                 .or_else(|| args.get(1).cloned())
                 .or_else(|| prompt_line("device name"))
                 .context("usage: murmur-server add-device --name NAME")?;
-            let res = admin_req(&AdminReq::AddDevice { name })?;
+            let res = admin_req(&AdminReq::AddDevice { name }, &args)?;
             let d = &res["data"];
             println!("device_id: {}", d["device_id"].as_str().unwrap());
             println!("token: {}", d["token"].as_str().unwrap());
@@ -306,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("list-devices") => {
-            let res = admin_req(&AdminReq::ListDevices)?;
+            let res = admin_req(&AdminReq::ListDevices, &args)?;
             for d in res["data"].as_array().into_iter().flatten() {
                 println!(
                     "{}  {}  {}  {}  {}",
@@ -335,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| args.get(1).cloned())
                 .context("usage: murmur-server revoke --id DEVICE_ID")?
                 .parse()?;
-            let res = admin_req(&AdminReq::Revoke { device_id: id })?;
+            let res = admin_req(&AdminReq::Revoke { device_id: id }, &args)?;
             match res["ok"].as_bool() {
                 Some(true) => println!("{id} revoked — live connection dropped"),
                 _ => bail!("{}", res["error"].as_str().unwrap_or("failed")),
@@ -344,7 +368,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("install") => install(&args[1..]),
         Some(other) => bail!(
-            "unknown command {other:?} — usage: murmur-server [add-device|list-devices|revoke|install]"
+            "unknown command {other:?} — usage:\n\
+             \x20 murmur-server [--addr A] [--devices P] [--admin-sock P]   — run the relay\n\
+             \x20 murmur-server add-device --name X [--admin-sock P]\n\
+             \x20 murmur-server list-devices [--admin-sock P]\n\
+             \x20 murmur-server revoke --id ID [--admin-sock P]\n\
+             \x20 murmur-server install [--addr A] [--user]"
         ),
     }
 }
@@ -355,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
 /// user unit + linger. Always prints the Caddy reverse-proxy snippet —
 /// WS upgrade needs no special handling there.
 fn install(args: &[String]) -> anyhow::Result<()> {
-    let addr = flag_value(args, "--addr").unwrap_or_else(|| "127.0.0.1:8770".into());
+    let addr = flag_value(args, "--addr").unwrap_or_else(|| "0.0.0.0:8770".into());
     let exe = std::env::current_exe()?.display().to_string();
     let unit_dir = PathBuf::from("/etc/systemd/system");
     let user_mode =
@@ -390,10 +419,7 @@ fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
          DynamicUser=yes\n\
          StateDirectory=murmur\n\
          RuntimeDirectory=murmur\n\
-         Environment=MURMUR_ADDR={addr}\n\
-         Environment=MURMUR_DEVICES=/var/lib/murmur/devices.json\n\
-         Environment=MURMUR_ADMIN_SOCK=/run/murmur/admin.sock\n\
-         ExecStart={exe}\n\
+         ExecStart={exe} --addr {addr} --devices /var/lib/murmur/devices.json --admin-sock /run/murmur/admin.sock\n\
          Restart=on-failure\n\
          RestartSec=3\n\
          NoNewPrivileges=yes\n\
@@ -408,8 +434,8 @@ fn install_system(exe: &str, addr: &str) -> anyhow::Result<()> {
     run("systemctl", &["enable", "--now", "murmur-server.service"])?;
     eprintln!("installed + started: {path:?}");
     eprintln!(
-        "admin commands need: MURMUR_ADMIN_SOCK=/run/murmur/admin.sock sudo -E {exe} <cmd>\n\
-         (the socket is owned by the dynamic service user)"
+        "admin commands work as: sudo {exe} <cmd>\n\
+         (the socket is owned by the dynamic service user, hence sudo)"
     );
     Ok(())
 }
@@ -420,9 +446,7 @@ fn install_user(exe: &str, addr: &str) -> anyhow::Result<()> {
          Description=murmur relay server\n\
          After=network-online.target\n\n\
          [Service]\n\
-         Environment=MURMUR_ADDR={addr}\n\
-         Environment=MURMUR_DEVICES=%h/.local/share/murmur-server/devices.json\n\
-         ExecStart={exe}\n\
+         ExecStart={exe} --addr {addr} --devices %h/.local/share/murmur-server/devices.json\n\
          Restart=on-failure\n\
          RestartSec=3\n\n\
          [Install]\n\
@@ -488,15 +512,16 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 
 // ---------- relay ----------
 
-async fn serve() -> anyhow::Result<()> {
-    let addr: SocketAddr = std::env::var("MURMUR_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8770".into())
+async fn serve(args: &[String]) -> anyhow::Result<()> {
+    let addr: SocketAddr = flag_value(args, "--addr")
+        .or_else(|| std::env::var("MURMUR_ADDR").ok())
+        .unwrap_or_else(|| "0.0.0.0:8770".into())
         .parse()
-        .context("MURMUR_ADDR")?;
-    let shared = Arc::new(Shared::load(devices_path())?);
+        .context("--addr")?;
+    let shared = Arc::new(Shared::load(devices_path(args))?);
 
     let listener = TcpListener::bind(addr).await?;
-    let admin_path = admin_sock_path();
+    let admin_path = admin_sock_path(args);
     let _ = std::fs::remove_file(&admin_path);
     let admin_listener = UnixListener::bind(&admin_path)?;
     // The socket grants full registry control — owner only.
