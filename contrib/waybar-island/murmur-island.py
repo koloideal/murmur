@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Waybar island for murmurd.
+
+Usage:
+  murmur-island.py status       — one JSON line (poll mode)
+  murmur-island.py status-live  — streams JSON lines forever (smooth pulse)
+  murmur-island.py media        — player icon, hidden while murmur is offline
+"""
+
+import html
+import json
+import math
+import os
+import socket
+import subprocess
+import sys
+import time
+
+SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "murmur.sock")
+
+# ctl socket answers get cached this long — enough for tooltips, cheap
+# for the 8Hz pulse loop.
+STATE_TTL = 4.0
+
+
+def ctl(req: dict) -> dict:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(SOCK)
+        s.sendall(json.dumps(req).encode() + b"\n")
+        return json.loads(s.makefile("rb").readline())
+    finally:
+        s.close()
+
+
+_state = {"at": 0.0, "data": None}
+
+
+def murmur_state() -> dict | None:
+    """Daemon status + peer list, or None if murmurd is unreachable."""
+    if time.time() - _state["at"] < STATE_TTL:
+        return _state["data"]
+    data = None
+    try:
+        res = ctl({"cmd": "status"})
+        if res.get("ok"):
+            d = res["data"]
+            selfid = d.get("self", "")
+            peers = []
+            if d.get("online"):
+                try:
+                    res = ctl({"cmd": "devices"})
+                    peers = [
+                        x
+                        for x in (res.get("data") or {}).get("devices") or []
+                        if x.get("device_id") != selfid and not x.get("revoked")
+                    ]
+                except Exception:
+                    pass
+            data = {
+                "online": d.get("online") is True,
+                "revoked": d.get("revoked") is True,
+                "self": selfid,
+                "name": d.get("name", "?"),
+                "server": d.get("server", "?"),
+                "epoch": d.get("key_epoch", 0),
+                "active": d.get("active_node"),
+                "presence": {p["device"]: p for p in d.get("presence") or []},
+                "peers": peers,
+            }
+    except Exception:
+        data = None
+    _state.update(at=time.time(), data=data)
+    return data
+
+
+def murmur_up(st: dict | None) -> bool:
+    return bool(
+        st
+        and st["online"]
+        and not st["revoked"]
+        and any(x.get("online") for x in st["peers"])
+    )
+
+
+def status_text(up: bool) -> str:
+    if not up:
+        dot = "#fb4934"  # static red — nothing to breathe for
+    else:
+        # Breathing dot — ~2.5s sine, sampled ~8x/s by the live stream.
+        c = (0xB8, 0xBB, 0x26, 0x55, 0x6B, 0x2F)  # bright rgb + dim rgb
+        k = (math.sin(time.time() / 2.5 * math.tau) + 1) / 2
+        dot = "#{:02x}{:02x}{:02x}".format(
+            *(round(c[3 + i] + (c[i] - c[3 + i]) * k) for i in range(3))
+        )
+    word = "online" if up else "offline"
+    return f'<b>murmur</b> {word} <span foreground="{dot}">●</span>'
+
+
+def status_tooltip(st: dict | None) -> str:
+    if st is None:
+        return "murmurd unreachable — systemctl --user status murmurd"
+    tip = [
+        f"{st['name']} · {st['self']}",
+        "revoked — re-pair: murmurd pair --code …"
+        if st["revoked"]
+        else ("online" if st["online"] else "offline"),
+        f"relay  {st['server']}  ·  epoch {st['epoch']}",
+        f"active {st['active'] or 'none'}"
+        + (" (me)" if st["active"] == st["self"] else ""),
+        "",
+    ]
+    if not st["peers"]:
+        tip.append("no peers online")
+    for x in sorted(st["peers"], key=lambda p: p.get("name", "")):
+        on = x.get("online") is True
+        dev_id = x.get("device_id", "?")
+        s = st["presence"].get(dev_id, {}).get("state", "")
+        rtt = f"{x['rtt_ms']} ms" if on and x.get("rtt_ms") is not None else ""
+        tail = " ".join(filter(None, [s, rtt])) or ("online" if on else "offline")
+        tip.append(f"{'●' if on else '○'} {x.get('name', '?')}  {dev_id}  {tail}")
+    return "\n".join(tip)
+
+
+def status() -> dict:
+    st = murmur_state()
+    up = murmur_up(st)
+    return {
+        "text": status_text(up),
+        "class": "on" if up else "off",
+        "tooltip": status_tooltip(st),
+    }
+
+
+TITLE_LEN = 30
+
+# The island's on-screen center is written here so the player popup
+# can center itself under the group. Refreshed every GEO_INTERVAL.
+GEO_FILE = "/tmp/murmur-island-cx"
+GEO_INTERVAL = 1.5
+# A strip of the bar is screenshotted and the pill located by its flat
+# background — pango metrics don't match waybar's real render, and the
+# error grows with title length.
+BAR_CROP_W = 1600
+BAR_H = 44
+PILL_ROWS = range(8, 38)
+# Pixels from the left screen edge to the murmur island's left edge —
+# first group width + margin. Measure it on your bar and either edit
+# the default or export MURMUR_ISLAND_LEFT.
+ISLAND_LEFT = int(os.environ.get("MURMUR_ISLAND_LEFT", "282"))
+PAD_L, GAP, PAD_R = 18, 14, 18
+
+_pango = None
+
+
+def _measure(markup: str) -> int:
+    """Pixel width of the emitted markup in the bar font."""
+    global _pango
+    if _pango is None:
+        import gi
+        gi.require_version("Pango", "1.0")
+        gi.require_version("PangoCairo", "1.0")
+        import cairo
+        from gi.repository import Pango, PangoCairo
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        ctx = PangoCairo.create_context(cairo.Context(surf))
+        lay = Pango.Layout(ctx)
+        fd = Pango.FontDescription("JetBrainsMono Nerd Font")
+        # CSS px are ~96dpi; pango wants points — 14px == 10.5pt.
+        fd.set_size(int(14 * 72 / 96 * Pango.SCALE))
+        lay.set_font_description(fd)
+        _pango = lay
+    _pango.set_markup(markup, -1)
+    return _pango.get_pixel_size()[0]
+
+
+def _geo_pill_center() -> int | None:
+    """Real center-x of the island pill, measured on the screen itself.
+
+    The pill's flat background color is sampled just inside its left
+    edge; a mid-height scan then finds both edges — a column counts as
+    inside the pill while background shows between the glyphs.
+    """
+    try:
+        png = subprocess.run(
+            ["grim", "-g", f"0,0 {BAR_CROP_W}x{BAR_H}", "-"],
+            capture_output=True, timeout=2).stdout
+        if not png:
+            return None
+        import io
+        from collections import Counter
+        from PIL import Image
+        px = Image.open(io.BytesIO(png)).convert("RGB").load()
+        bg = Counter(
+            px[x, y] for x in range(ISLAND_LEFT + 4, ISLAND_LEFT + 30)
+            for y in range(7, 12)).most_common(1)[0][0]
+
+        def inside(x: int) -> bool:
+            # Most of the column is background → we're inside the pill;
+            # a glyph column shows background on few rows at most.
+            return sum(
+                all(abs(px[x, y][i] - bg[i]) <= 10 for i in range(3))
+                for y in PILL_ROWS) >= 18
+
+        def edge(x: int, step: int) -> int:
+            # Walk while inside the pill, tolerating glyph columns
+            # (≤3 consecutive non-background columns).
+            miss = 0
+            while 0 <= x < BAR_CROP_W:
+                miss = 0 if inside(x) else miss + 1
+                if miss > 3:
+                    return x - step * miss
+                x += step
+            return x
+
+        left = edge(ISLAND_LEFT + 6, -1)
+        right = edge(ISLAND_LEFT + 6, 1)
+        return (left + right) // 2 if 40 < right - left < 700 else None
+    except Exception:
+        return None
+
+
+def _write_geo(media_markup: str, up: bool) -> None:
+    cx = _geo_pill_center()
+    if cx is None:
+        # No grim/PIL — estimate from pango text metrics instead.
+        try:
+            s_px = _measure(status_text(up))
+            m_px = _measure(media_markup) if media_markup else 0
+            inner = PAD_L + s_px + (GAP + m_px if media_markup else 0) + PAD_R
+            cx = ISLAND_LEFT + int(inner / 2)
+        except Exception:
+            return
+    try:
+        with open(GEO_FILE, "w") as f:
+            f.write(str(cx))
+    except OSError:
+        pass
+
+
+def media_fetch() -> dict | None:
+    try:
+        out = subprocess.run(
+            [
+                "playerctl", "-p", "murmur", "metadata", "--format",
+                "{{status}}|{{title}}|{{artist}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+    except Exception:
+        return None
+    st, _, rest = out.stdout.strip().partition("|")
+    title, _, artist = rest.partition("|")
+    return {"status": st, "title": title, "artist": artist}
+
+
+def media_frame(md: dict | None, now: float) -> dict:
+    # Player closed/stopped on the phone — hide the widget entirely.
+    if md is None or md["status"] == "Stopped":
+        return {"text": "", "class": "hidden", "tooltip": ""}
+    title = md["title"] or ""
+    shown = title[:TITLE_LEN] + ("…" if len(title) > TITLE_LEN else "")
+    tip = f"{title} — {md['artist']}".strip(" —") or "phone player"
+    tip += f"\n{md['status'].lower()}"
+    # ∿ — the sine-wave logo. Breathes while playing, dim when paused.
+    lo, hi = (0x7C, 0x6F, 0x64), (0xFA, 0xBD, 0x2F)
+    k = (math.sin(now * 3.0) + 1) / 2 if md["status"] == "Playing" else 0.0
+    col = "#{:02x}{:02x}{:02x}".format(
+        *(round(lo[c] + (hi[c] - lo[c]) * k) for c in range(3)))
+    wave = f'<span foreground="{col}">∿</span>'
+    text = f"{html.escape(shown)} {wave}" if shown else wave
+    cls = "playing" if md["status"] == "Playing" else "paused"
+    return {"text": text, "class": cls, "tooltip": tip}
+
+
+def media_live():
+    md = {"at": 0.0, "v": None}
+    geo = {"at": 0.0}
+    while True:
+        now = time.time()
+        st = murmur_state()
+        if not murmur_up(st):
+            out = {"text": "", "class": "hidden", "tooltip": ""}
+            print(json.dumps(out, ensure_ascii=False), flush=True)
+            if now - geo["at"] >= GEO_INTERVAL:
+                geo["at"] = now
+                _write_geo("", False)
+            time.sleep(0.5)
+            continue
+        if now - md["at"] >= 1.0:
+            md.update(v=media_fetch(), at=now)
+        frame = media_frame(md["v"], now)
+        if now - geo["at"] >= GEO_INTERVAL:
+            geo["at"] = now
+            _write_geo(frame["text"], True)
+        print(json.dumps(frame, ensure_ascii=False), flush=True)
+        time.sleep(0.15)
+
+
+if __name__ == "__main__":
+    what = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if what == "status-live":
+        while True:
+            print(json.dumps(status(), ensure_ascii=False), flush=True)
+            time.sleep(0.12)
+    elif what == "media-live":
+        media_live()
+    else:
+        out = {"status": status}[what]()
+        print(json.dumps(out, ensure_ascii=False))

@@ -1,0 +1,38 @@
+/* Island pill — match your bar's background/radius vars.
+   @color_bg and @color_accent are the author's theme vars; substitute yours. */
+
+#murmur {
+    background: @color_bg;
+    border-radius: 20px;
+    margin-left: 14px;
+}
+
+#custom-murmur-status,
+#custom-murmur-media {
+    font-family: "Unbounded";  /* site-style display font — optional */
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+#custom-murmur-status {
+    padding-left: 18px;
+}
+
+#custom-murmur-media {
+    padding-right: 18px;
+}
+
+/* collapses the gap when the media widget hides (murmur offline) */
+#custom-murmur-media.hidden {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+#custom-murmur-status.off,
+#custom-murmur-media.off {
+    color: #928374;
+}
+
+#custom-murmur-media.playing {
+    color: @color_accent;
+}
