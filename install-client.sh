@@ -183,12 +183,20 @@ post_pair() {
         printf '      systemctl --user start murmurd\n'
     fi
 
-    echo
-    lines="${B}${C_GR}you're in the family${R0}"
-    lines="$lines||the phone isn't connected yet —"
-    lines="$lines|invite it from this machine:"
-    lines="$lines|  ${B}murmurctl invite${R0}   ${D2}→ one-shot code / QR for the app${R0}"
-    box "murmur" "$lines"
+    # family name — murmurctl devices prints "family · X" once the
+    # daemon is up and registered; the socket takes a beat
+    FAM=""; _i=0
+    while [ $_i -lt 5 ]; do
+        FAM=$("$BIN/murmurctl" devices 2>/dev/null | sed -n 's/^family · //p')
+        [ -n "$FAM" ] && break
+        sleep 1; _i=$((_i + 1))
+    done
+
+    box "${B}${C_GR}you're in the family${R0}${FAM:+  ·  ${B}$FAM${R0}}" \
+        "" \
+        "the phone isn't connected yet —" \
+        "invite it from this machine:" \
+        "  ${B}murmurctl invite${R0}   ${D2}→ one-shot code / QR for the app${R0}"
 }
 
 # ---- join: args beat questions beat the hint box
