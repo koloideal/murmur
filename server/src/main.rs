@@ -67,6 +67,10 @@ struct Conn {
 static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct Shared {
+    /// When this relay process came up — status shows uptime.
+    started: std::time::Instant,
+    /// Bind address actually listening, for `status`.
+    addr: Mutex<String>,
     devices_path: PathBuf,
     /// Persistent registry, mirrored to devices.json on mutation.
     devices: Mutex<HashMap<DeviceId, DeviceRec>>,
@@ -123,6 +127,8 @@ impl Shared {
             None
         };
         Ok(Self {
+            started: std::time::Instant::now(),
+            addr: Mutex::new(String::new()),
             devices_path: path,
             devices: Mutex::new(devices),
             family_name: Mutex::new(family_name),
@@ -335,6 +341,7 @@ enum AdminReq {
     ListDevices,
     Revoke { device_id: DeviceId },
     BootstrapCode,
+    Status,
 }
 
 /// One roundtrip against the running server's admin socket.
@@ -395,6 +402,33 @@ fn admin_dispatch(shared: &Shared, req: AdminReq) -> serde_json::Value {
                 .unwrap_or((None, None));
             serde_json::json!({"ok": true, "code": code, "sas": sas})
         }
+        AdminReq::Status => {
+            let devices = shared.devices.lock().unwrap();
+            let conns = shared.conns.lock().unwrap();
+            let online: Vec<String> = devices
+                .iter()
+                .filter(|(id, r)| !r.revoked && conns.contains_key(*id))
+                .map(|(_, r)| r.name.clone())
+                .collect();
+            let active = devices.values().filter(|r| !r.revoked).count();
+            let mut bs = shared.bootstrap.lock().unwrap();
+            if bs.is_some() && !devices.values().all(|d| d.revoked) {
+                *bs = None;
+            }
+            serde_json::json!({
+                "ok": true,
+                "addr": *shared.addr.lock().unwrap(),
+                "uptime_secs": shared.started.elapsed().as_secs(),
+                "family": *shared.family_name.lock().unwrap(),
+                "registered": devices.len(),
+                "active": active,
+                "online": online,
+                "open_pairs": shared.open_pairs.lock().unwrap().len(),
+                "bootstrap": bs.as_ref().map(|b| {
+                    serde_json::json!({"code": b.code, "sas": b.sas})
+                }),
+            })
+        }
         AdminReq::Revoke { device_id } => {
             if shared.revoke(&device_id) {
                 serde_json::json!({"ok": true})
@@ -415,10 +449,42 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+
+const USAGE: &str = "murmur-server — the murmur relay (sees only ciphertext)
+
+usage:
+  murmur-server <command>
+
+service:
+  serve --addr A [--devices P] [--admin-sock P] [--admin-group G]   run the relay
+  install [--addr A] [--family-name N] [--user]                     systemd unit + autostart
+
+admin (talks to the running relay, no sudo needed if you're in the admin group):
+  status                 overview: family, devices, uptime, open invites
+  list-devices           device table: id · name · state · online · rtt
+  add-device --name N    register a device manually (prints one-shot token)
+  revoke --id ID         kick a device — members rotate the family key
+  bootstrap-code         the one-shot code, while the family is empty
+
+bare `murmur-server` prints this text. All commands accept
+--admin-sock P / MURMUR_ADMIN_SOCK to reach a non-default socket.";
+
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // No subcommand (or a flag in first position) means "run the relay".
+    // A flag in first position means "run the relay" (the systemd
+    // ExecStart spells it that way); `serve` works too. Bare or a
+    // subcommand word → the CLI.
     match args.first().filter(|a| !a.starts_with('-')).map(String::as_str) {
+        None if args.is_empty() => {
+            print!("{USAGE}");
+            Ok(())
+        }
         None => serve(&args).await,
+        Some("serve") => serve(&args[1..]).await,
+        Some("status") => status(&args),
+        Some("-h") | Some("--help") | Some("help") => {
+            print!("{USAGE}");
+            Ok(())
+        }
         Some("add-device") => {
             let name = flag_value(&args[1..], "--name")
                 .or_else(|| args.get(1).cloned())
@@ -485,16 +551,61 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("install") => install(&args[1..]),
-        Some(other) => bail!(
-            "unknown command {other:?} — usage:\n\
-             \x20 murmur-server [--addr A] [--devices P] [--admin-sock P]   — run the relay\n\
-             \x20 murmur-server add-device --name X [--admin-sock P]\n\
-             \x20 murmur-server list-devices [--admin-sock P]\n\
-             \x20 murmur-server revoke --id ID [--admin-sock P]\n\
-             \x20 murmur-server bootstrap-code [--admin-sock P]\n\
-             \x20 murmur-server install [--addr A] [--family-name N] [--user]"
-        ),
+        Some(other) => bail!("unknown command {other:?}\n\n{USAGE}"),
     }
+}
+
+/// `murmur-server status` — one screen of what the relay is doing.
+fn status(args: &[String]) -> anyhow::Result<()> {
+    let res = admin_req(&AdminReq::Status, args)?;
+    let up = res["uptime_secs"].as_u64().unwrap_or(0);
+    let uptime = match up {
+        s if s < 90 => format!("{s}s"),
+        s if s < 5400 => format!("{}m", s / 60),
+        s => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+    };
+    let online: Vec<&str> = res["online"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str())
+        .collect();
+    let pairs = res["open_pairs"].as_u64().unwrap_or(0);
+
+    println!("murmur-server · up {uptime}");
+    println!("  relay      {}", res["addr"].as_str().unwrap_or("?"));
+    match res["family"].as_str() {
+        Some(f) => println!("  family     {f}"),
+        None => println!("  family     (unnamed)"),
+    }
+    println!(
+        "  devices    {} registered · {} active · {} online{}",
+        res["registered"].as_u64().unwrap_or(0),
+        res["active"].as_u64().unwrap_or(0),
+        online.len(),
+        if online.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", online.join(", "))
+        },
+    );
+    println!(
+        "  invites    {pairs} open pair session{}",
+        if pairs == 1 { "" } else { "s" },
+    );
+    match &res["bootstrap"] {
+        b if b.is_object() => {
+            let code = b["code"].as_str().unwrap_or("?");
+            match b["sas"].as_str() {
+                Some(sas) => {
+                    println!("  bootstrap  armed · {code} · sas {sas} (a joiner is pairing)")
+                }
+                None => println!("  bootstrap  armed · {code}"),
+            }
+        }
+        _ => println!("  bootstrap  closed — the family has devices"),
+    }
+    Ok(())
 }
 
 /// `murmur-server install [--addr A] [--user]` — write a systemd unit and
@@ -542,7 +653,8 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
          DynamicUser=yes\n\
          StateDirectory=murmur\n\
          RuntimeDirectory=murmur\n\
-         ExecStart={exe} --addr {addr} --devices /var/lib/murmur/devices.json --admin-sock /run/murmur/admin.sock{family_arg}\n\
+         SupplementaryGroups=murmur\n\
+         ExecStart={exe} --addr {addr} --devices /var/lib/murmur/devices.json --admin-sock /run/murmur/admin.sock --admin-group murmur{family_arg}\n\
          Restart=on-failure\n\
          RestartSec=3\n\
          NoNewPrivileges=yes\n\
@@ -553,13 +665,22 @@ fn install_system(exe: &str, addr: &str, family_arg: &str) -> anyhow::Result<()>
     );
     let path = PathBuf::from("/etc/systemd/system/murmur-server.service");
     std::fs::write(&path, &unit).context("write unit file")?;
+    // The admin socket is group-writable: anyone in `murmur` can run
+    // `murmur-server status|bootstrap-code|...` without sudo.
+    if run("groupadd", &["-f", "murmur"]).is_err() {
+        eprintln!("hint: create a `murmur` group to use admin commands without sudo");
+    }
+    let caller = std::env::var("SUDO_USER").ok().filter(|u| u != "root");
+    if let Some(u) = caller {
+        if run("usermod", &["-aG", "murmur", &u]).is_ok() {
+            eprintln!("added {u} to the `murmur` group — log in again for it to take effect");
+        }
+    }
     run("systemctl", &["daemon-reload"])?;
     run("systemctl", &["enable", "--now", "murmur-server.service"])?;
     eprintln!("installed + started: {path:?}");
-    eprintln!(
-        "admin commands work as: sudo {exe} <cmd>\n\
-         (the socket is owned by the dynamic service user, hence sudo)"
-    );
+    eprintln!("admin commands: murmur-server status · list-devices · bootstrap-code · revoke --id …");
+    eprintln!("  (no sudo — the admin socket is writable by the `murmur` group)");
     Ok(())
 }
 
@@ -650,14 +771,33 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
     }
 
     let listener = TcpListener::bind(addr).await?;
+    *shared.addr.lock().unwrap() = addr.to_string();
     let admin_path = admin_sock_path(args);
     let _ = std::fs::remove_file(&admin_path);
     let admin_listener = UnixListener::bind(&admin_path)?;
-    // The socket grants full registry control — owner only.
+    // The socket grants full registry control. With --admin-group the
+    // admin group gets rw — `murmur-server status` et al. without sudo.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&admin_path, std::fs::Permissions::from_mode(0o600))?;
+        let group = flag_value(args, "--admin-group")
+            .or_else(|| std::env::var("MURMUR_ADMIN_GROUP").ok());
+        match group {
+            Some(g) => {
+                let st = std::process::Command::new("chgrp")
+                    .args([&g, admin_path.to_str().unwrap_or_default()])
+                    .status();
+                if st.is_ok_and(|s| s.success()) {
+                    std::fs::set_permissions(&admin_path, std::fs::Permissions::from_mode(0o660))?;
+                } else {
+                    warn!("chgrp {g} {admin_path:?} failed — admin socket stays owner-only");
+                    std::fs::set_permissions(&admin_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            None => {
+                std::fs::set_permissions(&admin_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
     }
     info!(
         "murmur-server on {addr}, registry {}, admin {}",

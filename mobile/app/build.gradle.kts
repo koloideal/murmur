@@ -89,6 +89,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // QR invite scanning
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // QR invite scanning — CameraX + MLKit. The zxing-embedded
+    // Camera1 preview path doesn't decode on newer HALs (Camera2
+    // native, e.g. Galaxy S26): the camera opens, frames flow, and
+    // the decoder never sees a usable buffer.
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }

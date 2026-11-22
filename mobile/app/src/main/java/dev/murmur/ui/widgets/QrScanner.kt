@@ -1,5 +1,14 @@
 package dev.murmur.ui.widgets
 
+import android.util.Size as AndroidSize
+import androidx.annotation.OptIn
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -43,17 +52,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.zxing.BarcodeFormat
-import com.journeyapps.barcodescanner.BarcodeView
-import com.journeyapps.barcodescanner.DefaultDecoderFactory
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import java.util.concurrent.Executors
 
 /**
- * Full-screen QR-only scanner: live camera, a square rounded viewfinder
- * in the app's accent, torch toggle. Decodes once, then hands the text
- * back — no laser line, no landscape lock, nothing barcode-shaped.
+ * Full-screen QR-only scanner: CameraX preview + MLKit analysis — the
+ * same stack the system scanner uses, so it decodes on modern HALs
+ * where Camera1-era libraries silently starve. A square rounded
+ * viewfinder in the app's accent, torch toggle, haptic on hit.
  */
 @Composable
 fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
@@ -66,59 +75,68 @@ fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     ) {
         val ctx = LocalContext.current
         val haptics = LocalHapticFeedback.current
-        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        val lifecycle = LocalLifecycleOwner.current
         var torch by remember { mutableStateOf(false) }
         var hit by remember { mutableStateOf(false) }
-        val view = remember {
-            BarcodeView(ctx).apply {
-                decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
-            }
-        }
+        val previewView = remember { PreviewView(ctx) }
+        val executor = remember { Executors.newSingleThreadExecutor() }
+        var camera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
 
-        DisposableEffect(lifecycle) {
-            val obs = LifecycleEventObserver { _, e ->
-                when (e) {
-                    Lifecycle.Event.ON_RESUME -> view.resume()
-                    Lifecycle.Event.ON_PAUSE -> view.pause()
-                    else -> Unit
-                }
-            }
-            lifecycle.addObserver(obs)
-            // resume() must run after the view is attached — inside a
-            // Dialog the composable is ready before the window surfaces
-            // exist, and an early resume leaves the decoder dead while
-            // the preview still draws (camera on, nothing scans).
-            val attach = object : android.view.View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(v: android.view.View) {
-                    view.resume()
-                }
-
-                override fun onViewDetachedFromWindow(v: android.view.View) {
-                    view.pause()
-                }
-            }
-            view.addOnAttachStateChangeListener(attach)
-            // Continuous, not decodeSingle: if the first frames decode
-            // before the surface settles, single-shot mode swallows them
-            // and never tries again.
-            view.decodeContinuous { r ->
-                if (hit) return@decodeContinuous
-                r.text?.takeIf { it.isNotBlank() }?.let {
-                    hit = true
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onResult(it)
-                }
-            }
+        DisposableEffect(Unit) {
+            val scanner = BarcodeScanning.getClient(
+                com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
+                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                    .build(),
+            )
+            ProcessCameraProvider.getInstance(ctx).addListener(
+                {
+                    val provider = ProcessCameraProvider.getInstance(ctx).get()
+                    val preview = Preview.Builder().build().also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
+                    val analysis = ImageAnalysis.Builder()
+                        .setTargetResolution(AndroidSize(1280, 720))
+                        .setBackpressureStrategy(
+                            ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST,
+                        )
+                        .build()
+                    analysis.setAnalyzer(executor) { proxy ->
+                        if (hit) {
+                            proxy.close()
+                            return@setAnalyzer
+                        }
+                        proxy.decodeWith(scanner) { text ->
+                            if (!hit && !text.isNullOrBlank()) {
+                                hit = true
+                                haptics.performHapticFeedback(
+                                    HapticFeedbackType.LongPress,
+                                )
+                                onResult(text)
+                            }
+                        }
+                    }
+                    provider.unbindAll()
+                    camera = provider.bindToLifecycle(
+                        lifecycle,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        analysis,
+                    )
+                },
+                ctx.mainExecutor,
+            )
             onDispose {
-                lifecycle.removeObserver(obs)
-                view.removeOnAttachStateChangeListener(attach)
-                view.pause()
+                runCatching {
+                    ProcessCameraProvider.getInstance(ctx).get().unbindAll()
+                }
+                scanner.close()
+                executor.shutdown()
             }
         }
 
         val accent = MaterialTheme.colorScheme.primary
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView({ view }, Modifier.fillMaxSize())
+            AndroidView({ previewView }, Modifier.fillMaxSize())
 
             Canvas(Modifier.fillMaxSize()) {
                 val side = size.minDimension * 0.7f
@@ -184,7 +202,7 @@ fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                     FilledTonalIconButton(
                         onClick = {
                             torch = !torch
-                            view.setTorch(torch)
+                            camera?.cameraControl?.enableTorch(torch)
                         },
                         modifier = Modifier.padding(top = 20.dp),
                     ) {
@@ -197,4 +215,22 @@ fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
             }
         }
     }
+}
+
+/** Run one frame through MLKit; [onText] fires on the first barcode. */
+@OptIn(ExperimentalGetImage::class)
+private fun ImageProxy.decodeWith(
+    scanner: com.google.mlkit.vision.barcode.BarcodeScanner,
+    onText: (String?) -> Unit,
+) {
+    val media = image
+    if (media == null) {
+        close()
+        return
+    }
+    val input = InputImage.fromMediaImage(media, imageInfo.rotationDegrees)
+    scanner
+        .process(input)
+        .addOnSuccessListener { codes -> onText(codes.firstOrNull()?.rawValue) }
+        .addOnCompleteListener { close() }
 }
