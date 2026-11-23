@@ -268,9 +268,8 @@ class PlayerWindow(Gtk.ApplicationWindow):
             (Gdk.KEY_Right, lambda: self._seek_by(SEEK_STEP_US)),
             (Gdk.KEY_n, lambda: self._mpris.invoke("Next")),
             (Gdk.KEY_p, lambda: self._mpris.invoke("Previous")),
-            (Gdk.KEY_s, lambda: self._mpris.set_property("Shuffle", True)),
-            (Gdk.KEY_r,
-             lambda: self._mpris.set_property("LoopStatus", "Playlist")),
+            (Gdk.KEY_s, lambda: self._toggle_shuffle()),
+            (Gdk.KEY_r, lambda: self._cycle_loop()),
         ]
         # Dedicated media keys — names exist in GDK4 but guard anyway.
         for name, method in (("AudioPlay", "PlayPause"),
@@ -288,6 +287,17 @@ class PlayerWindow(Gtk.ApplicationWindow):
                       self._duration_us)
             self._mpris.set_position(self._track_id, pos)
             self._set_position(pos)
+
+    def _toggle_shuffle(self) -> None:
+        props = self._mpris.properties() or {}
+        self._mpris.set_property("Shuffle", not props.get("Shuffle", False))
+
+    def _cycle_loop(self) -> None:
+        props = self._mpris.properties() or {}
+        nxt = {"None": "Playlist", "Playlist": "Track",
+               "Track": "None"}
+        self._mpris.set_property(
+            "LoopStatus", nxt.get(props.get("LoopStatus", "None"), "Playlist"))
 
     # -- layout --------------------------------------------------------------
 
@@ -311,22 +321,25 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self._b_play = self._transport("media-playback-start-symbolic")
         self._b_play.connect(
             "clicked", lambda *_: self._mpris.invoke("PlayPause"))
+        self._b_shuffle = self._transport(
+            "media-playlist-shuffle-symbolic", dim=True)
+        self._b_loop = self._transport(
+            "media-playlist-repeat-symbolic", dim=True)
         buttons = [
-            self._transport("media-playlist-shuffle-symbolic", dim=True),
+            self._b_shuffle,
             self._transport("media-skip-backward-symbolic"),
             self._b_play,
             self._transport("media-skip-forward-symbolic"),
-            self._transport("media-playlist-repeat-symbolic", dim=True),
+            self._b_loop,
         ]
-        buttons[0].connect(
-            "clicked", lambda *_: self._mpris.set_property("Shuffle", True))
+        self._b_shuffle.connect(
+            "clicked", lambda *_: self._toggle_shuffle())
         buttons[1].connect(
             "clicked", lambda *_: self._mpris.invoke("Previous"))
         buttons[3].connect(
             "clicked", lambda *_: self._mpris.invoke("Next"))
-        buttons[4].connect(
-            "clicked",
-            lambda *_: self._mpris.set_property("LoopStatus", "Playlist"))
+        self._b_loop.connect(
+            "clicked", lambda *_: self._cycle_loop())
         controls = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
         for b in buttons:
             controls.append(b)
@@ -425,6 +438,18 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self._b_play.set_icon_name(
             "media-playback-pause-symbolic" if status == "Playing"
             else "media-playback-start-symbolic")
+        loop = props.get("LoopStatus", "None")
+        if props.get("Shuffle"):
+            self._b_shuffle.remove_css_class("dim")
+        else:
+            self._b_shuffle.add_css_class("dim")
+        self._b_loop.set_icon_name(
+            "media-playlist-repeat-song-symbolic" if loop == "Track"
+            else "media-playlist-repeat-symbolic")
+        if loop != "None":
+            self._b_loop.remove_css_class("dim")
+        else:
+            self._b_loop.add_css_class("dim")
 
         art_url = meta.get("mpris:artUrl") or ""
         art_path = art_url[7:] if art_url.startswith("file://") else None

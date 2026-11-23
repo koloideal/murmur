@@ -28,11 +28,5 @@
     padding-right: 0;
 }
 
-#custom-murmur-status.off,
-#custom-murmur-media.off {
-    color: #928374;
-}
-
-#custom-murmur-media.playing {
-    color: @color_accent;
-}
+/* module text colors are emitted in markup by murmur-island.py,
+   which follows colors.css — nothing to set here */

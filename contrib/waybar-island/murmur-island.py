@@ -11,6 +11,7 @@ import html
 import json
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -84,18 +85,64 @@ def murmur_up(st: dict | None) -> bool:
     )
 
 
+# --- bar theme ---------------------------------------------------------------
+# colors.css is rewritten by bar-theme.sh on every wallpaper switch; it
+# defines @color_bg/fg/accent for the island pills. We read it ourselves
+# (mtime-cached) so every colored span follows the current theme — GTK
+# vars don't resolve inside pango markup anyway.
+THEME_CSS = os.path.expanduser("~/.config/hypr/colors.css")
+_theme = {"mtime": -1.0, "bg": (40, 40, 40), "fg": (235, 219, 178),
+          "accent": (214, 93, 14)}
+
+
+def theme_colors() -> tuple[tuple, tuple, tuple]:
+    """(bg, fg, accent) from waybar's colors.css; gruvbox-dark fallback."""
+    try:
+        mt = os.stat(THEME_CSS).st_mtime
+        if mt != _theme["mtime"]:
+            src = open(THEME_CSS, encoding="utf-8").read()
+
+            def grab(name: str) -> tuple | None:
+                m = re.search(
+                    rf'@define-color\s+{name}\s+rgb\((\d+),\s*(\d+),\s*(\d+)\)',
+                    src)
+                if m:
+                    return tuple(int(g) for g in m.groups())
+                m = re.search(
+                    rf'@define-color\s+{name}\s+#([0-9a-fA-F]{{6}})', src)
+                return (tuple(bytes.fromhex(m.group(1))) if m else None)
+
+            for name, key in (("color_bg", "bg"), ("color_fg", "fg"),
+                              ("color_accent", "accent")):
+                c = grab(name)
+                if c:
+                    _theme[key] = c
+            _theme["mtime"] = mt
+    except OSError:
+        pass
+    return _theme["bg"], _theme["fg"], _theme["accent"]
+
+
+def _hex(c: tuple) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*c)
+
+
+def _mix(a: tuple, b: tuple, k: float) -> tuple:
+    return tuple(round(a[i] + (b[i] - a[i]) * k) for i in range(3))
+
+
 def status_text(up: bool) -> str:
+    bg, fg, _accent = theme_colors()
     if not up:
         dot = "#fb4934"  # static red — nothing to breathe for
     else:
-        # Breathing dot — ~2.5s sine, sampled ~8x/s by the live stream.
-        c = (0xB8, 0xBB, 0x26, 0x55, 0x6B, 0x2F)  # bright rgb + dim rgb
+        # Breathing dot — ~2.5s sine between dim fg and gruvbox green.
+        green = (184, 187, 38)
         k = (math.sin(time.time() / 2.5 * math.tau) + 1) / 2
-        dot = "#{:02x}{:02x}{:02x}".format(
-            *(round(c[3 + i] + (c[i] - c[3 + i]) * k) for i in range(3))
-        )
+        dot = _hex(_mix(_mix(bg, fg, 0.55), green, k))
     word = "online" if up else "offline"
-    return f'<b>murmur</b> {word} <span foreground="{dot}">●</span>'
+    return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
+            f' <span foreground="{dot}">●</span>')
 
 
 def status_tooltip(st: dict | None) -> str:
@@ -267,13 +314,14 @@ def media_frame(md: dict | None, now: float) -> dict:
     shown = title[:TITLE_LEN] + ("…" if len(title) > TITLE_LEN else "")
     tip = f"{title} — {md['artist']}".strip(" —") or "phone player"
     tip += f"\n{md['status'].lower()}"
-    # ∿ — the sine-wave logo. Breathes while playing, dim when paused.
-    lo, hi = (0x7C, 0x6F, 0x64), (0xFA, 0xBD, 0x2F)
+    # ∿ — the sine-wave logo. Breathes dim→accent while playing, dim when
+    # paused; both ends follow the current bar theme.
+    bg, fg, accent = theme_colors()
     k = (math.sin(now * 3.0) + 1) / 2 if md["status"] == "Playing" else 0.0
-    col = "#{:02x}{:02x}{:02x}".format(
-        *(round(lo[c] + (hi[c] - lo[c]) * k) for c in range(3)))
+    col = _hex(_mix(_mix(bg, fg, 0.55), accent, k))
     wave = f'<span foreground="{col}">∿</span>'
-    text = f"{html.escape(shown)} {wave}" if shown else wave
+    text = (f'<span foreground="{_hex(fg)}">{html.escape(shown)}</span> {wave}'
+            if shown else wave)
     cls = "playing" if md["status"] == "Playing" else "paused"
     return {"text": text, "class": cls, "tooltip": tip}
 

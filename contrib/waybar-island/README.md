@@ -62,3 +62,6 @@ drop `Onest[wght].ttf` / `Unbounded[wght].ttf` into
   (`app.hold()`); each Activate rebuilds or destroys the window.
 - Popup closes itself when murmur goes offline and refuses to fight
   the user: it positions once, afterwards you can drag it anywhere.
+- Text/wave colors come from `~/.config/hypr/colors.css`
+  (`@color_bg/fg/accent`, re-read on change) — the island follows
+  wallpaper-driven theme switches automatically.
