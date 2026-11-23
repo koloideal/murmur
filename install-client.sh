@@ -3,14 +3,20 @@
 #   curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
 # or skip the questions and pair in one go:
 #   ... | sh -s -- --server wss://relay.example --code ABCD-EFGH
+# or found a serverless (lan-only, no relay) family on this machine:
+#   ... | sh -s -- --serverless --name my-laptop
 #
 # Downloads murmurd + murmurctl from the latest release into ~/.local/bin,
 # offers to put it on PATH, registers the systemd user unit, then offers
 # to pair with your relay right away (Enter skips — pair manually later).
+#
+# MURMUR_BIN_SRC=/path/to/dir installs binaries from a local build
+# instead of downloading (e.g. laptop/target/release).
 set -eu
 
 REPO="${MURMUR_REPO:-koloideal/murmur}"
 BIN="${BIN_DIR:-$HOME/.local/bin}"
+SRC="${MURMUR_BIN_SRC:-}"
 
 # ---- pretty
 if [ -t 1 ]; then
@@ -123,8 +129,10 @@ box() {
 hint_box() {
     box "${B}installed${R0}" \
         "" \
-        "join later:  ${B}murmurd pair --server wss://YOUR.DOMAIN --code XXXX-XXXX${R0}" \
-        "             (full invite strings work too — server is inside)" \
+        "join later:   ${B}murmurd pair --server wss://YOUR.DOMAIN --code XXXX-XXXX${R0}" \
+        "              (full invite strings work too — server is inside)" \
+        "or found one: ${B}murmurd init --kind serverless --name THIS-HOST${R0}" \
+        "              (lan only — no relay, ever)" \
         "" \
         "then:  ${B}systemctl --user start murmurd${R0}   and   ${B}murmurd doctor${R0}"
 }
@@ -137,10 +145,19 @@ case "$(uname -m)" in
 esac
 
 mkdir -p "$BIN"
-for tool in murmurd murmurctl; do
-    step "$tool binary"
-    dl_cached "https://github.com/$REPO/releases/latest/download/$tool-$TARGET" "$BIN/$tool"
-done
+if [ -n "$SRC" ]; then
+    for tool in murmurd murmurctl; do
+        step "$tool binary — local build"
+        [ -x "$SRC/$tool" ] || die "$SRC/$tool not found — build first: cargo build --release --manifest-path laptop/Cargo.toml"
+        install -m 755 "$SRC/$tool" "$BIN/$tool"
+        ok "$BIN/$tool"
+    done
+else
+    for tool in murmurd murmurctl; do
+        step "$tool binary"
+        dl_cached "https://github.com/$REPO/releases/latest/download/$tool-$TARGET" "$BIN/$tool"
+    done
+fi
 
 # ---- PATH
 case ":$PATH:" in
@@ -175,7 +192,8 @@ else
     warn "unit install failed — the daemon can still run bare: murmurd"
 fi
 
-# ---- after a successful pair: daemon up + framed success + phone hint
+# ---- after a successful pair/init: daemon up + framed success + phone hint
+# $1 = box title (default "you're in the family")
 post_pair() {
     step "starting murmurd"
     if systemctl --user start murmurd 2>/dev/null; then
@@ -194,7 +212,7 @@ post_pair() {
         sleep 1; _i=$((_i + 1))
     done
 
-    box "${B}${C_GR}you're in the family${R0}${FAM:+  ·  ${B}$FAM${R0}}" \
+    box "${B}${C_GR}${1:-you're in the family}${R0}${FAM:+  ·  ${B}$FAM${R0}}" \
         "" \
         "the phone isn't connected yet —" \
         "invite it from this machine:" \
@@ -203,6 +221,14 @@ post_pair() {
 
 # ---- join: args beat questions beat the hint box
 if [ $# -gt 0 ]; then
+    # --serverless founds a lan-only family here — the rest of the args
+    # (--name, --family) go straight to `murmurd init`.
+    if [ "$1" = "--serverless" ]; then
+        shift
+        "$BIN/murmurd" init --kind serverless "$@" || die "init failed"
+        post_pair "you founded a family"
+        exit 0
+    fi
     # sanity-check pair args before they hit murmurd
     prev=""
     for a in "$@"; do
@@ -224,6 +250,17 @@ if [ $# -gt 0 ]; then
         "$BIN/murmurd" pair "$@" || die "pairing failed"
     fi
     post_pair
+    exit 0
+fi
+
+if have_tty && askyn n "found a serverless family here? (lan only — no relay, ever)"; then
+    NAME=$(ask "" "$(uname -n)" "device name")
+    FAMN=$(ask "" "" "family name (optional)")
+    init_args="--kind serverless --name $NAME"
+    if [ -n "$FAMN" ]; then init_args="$init_args --family $FAMN"; fi
+    # shellcheck disable=SC2086
+    "$BIN/murmurd" init $init_args < /dev/tty || die "init failed"
+    post_pair "you founded a family"
     exit 0
 fi
 

@@ -122,6 +122,11 @@ async fn connect_once(
                     Ok(ctl) => {
                         if let Control::Devices { family_name, .. } = &ctl {
                             *shared.family_name.lock().unwrap() = family_name.clone();
+                            let mut s = shared.secrets.lock().unwrap();
+                            if s.family_name != *family_name {
+                                s.family_name = family_name.clone();
+                                let _ = s.save();
+                            }
                         }
                         let _ = shared.ctl_events.send((env.from, ctl));
                     }

@@ -120,6 +120,10 @@ pub struct Secrets {
     /// Long-term X25519 identity secret (generated on first start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_hex: Option<String>,
+    /// Display name of the family — founder-set via `init --family`.
+    /// Serverful members mirror the relay's name over it on connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
 }
 
 impl Secrets {
@@ -216,6 +220,12 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
         device_id: id.to_string(),
         auth_token_hex: token_hex.into(),
         family_key_hex: hex::encode(FamilyKey::random().0),
+        family_name: args
+            .iter()
+            .position(|a| a == "--family")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()),
         ..Secrets::default()
     };
     provision(&cfg, &secrets)?;

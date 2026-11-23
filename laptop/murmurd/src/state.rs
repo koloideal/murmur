@@ -124,7 +124,7 @@ impl Shared {
         Ok(Self {
             id: secrets.device_id()?,
             keys: RwLock::new(Keyring::load(&secrets)?),
-            family_name: Mutex::new(None),
+            family_name: Mutex::new(secrets.family_name.clone()),
             identity,
             roster: Mutex::new(crate::keyring::load_roster()),
             last_rekey: Mutex::new(HashMap::new()),
