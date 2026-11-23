@@ -44,6 +44,13 @@ class Secrets(private val ctx: Context) {
         get() = prefs.getString(KEY_URL, "") ?: ""
         set(v) = prefs.edit { putString(KEY_URL, v) }
 
+    /** Family kind — "serverful" | "serverless", chosen at family
+     *  creation and carried by the invite. Explicit, never inferred
+     *  from serverUrl: old installs default to "serverful". */
+    var familyKind: String
+        get() = prefs.getString(KEY_FAMILY_KIND, "serverful") ?: "serverful"
+        set(v) = prefs.edit { putString(KEY_FAMILY_KIND, v) }
+
     /** Display name for this device. Defaults to the system device name
      *  ("device_name" is OEM-set, e.g. "Galaxy S26 Ultra"), then the
      *  build model. Editable from the dashboard; the service pushes it
@@ -83,11 +90,13 @@ class Secrets(private val ctx: Context) {
         serverUrl: String,
         keyEpoch: Long,
         familyName: String? = null,
+        familyKind: String = "serverful",
     ) {
         prefs.edit {
             putLong(KEY_EPOCH, keyEpoch)
             putString(KEY_DEVICE, deviceId)
             putString(KEY_URL, serverUrl)
+            putString(KEY_FAMILY_KIND, familyKind)
             putString(KEY_TOKEN, cipher.seal(authTokenHex.encodeToByteArray()))
             putString(KEY_FAMILY, cipher.seal(familyKeyBytes))
             if (familyName != null) putString(KEY_FAMILY_NAME, familyName)
@@ -185,6 +194,7 @@ class Secrets(private val ctx: Context) {
         private const val KEY_FAMILY = "family_key_enc"
         private const val KEY_FAMILY_NAME = "family_name"
         private const val KEY_URL = "server_url"
+        private const val KEY_FAMILY_KIND = "family_kind"
         private const val KEY_NAME = "device_name"
         private const val KEY_MUTED = "notif_muted"
         private const val KEY_HIDE_TEXT = "notif_hide_text"

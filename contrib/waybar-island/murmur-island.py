@@ -67,6 +67,7 @@ def murmur_state() -> dict | None:
                 "lan_rtts": d.get("lan_rtt_ms") or {},
                 "self": selfid,
                 "name": d.get("name", "?"),
+                "kind": d.get("family_kind", "serverful"),
                 "server": d.get("server", "?"),
                 "epoch": d.get("key_epoch", 0),
                 "active": d.get("active_node"),
@@ -134,7 +135,7 @@ def _mix(a: tuple, b: tuple, k: float) -> tuple:
     return tuple(round(a[i] + (b[i] - a[i]) * k) for i in range(3))
 
 
-def status_text(up: bool, lan: bool = False) -> str:
+def status_text(up: bool, lan: bool = False, kind: str = "serverful") -> str:
     bg, fg, accent = theme_colors()
     if not up:
         dot = "#fb4934"  # static red — nothing to breathe for
@@ -144,13 +145,15 @@ def status_text(up: bool, lan: bool = False) -> str:
         k = (math.sin(time.time() / 2.5 * math.tau) + 1) / 2
         dot = _hex(_mix(_mix(bg, fg, 0.55), green, k))
     word = "online" if up else "offline"
-    # "· on lan / · on wan" — dimmed, between the word and the dot.
+    dim = _hex(_mix(bg, fg, 0.5))
+    # Serverful gets a route hint ("on lan/wan"); a serverless family
+    # has no second route — the word alone says it.
     link = ""
-    if up:
-        dim = _hex(_mix(bg, fg, 0.5))
+    if up and kind == "serverful":
         link = f'<span foreground="{dim}"> · on {"lan" if lan else "wan"}</span>'
     return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
-            f'{link} <span foreground="{dot}">●</span>')
+            f'{link}<span foreground="{dim}"> · as {kind}</span>'
+            f' <span foreground="{dot}">●</span>')
 
 
 def status_tooltip(st: dict | None) -> str:
@@ -190,8 +193,12 @@ def status_tooltip(st: dict | None) -> str:
 def status() -> dict:
     st = murmur_state()
     up = murmur_up(st)
+    # Serverless: no relay exists — the family is "online" only while
+    # a peer is actually linked; there's no wan to fall back to.
+    if st and st["kind"] == "serverless" and not st["lan_peers"]:
+        up = False
     return {
-        "text": status_text(up, lan=bool(st and st["lan"])),
+        "text": status_text(up, lan=bool(st and st["lan"]), kind=st["kind"] if st else "serverful"),
         "class": "on" if up else "off",
         "tooltip": status_tooltip(st),
     }

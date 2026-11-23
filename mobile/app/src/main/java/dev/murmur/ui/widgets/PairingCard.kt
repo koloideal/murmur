@@ -117,7 +117,7 @@ fun PairingCard() {
                     val answer = CompletableDeferred<Boolean>().also { sasAnswer = it }
                     answer.await()
                 }
-                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch, prov.familyName)
+                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch, prov.familyName, prov.familyKind)
                 burstFamily = prov.familyName
                 phase = "done"
                 // Service starts only after the burst finishes — it

@@ -98,7 +98,7 @@ impl Shared {
     /// `murmurctl invite`: mint a session, keep our DH key, hand back the
     /// code the new device feeds to `murmurd pair --code`.
     pub fn invite(&self) -> Invite {
-        let invite = Invite::new(self.cfg.server_url.clone(), self.id);
+        let invite = Invite::new(self.cfg.server_url.clone(), self.id, self.cfg.family_kind);
         self.pair.lock().unwrap().invites.insert(
             invite.session,
             InviteEntry {
@@ -175,6 +175,7 @@ impl Shared {
             server_url: Some(self.cfg.server_url.clone()),
             key_epoch: self.keys.read().unwrap().epoch,
             family_name: self.family_name.lock().unwrap().clone(),
+            kind: self.cfg.family_kind,
         };
         let dh = pending.key.dh(&pending.peer_pub);
         let blob_b64 = {
@@ -196,6 +197,7 @@ pub struct Paired {
     pub token_hex: String,
     pub family_key_hex: String,
     pub key_epoch: u64,
+    pub kind: murmur_proto::FamilyKind,
 }
 
 /// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
@@ -331,6 +333,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                             None => hex::encode(FamilyKey::random().0),
                         },
                         key_epoch: blob.key_epoch,
+                        kind: blob.kind,
                     });
                 }
                 _ => {}

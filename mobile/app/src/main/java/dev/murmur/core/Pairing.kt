@@ -22,6 +22,8 @@ data class Provisioning(
     val serverUrl: String,
     val keyEpoch: Long,
     val familyName: String?,
+    /** "serverful" | "serverless" — stored explicitly, never inferred. */
+    val familyKind: String,
 )
 
 class PairingException(message: String) : Exception(message)
@@ -209,6 +211,7 @@ suspend fun pair(
                 serverUrl = url,
                 keyEpoch = blob.key_epoch,
                 familyName = blob.family_name,
+                familyKind = blob.kind,
             )
         }
     } finally {

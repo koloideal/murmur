@@ -152,21 +152,26 @@ fun StatusCard() {
                     }
                 }
                 StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
-                StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
-                if (secrets.serverUrl.startsWith("ws://")) {
-                    Text(
-                        "plain ws — messages stay end-to-end sealed, but the " +
-                            "relay login travels unencrypted. Prefer wss://.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                if (status.familyKind == "serverless") {
+                    // No server exists anywhere in this family's world.
+                    StatusRow("family", "serverless · lan only")
+                } else {
+                    StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
+                    if (secrets.serverUrl.startsWith("ws://")) {
+                        Text(
+                            "plain ws — messages stay end-to-end sealed, but the " +
+                                "relay login travels unencrypted. Prefer wss://.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        )
+                    }
+                    StatusRow(
+                        "ping",
+                        status.serverRttMs?.let { "$it ms" } ?: "—",
+                        dim = status.serverRttMs == null,
                     )
                 }
-                StatusRow(
-                    "ping",
-                    status.serverRttMs?.let { "$it ms" } ?: "—",
-                    dim = status.serverRttMs == null,
-                )
                 Spacer(Modifier.height(8.dp))
                 Row {
                     OutlinedButton(

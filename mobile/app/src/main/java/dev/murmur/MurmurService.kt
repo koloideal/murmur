@@ -113,7 +113,7 @@ class MurmurService : Service() {
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
         lan = LanLink(secrets.deviceId!!, key, scope, { onEnvelope(it) }) { send(it) }
-        status.value = Status(provisioned = true, running = true)
+        status.value = Status(provisioned = true, running = true, familyKind = secrets.familyKind)
         relay.start()
         lan.start()
         scope.launch {
@@ -393,6 +393,8 @@ class MurmurService : Service() {
          *  yet measured). Several laptops may each hold a link — the
          *  UI shows "on lan" per device row with the real ping. */
         val lanPeers: Map<String, Long> = emptyMap(),
+        /** Family kind from secrets — "serverful" | "serverless". */
+        val familyKind: String = "serverful",
         val devices: List<DeviceInfo> = emptyList(),
         val familyName: String? = null,
         val keyEpoch: Long = 0,

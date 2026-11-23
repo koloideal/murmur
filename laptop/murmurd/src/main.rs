@@ -98,7 +98,11 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let hub = Arc::new(hub);
-    tasks.push(Box::pin(conn::run(shared.clone(), hub.clone(), out_rx, lo_rx)));
+    // A serverless family has no relay in its world — the conn task
+    // simply doesn't exist; the LAN mesh is the whole transport.
+    if shared.cfg.family_kind == murmur_proto::FamilyKind::Serverful {
+        tasks.push(Box::pin(conn::run(shared.clone(), hub.clone(), out_rx, lo_rx)));
+    }
     tasks.push(Box::pin(lan::run(shared.clone(), hub.clone(), dial_rx)));
 
     // All tasks are daemons; first error shuts everything down.
@@ -147,10 +151,17 @@ async fn doctor() -> anyhow::Result<()> {
     let cfg = config::Config::load().ok();
     match &cfg {
         Some(c) => {
-            let sane = c.server_url.starts_with("ws://") || c.server_url.starts_with("wss://");
+            let sane = c.family_kind == murmur_proto::FamilyKind::Serverless
+                || c.server_url.starts_with("ws://")
+                || c.server_url.starts_with("wss://");
             ok(
                 sane,
-                format!("config.toml — {} ({})", c.server_url, c.name),
+                format!(
+                    "config.toml — {} · {:?} ({})",
+                    if c.server_url.is_empty() { "no relay" } else { &c.server_url },
+                    c.family_kind,
+                    c.name,
+                ),
                 "config.toml missing or server_url is not ws(s):// — run `murmurd pair` or `murmurd init`",
             );
         }
@@ -266,6 +277,7 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
 
     let paired = pair::join(code, &name, server.as_deref()).await?;
     let cfg = config::Config {
+        family_kind: paired.kind,
         server_url: paired.server_url,
         name,
         ..config::Config::default()

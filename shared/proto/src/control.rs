@@ -132,4 +132,8 @@ pub struct PairBlob {
     /// Family name as the relay knows it — shown in the joiner's UI.
     #[serde(default)]
     pub family_name: Option<String>,
+    /// Family kind — the joiner stores it explicitly; absent in old
+    /// blobs, which were all serverful.
+    #[serde(default)]
+    pub kind: crate::FamilyKind,
 }

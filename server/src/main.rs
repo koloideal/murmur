@@ -1312,6 +1312,8 @@ async fn bootstrap_confirm(shared: &Arc<Shared>, session: DeviceId) -> anyhow::R
         server_url: None,
         key_epoch: 0,
         family_name: shared.family_name.lock().unwrap().clone(),
+        // Bootstrap only ever happens through the relay.
+        kind: murmur_proto::FamilyKind::Serverful,
     };
     let sealed = FamilyKey::from_raw(b.key.dh(&joiner_pub)).seal(&serde_json::to_vec(&blob)?)?;
     use base64::Engine;

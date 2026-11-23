@@ -27,16 +27,21 @@ pub struct Invite {
     /// The typeable `XXXX-XXXX` form — for when the QR can't be scanned.
     #[serde(rename = "c")]
     pub code: String,
+    /// Family kind the joiner is entering. Absent in old invites —
+    /// those were all serverful.
+    #[serde(rename = "k", default)]
+    pub kind: crate::FamilyKind,
 }
 
 impl Invite {
-    pub fn new(server_url: String, inviter: DeviceId) -> Self {
+    pub fn new(server_url: String, inviter: DeviceId, kind: crate::FamilyKind) -> Self {
         let code = crate::pair_code();
         Self {
             server_url,
             inviter,
             session: DeviceId::from_code(&code),
             code,
+            kind,
         }
     }
 

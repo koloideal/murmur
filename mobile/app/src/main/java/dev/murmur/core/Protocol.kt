@@ -227,13 +227,16 @@ data class DeviceInfo(
     val rtt_ms: Long? = null,
 )
 
-/** Invite bundle — base64url JSON `{s,i,p}`, same as murmur_proto::Invite. */
+/** Invite bundle — base64url JSON `{s,i,p,k}`, same as murmur_proto::Invite. */
 @Serializable
 data class Invite(
     @SerialName("s") val serverUrl: String,
     @SerialName("i") val inviter: String,
     @SerialName("p") val session: String,
     @SerialName("c") val code: String = "",
+    /** Family kind — explicit, never inferred; absent in old
+     *  (all-serverful) invites. */
+    @SerialName("k") val kind: String = "serverful",
 ) {
     companion object {
         fun decode(code: String): Invite? = runCatching {
@@ -252,4 +255,6 @@ data class PairBlob(
     val server_url: String,
     val key_epoch: Long = 0,
     val family_name: String? = null,
+    /** Family kind — explicit; absent in old (all-serverful) blobs. */
+    val kind: String = "serverful",
 )

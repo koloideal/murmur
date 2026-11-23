@@ -32,7 +32,13 @@ pub(crate) fn cache_dir() -> PathBuf {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// wss://host[:port]/murmur
+    /// What kind of family this device belongs to — chosen at family
+    /// creation, carried by invites. Explicit, never inferred from
+    /// `server_url`: a serverless family simply has no server field.
+    #[serde(default)]
+    pub family_kind: murmur_proto::FamilyKind,
+    /// wss://host[:port]/murmur — unset in a serverless family.
+    #[serde(default)]
     pub server_url: String,
     /// Human name shown in device lists ("thinkpad", "desktop").
     pub name: String,
@@ -70,6 +76,7 @@ fn default_lock_procs() -> Vec<String> {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            family_kind: murmur_proto::FamilyKind::Serverful,
             server_url: String::new(),
             name: String::new(),
             idle_timeout_secs: default_idle(),
@@ -157,7 +164,24 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
             .map(String::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing {name}"))
     }
-    let server_url = flag(args, "--server")?;
+    let kind = match args.iter().position(|a| a == "--kind") {
+        Some(i) => match args.get(i + 1).map(String::as_str) {
+            Some("serverful") => murmur_proto::FamilyKind::Serverful,
+            Some("serverless") => murmur_proto::FamilyKind::Serverless,
+            _ => anyhow::bail!("--kind must be serverful|serverless"),
+        },
+        None => murmur_proto::FamilyKind::Serverful,
+    };
+    // The relay URL exists only in a serverful family's world.
+    let server_url = match kind {
+        murmur_proto::FamilyKind::Serverful => flag(args, "--server")?,
+        murmur_proto::FamilyKind::Serverless => args
+            .iter()
+            .position(|a| a == "--server")
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+            .unwrap_or(""),
+    };
     let name = flag(args, "--name")
         .map(str::to_owned)
         .map_or_else(
@@ -172,6 +196,7 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
     AuthToken::from_hex(token_hex)?;
 
     let cfg = Config {
+        family_kind: kind,
         server_url: server_url.into(),
         name: name.into(),
         ..Config::default()
