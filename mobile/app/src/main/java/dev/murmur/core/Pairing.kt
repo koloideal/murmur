@@ -5,6 +5,7 @@ import com.goterl.lazysodium.LazySodiumAndroid
 import com.goterl.lazysodium.SodiumAndroid
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -232,6 +233,63 @@ private const val TIMEOUT_MS = 180_000L
 private const val HELLO_RETRY_MS = 3_000L
 private const val CONNECT_MS = 10_000
 private const val ZERO_ID = "0000000000000000"
+
+/**
+ * Serverless short code: `XXXX-XXXX` derives the session (same
+ * SHA-256(code)[0..8] the laptop uses), then the inviter's LAN pair
+ * beacon resolves it to `host:port` — the stand-in for the relay's
+ * session lookup a serverless family doesn't have.
+ */
+suspend fun pairLanCode(
+    code: String,
+    deviceName: String,
+    onStage: (PairStage) -> Unit = {},
+    onSas: suspend (code: String) -> Boolean,
+): Provisioning {
+    val norm = code.filter { it != '-' }.uppercase()
+    val digest = java.security.MessageDigest
+        .getInstance("SHA-256")
+        .digest(norm.toByteArray())
+    val session = digest.take(8).joinToString("") { "%02x".format(it) }
+    val addr = try {
+        awaitPairBeacon(session)
+    } catch (e: TimeoutCancellationException) {
+        throw PairingException("no laptop answering that code on this lan")
+    }
+    return pairLan(addr, session, deviceName, onStage, onSas)
+}
+
+private const val BEACON_PORT = 17893
+private const val BEACON_WAIT_MS = 120_000L
+
+/** Listen on the beacon port for the inviter's `{"t":"murmur-pair"}`
+ *  datagram matching our session — the laptop broadcasts it while the
+ *  invite lives. */
+private suspend fun awaitPairBeacon(session: String): String = withContext(Dispatchers.IO) {
+    val sock = java.net.DatagramSocket(null).apply {
+        reuseAddress = true
+        bind(java.net.InetSocketAddress(BEACON_PORT))
+    }
+    try {
+        withTimeout(BEACON_WAIT_MS) {
+            val buf = ByteArray(2048)
+            while (true) {
+                val pkt = java.net.DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                val o = runCatching {
+                    org.json.JSONObject(String(pkt.data, 0, pkt.length))
+                }.getOrNull() ?: continue
+                if (o.optString("t") == "murmur-pair" && o.optString("s") == session) {
+                    return@withTimeout o.getString("a")
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        }
+    } finally {
+        runCatching { sock.close() }
+    }
+}
 
 /**
  * Joiner side of a serverless invite: `addr` is the inviter's

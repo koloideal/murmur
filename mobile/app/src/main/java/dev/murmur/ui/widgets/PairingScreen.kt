@@ -26,10 +26,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -96,6 +96,7 @@ fun PairingScreen() {
     var celebrating by remember { mutableStateOf(false) }
     var burstFamily by remember { mutableStateOf<String?>(null) }
     var lanOnly by remember { mutableStateOf(false) }
+    var lanCode by remember { mutableStateOf(false) }
     /** Family kind the user picked on the split screen — null = the
      *  choice itself is what's showing. The invite that arrives from
      *  the laptop is the real truth; this only shapes which fields
@@ -104,30 +105,39 @@ fun PairingScreen() {
 
     val codeReady = code.length == 8
 
-    fun runPairing(input: String, short: Boolean = false) {
+    fun runPairing(input: String, short: Boolean = false, byCode: Boolean = false) {
         phase = "connecting"
         error = null
         hint = null
+        lanCode = byCode
         // The invite itself declares the family's kind — a serverless
         // one dials the laptop directly and never sees a server.
-        lanOnly = !short && dev.murmur.core.Invite.decode(input)?.kind == "serverless"
+        lanOnly = byCode ||
+            (!short && dev.murmur.core.Invite.decode(input)?.kind == "serverless")
         job = scope.launch {
             try {
-                val prov = pair(
-                    input,
-                    secrets.deviceName,
-                    serverUrl = if (short) server.trim() else null,
-                    onStage = { st ->
-                        when (st) {
-                            is PairStage.AwaitingAccept -> phase = "accept"
-                            is PairStage.AwaitingConfirm -> phase = "confirm"
-                        }
-                    },
-                ) { s ->
+                val onStage: (PairStage) -> Unit = { st ->
+                    when (st) {
+                        is PairStage.AwaitingAccept -> phase = "accept"
+                        is PairStage.AwaitingConfirm -> phase = "confirm"
+                    }
+                }
+                val onSas: suspend (String) -> Boolean = { s ->
                     sas = s
                     phase = "sas"
                     val answer = CompletableDeferred<Boolean>().also { sasAnswer = it }
                     answer.await()
+                }
+                val prov = if (byCode) {
+                    dev.murmur.core.pairLanCode(input, secrets.deviceName, onStage, onSas)
+                } else {
+                    pair(
+                        input,
+                        secrets.deviceName,
+                        serverUrl = if (short) server.trim() else null,
+                        onStage = onStage,
+                        onSas = onSas,
+                    )
                 }
                 secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch, prov.familyName, prov.familyKind)
                 burstFamily = prov.familyName
@@ -194,6 +204,7 @@ fun PairingScreen() {
     fun cancel() {
         job?.cancel()
         sasAnswer?.complete(false)
+        lanCode = false
         phase = "idle"
     }
 
@@ -235,7 +246,11 @@ fun PairingScreen() {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(12.dp))
                     Text(
-                        if (lanOnly) "connecting to the laptop…" else "connecting to the relay…",
+                        when {
+                            lanCode -> "listening for the laptop on the lan…"
+                            lanOnly -> "connecting to the laptop…"
+                            else -> "connecting to the relay…"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -263,7 +278,7 @@ fun PairingScreen() {
                     }
                     StepList(laptopSteps, current = if (phase == "accept") 0 else 2)
                     Spacer(Modifier.height(12.dp))
-                    TextButton(
+                    OutlinedButton(
                         onClick = ::cancel,
                         modifier = Modifier.align(Alignment.End),
                     ) { Text("cancel") }
@@ -309,7 +324,7 @@ fun PairingScreen() {
                             phase = "confirm"
                             sasAnswer?.complete(true)
                         }) { Text("match") }
-                        TextButton(onClick = {
+                        OutlinedButton(onClick = {
                             phase = "idle"
                             sasAnswer?.complete(false)
                         }) { Text("don't match") }
@@ -328,29 +343,26 @@ fun PairingScreen() {
                     Button(onClick = ::scan, modifier = Modifier.fillMaxWidth()) {
                         Text("scan QR code", textAlign = TextAlign.Center)
                     }
-                    TextButton(
+                    OutlinedButton(
                         onClick = { manual = !manual },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("enter code manually") }
                     if (manual) {
                         if (kind == "serverless") {
-                            // A short code finds the inviter through the
-                            // relay — which doesn't exist here. The full
-                            // invite carries host:port itself.
-                            OutlinedTextField(
-                                value = invite,
-                                onValueChange = { invite = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text("full invite") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                            // The laptop's LAN pair beacon resolves the
+                            // typed code to its `host:port` — a serverless
+                            // family still needs no server field and no
+                            // untypeable full-invite blob.
+                            ShortCodeField(
+                                code = code,
+                                onCode = { code = it },
                             )
-                            Spacer(Modifier.height(4.dp))
-                            Button(
-                                onClick = { runPairing(invite.trim()) },
-                                enabled = invite.isNotBlank(),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("pair") }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "the laptop prints the code under the QR",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         } else if (inviteMode) {
                             OutlinedTextField(
                                 value = invite,
@@ -360,7 +372,7 @@ fun PairingScreen() {
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                             )
-                            TextButton(
+                            OutlinedButton(
                                 onClick = { inviteMode = false },
                                 modifier = Modifier.align(Alignment.End),
                             ) { Text("have a short code?") }
@@ -379,18 +391,24 @@ fun PairingScreen() {
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             )
-                            TextButton(
+                            OutlinedButton(
                                 onClick = { inviteMode = true },
                                 modifier = Modifier.align(Alignment.End),
                             ) { Text("paste a full invite instead") }
                         }
-                        Spacer(Modifier.height(4.dp))
-                        val ready = if (inviteMode) invite.isNotBlank()
-                        else codeReady && server.isNotBlank()
+                        Spacer(Modifier.height(8.dp))
+                        val ready = when {
+                            kind == "serverless" -> codeReady
+                            inviteMode -> invite.isNotBlank()
+                            else -> codeReady && server.isNotBlank()
+                        }
                         Button(
                             onClick = {
-                                if (inviteMode) runPairing(invite.trim())
-                                else runPairing("$code", short = true)
+                                when {
+                                    kind == "serverless" -> runPairing("$code", byCode = true)
+                                    inviteMode -> runPairing(invite.trim())
+                                    else -> runPairing("$code", short = true)
+                                }
                             },
                             enabled = ready,
                             modifier = Modifier.fillMaxWidth(),
@@ -412,7 +430,7 @@ fun PairingScreen() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    TextButton(
+                    OutlinedButton(
                         onClick = {
                             kind = null
                             lanOnly = false

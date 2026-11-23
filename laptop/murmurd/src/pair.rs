@@ -24,7 +24,7 @@ use murmur_proto::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as Ws;
@@ -32,6 +32,8 @@ use tracing::{info, warn};
 
 /// Joiner gives up if the inviter doesn't confirm within this window.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a typed short code waits for its LAN pair beacon.
+const BEACON_WAIT: Duration = Duration::from_secs(120);
 
 // ---------- inviter side ----------
 
@@ -178,6 +180,72 @@ async fn serve_pair(shared: Arc<Shared>, s: TcpStream) {
     }
 }
 
+/// While a serverless invite lives it advertises itself on the LAN —
+/// the only way a *typed* short code can find an inviter with no relay
+/// to resolve the session. Cleartext JSON datagrams on the beacon port;
+/// they carry no secrets, worst case a stranger pairs in and gets
+/// SAS-rejected — same threat model as the invite QR itself.
+async fn pair_beacon(session: DeviceId, addr: String) {
+    let Ok(udp) = UdpSocket::bind("0.0.0.0:0").await else {
+        return;
+    };
+    let _ = udp.set_broadcast(true);
+    let payload = serde_json::json!({
+        "t": "murmur-pair",
+        "s": session.to_string(),
+        "a": addr,
+    })
+    .to_string();
+    let deadline = Instant::now() + PAIR_TTL;
+    while Instant::now() < deadline {
+        let _ = udp
+            .send_to(payload.as_bytes(), ("255.255.255.255", crate::lan::BEACON_PORT))
+            .await;
+        for b in crate::lan::broadcast_addrs() {
+            let _ = udp
+                .send_to(payload.as_bytes(), (b, crate::lan::BEACON_PORT))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+}
+
+/// Resolve a typed short code to a `host:port` by listening for the
+/// inviter's pair beacon — the LAN-side stand-in for the relay's
+/// `PairOpen` session lookup.
+async fn pair_beacon_wait(session: DeviceId) -> anyhow::Result<String> {
+    // SO_REUSEADDR: a running daemon already holds the beacon port.
+    let s2 = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    s2.set_reuse_address(true)?;
+    s2.set_broadcast(true)?;
+    s2.bind(&format!("0.0.0.0:{}", crate::lan::BEACON_PORT)
+        .parse::<std::net::SocketAddr>()?
+        .into())?;
+    s2.set_nonblocking(true)?;
+    let udp = UdpSocket::from_std(s2.into())?;
+    let want = session.to_string();
+    let mut buf = [0u8; 2048];
+    tokio::time::timeout(BEACON_WAIT, async {
+        loop {
+            let (n, _) = udp.recv_from(&mut buf).await?;
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) else {
+                continue;
+            };
+            if v["t"] == "murmur-pair" && v["s"] == want {
+                if let Some(a) = v["a"].as_str() {
+                    return anyhow::Ok(a.to_owned());
+                }
+            }
+        }
+    })
+    .await
+    .context("no invite answering on this lan — is `murmurctl invite` running there?")?
+}
+
 impl Shared {
     /// `murmurctl invite`: mint a session, keep our DH key, hand back the
     /// code the new device feeds to `murmurd pair --code` (or scans as
@@ -209,11 +277,14 @@ impl Shared {
         // Register the session with the server so joiners can reach us
         // without knowing our device id (short-code path). Queued if we
         // happen to be offline — flushed on reconnect. Serverless has
-        // no server — the direct listener is the rendezvous.
+        // no server — the direct listener is the rendezvous, and the
+        // pair beacon makes a typed short code resolvable on the LAN.
         if self.cfg.family_kind == FamilyKind::Serverful {
             let _ = self.send_control(&Control::PairOpen {
                 session: invite.session,
             });
+        } else {
+            tokio::spawn(pair_beacon(invite.session, invite.server_url.clone()));
         }
         Ok(invite)
     }
@@ -348,19 +419,19 @@ pub struct Paired {
 
 /// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
 /// session, exchange pubkeys, show the SAS, wait for `PairData`.
-/// A full invite carries server+session; a short code derives the
-/// session and needs `--server`.
+/// A full invite carries the endpoint; a short code derives the
+/// session and resolves it via `--server` or a LAN pair beacon.
 pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Result<Paired> {
     let (session, server_url, kind) = match Invite::decode(code) {
         Ok(inv) => (inv.session, inv.server_url, inv.kind),
         Err(_) => {
-            // Not a bundle — try the typeable XXXX-XXXX form. Short
-            // codes exist only for relay families: in a serverless
-            // one the rendezvous is the invite's own `host:port`.
+            // Not a bundle — the typeable XXXX-XXXX form. With --server
+            // it's a relay-family join; bare, it means "find the inviter
+            // on the LAN" — the serverless short-code path.
             let session = DeviceId::from_code(code.trim());
-            let server_url = server
-                .map(str::to_owned)
-                .context("short invite codes need --server ws(s)://…")?;
+            let Some(server_url) = server.map(str::to_owned) else {
+                return join_lan_code(session, name).await;
+            };
             (session, server_url, FamilyKind::Serverful)
         }
     };
@@ -494,6 +565,16 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
     })
     .await
     .context("pairing timed out — the inviter didn't confirm in time")?
+}
+
+/// `murmurd pair --code XXXX-XXXX` with no server: the inviter's LAN
+/// pair beacon tells us where to dial — the serverless stand-in for
+/// the relay's session lookup.
+async fn join_lan_code(session: DeviceId, name: &str) -> anyhow::Result<Paired> {
+    eprintln!("  › listening for a `{session}` invite on the lan…");
+    let addr = pair_beacon_wait(session).await?;
+    eprintln!("  ✓ invite answered at {addr}");
+    join_direct(&addr, session, name).await
 }
 
 /// Joiner side of a serverless invite: `addr` is the inviter's

@@ -355,14 +355,20 @@ fn cmd_invite() -> anyhow::Result<()> {
             );
         } else {
             // Serverless: `server` carries `host:port` of the one-shot
-            // listener. No relay exists to rendezvous on, so the short
-            // code can't locate us — the full invite (QR) is the way in.
-            // Another laptop can't scan a QR, so the literal string
-            // goes on the terminal too.
+            // listener, and a LAN pair beacon makes the short code
+            // resolvable without a relay. The full invite goes on the
+            // terminal too — a laptop can't scan a QR.
+            println!("  code      {}", p.bold(short));
             println!("  direct    {}", server);
             println!("  {}", p.dim("lan only — expires in 10 minutes"));
-            println!("\n  {}", p.dim("phone:  open murmur → scan the QR"));
-            println!("  {}", p.dim("laptop: murmurd pair --code '<invite>'"));
+            println!(
+                "\n  {}",
+                p.dim("phone:  open murmur → scan the QR · or enter the code")
+            );
+            println!(
+                "  {}",
+                p.dim(format!("laptop: murmurd pair --code {short}"))
+            );
             println!("\n  {}", p.dim("invite:"));
             println!("  {}", code);
         }

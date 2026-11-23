@@ -27,7 +27,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-const BEACON_PORT: u16 = 17893;
+pub(crate) const BEACON_PORT: u16 = 17893;
 const LINK_PORT: u16 = 17894;
 const BEACON_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
@@ -108,7 +108,7 @@ async fn beacon_send(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
 
 /// Directed broadcast addresses of all non-loopback IPv4 interfaces —
 /// empty on any error (the limited broadcast still goes out).
-fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
+pub(crate) fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
     };
