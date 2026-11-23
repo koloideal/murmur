@@ -135,7 +135,9 @@ fun StatusCard() {
                     Button(onClick = { secrets.clear() }) { Text("pair again") }
                     return@Column
                 }
-                if (status.running && status.relay == Relay.State.OFFLINE) {
+                if (status.running && status.relay == Relay.State.OFFLINE &&
+                    status.familyKind != "serverless"
+                ) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "can't reach the relay — is it running?",
@@ -144,7 +146,9 @@ fun StatusCard() {
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                status.familyName?.let { StatusRow("family", it) }
+                if (status.familyKind != "serverless") {
+                    status.familyName?.let { StatusRow("family", it) }
+                }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -161,7 +165,11 @@ fun StatusCard() {
                 StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
                 if (status.familyKind == "serverless") {
                     // No server exists anywhere in this family's world.
-                    StatusRow("family", "serverless · lan only")
+                    StatusRow(
+                        "family",
+                        listOfNotNull(status.familyName, "serverless · lan only")
+                            .joinToString(" · "),
+                    )
                 } else {
                     StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
                     if (secrets.serverUrl.startsWith("ws://")) {
