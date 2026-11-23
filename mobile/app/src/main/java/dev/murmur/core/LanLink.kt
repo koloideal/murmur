@@ -127,15 +127,33 @@ class LanLink(
         }
     }
 
-    /** First non-loopback IPv4 — the address peers dial us on. */
-    private fun lanAddr(): String? =
+    /** Up, non-loopback IPv4s as (address, hasBroadcast). */
+    private fun lanIfAddrs(): List<Pair<String, Boolean>> =
         runCatching {
             java.net.NetworkInterface.getNetworkInterfaces().asSequence()
                 .filter { it.isUp && !it.isLoopback }
                 .flatMap { it.interfaceAddresses.asSequence() }
-                .mapNotNull { it.address.hostAddress }
-                .firstOrNull { '.' in it && !it.startsWith("169.254.") }
-        }.getOrNull()
+                .mapNotNull { ia ->
+                    ia.address.hostAddress
+                        ?.takeIf { '.' in it && !it.startsWith("169.254.") }
+                        ?.let { it to (ia.broadcast != null) }
+                }
+                .toList()
+        }.getOrElse { emptyList() }
+
+    /** The address peers dial us on — prefer a broadcast-capable (LAN)
+     *  interface so a cellular/VPN point-to-point address is never
+     *  advertised while Wi-Fi is up. */
+    private fun lanAddr(): String? =
+        (lanIfAddrs().firstOrNull { it.second } ?: lanIfAddrs().firstOrNull())?.first
+
+    /** Called on connectivity changes — if the interface the live link
+     *  arrived on went away (Wi-Fi off), the link is already dead;
+     *  drop it now instead of waiting for a write error. */
+    fun onNetworkChanged() {
+        val local = linkSock?.localAddress?.hostAddress ?: return
+        if (lanIfAddrs().none { it.first == local }) drop()
+    }
 
     /** Subnet-directed broadcast target per up non-loopback interface —
      *  e.g. 192.168.31.255 for wlan0. Java hands us the address directly;
@@ -169,6 +187,10 @@ class LanLink(
     }
 
     private fun serveLink(s: Socket) {
+        // The peer's own broadcasts reach the link every few seconds;
+        // longer silence = dead transport (Wi-Fi off kills the route
+        // without RST, and TCP alone would idle for minutes).
+        s.soTimeout = LINK_IDLE_MS
         val r = s.getInputStream().bufferedReader()
         while (true) {
             val line = runCatching { r.readLine() }.getOrNull() ?: break
@@ -198,6 +220,7 @@ class LanLink(
         const val BEACON_PORT = 17893
         const val LINK_PORT = 17894
         const val BEACON_MS = 4000L
+        const val LINK_IDLE_MS = 20_000
         const val SOCKET_RETRY_MS = 2_000L
         val LIMITED_BCAST = InetSocketAddress("255.255.255.255", BEACON_PORT)
     }

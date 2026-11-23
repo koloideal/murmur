@@ -22,6 +22,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import dev.murmur.MurmurService
 import dev.murmur.core.Secrets
@@ -75,11 +78,21 @@ fun DevicesCard() {
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            when {
-                                !d.online -> "offline"
-                                d.device_id == status.lanPeer -> "⇄ lan"
-                                d.rtt_ms != null -> "${d.rtt_ms} ms"
-                                else -> "online"
+                            buildAnnotatedString {
+                                when {
+                                    !d.online -> append("offline")
+                                    else -> {
+                                        append(d.rtt_ms?.let { "$it ms" } ?: "online")
+                                        withStyle(
+                                            SpanStyle(color = MaterialTheme.colorScheme.outline),
+                                        ) {
+                                            append(
+                                                if (d.device_id == status.lanPeer) " · on lan"
+                                                else " · on wan",
+                                            )
+                                        }
+                                    }
+                                }
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

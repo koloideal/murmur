@@ -75,10 +75,10 @@ pub struct Shared {
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
     pub lan_dial: mpsc::UnboundedSender<(DeviceId, std::net::IpAddr, u16)>,
-    /// Recent (sender, seq) pairs — broadcasts intentionally ride both
+    /// Inbound dedup bookkeeping — broadcasts intentionally ride both
     /// LAN and relay, so the second copy must collapse here instead of
     /// duplicating notifications/clips at the features.
-    seen: Mutex<(std::collections::HashSet<(DeviceId, u64)>, std::collections::VecDeque<(DeviceId, u64)>)>,
+    seen: Mutex<Seen>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
     pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
@@ -121,7 +121,7 @@ impl Shared {
             out_lo,
             lan: Mutex::new(None),
             lan_dial,
-            seen: Mutex::new((std::collections::HashSet::new(), std::collections::VecDeque::new())),
+            seen: Mutex::new(Seen::default()),
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
@@ -183,15 +183,34 @@ impl Shared {
 
     /// True on first sight of this envelope — call only *after* a
     /// successful `open()` so forged LAN frames can't poison the table.
+    ///
+    /// `seq` restarts at 1 on every sender restart, so "seen before"
+    /// can't be decided by the window alone: a frame landing far below
+    /// the sender's high-water mark is a fresh post-restart frame, and
+    /// the stored history would swallow it. Gap detection resets the
+    /// sender's window; stragglers just above/below the mark still
+    /// dedupe correctly.
     pub fn dedupe(&self, from: DeviceId, seq: u64) -> bool {
+        /// This far below the high-water mark can't be an in-flight
+        /// duplicate — the LAN early copy is never that late.
+        const RESTART_GAP: u64 = 64;
         let mut g = self.seen.lock().unwrap();
-        if !g.0.insert((from, seq)) {
+        let last = g.last.get(&from).copied().unwrap_or(0);
+        let last = if seq <= last && last - seq > RESTART_GAP {
+            g.set.retain(|(f, _)| *f != from);
+            g.order.retain(|(f, _)| *f != from);
+            seq
+        } else {
+            last.max(seq)
+        };
+        g.last.insert(from, last);
+        if !g.set.insert((from, seq)) {
             return false;
         }
-        g.1.push_back((from, seq));
-        if g.1.len() > 4096 {
-            if let Some(old) = g.1.pop_front() {
-                g.0.remove(&old);
+        g.order.push_back((from, seq));
+        if g.order.len() > 4096 {
+            if let Some(old) = g.order.pop_front() {
+                g.set.remove(&old);
             }
         }
         true
@@ -281,10 +300,22 @@ fn replaceable_slot(to: &Route, msg: &Message) -> Option<u64> {
         Message::Presence { .. } => 1,
         Message::MediaState { .. } => 2,
         Message::Clipboard { .. } => 3,
+        // Stale beacons queued during a relay outage coalesce to the
+        // freshest one on reconnect.
+        Message::LanBeacon { .. } => 4,
         _ => return None,
     };
     let mut h = DefaultHasher::new();
     tag.hash(&mut h);
     format!("{to:?}").hash(&mut h);
     Some(h.finish())
+}
+
+/// Dedup state for [`Shared::dedupe`]: per-sender high-water marks plus
+/// a bounded FIFO window of recent (sender, seq) pairs.
+#[derive(Default)]
+struct Seen {
+    last: HashMap<DeviceId, u64>,
+    set: std::collections::HashSet<(DeviceId, u64)>,
+    order: std::collections::VecDeque<(DeviceId, u64)>,
 }

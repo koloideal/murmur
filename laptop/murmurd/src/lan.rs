@@ -107,6 +107,7 @@ fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
     };
     ifaces
         .iter()
+        .filter(|i| physical(&i.name))
         .filter_map(|i| match &i.addr {
             if_addrs::IfAddr::V4(v4) if !v4.is_loopback() => v4.broadcast,
             _ => None,
@@ -114,12 +115,23 @@ fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
         .collect()
 }
 
-/// First non-loopback, non-link-local IPv4 — the address we advertise
-/// in beacons for peers to dial back to.
+/// Tunnel/overlay interfaces are not "the LAN" — a peer's advertised
+/// 10.x CGNAT address must not dial into tun0, and a VPN address is
+/// never what the LAN peer can reach us on.
+fn physical(name: &str) -> bool {
+    const TUNNELS: &[&str] = &[
+        "tun", "tap", "wg", "ppp", "ippp", "tailscale", "ts-", "zt", "nord", "proton",
+    ];
+    !TUNNELS.iter().any(|p| name.starts_with(p))
+}
+
+/// First non-loopback, non-link-local IPv4 on a physical interface —
+/// the address we advertise in beacons for peers to dial back to.
 fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
     if_addrs::get_if_addrs()
         .ok()?
         .iter()
+        .filter(|i| physical(&i.name))
         .find_map(|i| match &i.addr {
             if_addrs::IfAddr::V4(v4)
                 if !v4.is_loopback() && !v4.ip.is_link_local() =>
@@ -130,14 +142,15 @@ fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
         })
 }
 
-/// Is `ip` inside any local interface's IPv4 subnet? Relay beacons are
-/// global — this keeps the dial strictly LAN-scoped.
+/// Is `ip` inside any *physical* interface's IPv4 subnet? Relay
+/// beacons are global — this keeps the dial strictly LAN-scoped and
+/// keeps tunnel subnets from matching an unreachable address.
 fn in_local_subnet(ip: std::net::IpAddr) -> bool {
     let std::net::IpAddr::V4(ip) = ip else { return false };
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return false;
     };
-    ifaces.iter().any(|i| match &i.addr {
+    ifaces.iter().filter(|i| physical(&i.name)).any(|i| match &i.addr {
         if_addrs::IfAddr::V4(v4) if !v4.is_loopback() => {
             let mask = u32::from(v4.netmask);
             (u32::from(v4.ip) & mask) == (u32::from(ip) & mask)
@@ -190,7 +203,9 @@ async fn dial_loop(
 ) {
     let mut last_dial = std::collections::HashMap::new();
     while let Some((peer, ip, port)) = rx.recv().await {
-        if shared.lan_peer() == Some(peer) || !in_local_subnet(ip) {
+        // One link at a time — dialing a second peer while linked
+        // just builds never-adopted zombie sockets on both ends.
+        if shared.lan_peer().is_some() || !in_local_subnet(ip) {
             continue;
         }
         let now = std::time::Instant::now();
@@ -228,6 +243,12 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
     }
 }
 
+/// How long a fresh link may stay unvalidated — producing no frame
+/// that opens with the family key — before it is dropped. A genuine
+/// peer answers within seconds; a dead end (stale DHCP address, a
+/// subnet collision into a VPN) never does.
+const VERIFY_AFTER: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// Split the socket: writer drains the per-link envelope queue; reader
 /// opens + dispatches. Either ending tears the link down.
 ///
@@ -235,6 +256,11 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
 /// the address was already authenticated, so waiting for the peer's
 /// first frame would deadlock (each side waits for the other to send).
 /// An accepted link waits for an openable frame like before.
+///
+/// Every link starts by sending a sealed beacon — the peer gets proof
+/// of family instantly instead of waiting for the next broadcast —
+/// and gets a verify timer: no openable frame within [VERIFY_AFTER]
+/// means the far end is not family, and the socket is a dead end.
 fn spawn_link(
     shared: &Arc<Shared>,
     hub: &Arc<Hub>,
@@ -242,6 +268,16 @@ fn spawn_link(
     adopt_as: Option<murmur_proto::DeviceId>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
+    // tokio::TcpStream has no try_clone — bounce through std to grab a
+    // shutdown handle for the verify timer.
+    let (probe, s) = match (|| -> std::io::Result<(std::net::TcpStream, TcpStream)> {
+        let std = s.into_std()?;
+        let probe = std.try_clone()?;
+        Ok((probe, TcpStream::from_std(std)?))
+    })() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
     let (r, w) = s.into_split();
     if let Some(peer) = adopt_as {
         let cur = shared.lan_peer();
@@ -252,8 +288,36 @@ fn spawn_link(
             shared.lan_adopt(peer, tx.clone());
         }
     }
+    if let Ok(env) = Envelope::seal(
+        shared.id,
+        Route::All,
+        shared.next_seq(),
+        &shared.keys.read().unwrap().current,
+        &Message::LanBeacon {
+            tcp_port: LINK_PORT,
+            kind: DeviceKind::Laptop,
+            lan_addr: lan_ipv4().map(|a| a.to_string()),
+        },
+    ) {
+        let _ = tx.send(env);
+    }
+    let validated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let probe = probe;
+        let shared = shared.clone();
+        let tx2 = tx.clone();
+        let validated = validated.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(VERIFY_AFTER).await;
+            if !validated.load(std::sync::atomic::Ordering::Relaxed) {
+                debug!("lan: unvalidated link — dropping");
+                let _ = probe.shutdown(std::net::Shutdown::Both);
+                shared.lan_clear(&tx2);
+            }
+        });
+    }
     tokio::spawn(link_writer(shared.clone(), w, rx, tx.clone()));
-    tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx));
+    tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx, validated));
 }
 
 async fn link_writer(
@@ -272,25 +336,33 @@ async fn link_writer(
     shared.lan_clear(&tx);
 }
 
+/// Max inbound silence before the link is presumed dead. The peer's
+/// own broadcasts (beacon cadence) reach the link every few seconds,
+/// so a longer gap means the transport died without RST — Wi-Fi off,
+/// subnet change — and TCP alone would sit quiet for minutes.
+const LINK_IDLE: std::time::Duration = std::time::Duration::from_secs(20);
+
 async fn link_reader(
     shared: Arc<Shared>,
     hub: Arc<Hub>,
     r: tokio::net::tcp::OwnedReadHalf,
     tx: mpsc::UnboundedSender<Envelope>,
+    validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut br = BufReader::new(r);
     let mut line = String::new();
     loop {
         line.clear();
-        match br.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
+        match tokio::time::timeout(LINK_IDLE, br.read_line(&mut line)).await {
+            Ok(Ok(n)) if n > 0 => {}
+            _ => break,
         }
         let Ok(env) = Envelope::from_json(line.trim_end()) else {
             continue;
         };
         match env.open(&shared.keys.read().unwrap().current) {
             Ok(msg) => {
+                validated.store(true, std::sync::atomic::Ordering::Relaxed);
                 // A frame that opens proves family membership → adopt
                 // the link for outbound traffic. Only an empty slot or
                 // the same peer re-adopts — a *different* peer must not

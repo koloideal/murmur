@@ -142,10 +142,13 @@ def status_text(up: bool, lan: bool = False) -> str:
         k = (math.sin(time.time() / 2.5 * math.tau) + 1) / 2
         dot = _hex(_mix(_mix(bg, fg, 0.55), green, k))
     word = "online" if up else "offline"
-    # ⇄ — direct LAN link with a peer; accent-colored, left of the word.
-    mark = f'<span foreground="{_hex(accent)}">⇄ </span>' if lan else ""
-    return (f'{mark}<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
-            f' <span foreground="{dot}">●</span>')
+    # "· on lan / · on wan" — dimmed, between the word and the dot.
+    link = ""
+    if up:
+        dim = _hex(_mix(bg, fg, 0.5))
+        link = f'<span foreground="{dim}"> · on {"lan" if lan else "wan"}</span>'
+    return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
+            f'{link} <span foreground="{dot}">●</span>')
 
 
 def status_tooltip(st: dict | None) -> str:

@@ -56,8 +56,12 @@ class MurmurService : Service() {
     private val presence = mutableMapOf<String, Pair<String, Long>>()
 
     /** Recently seen (sender, seq) — frames arrive over both the LAN
-     *  early-copy path and the relay; the duplicate collapses here. */
+     *  early-copy path and the relay; the duplicate collapses here.
+     *  [lastSeq] keeps the check correct across a peer restart: its
+     *  seq resets to 1, and a frame far below the high-water mark is
+     *  fresh, not a duplicate — so the sender's window resets. */
     private val seenSeq = LinkedHashSet<Pair<String, Long>>()
+    private val lastSeq = HashMap<String, Long>()
 
     /** ElapsedRealtimeNanos of the in-flight ListDevices — its reply RTT
      *  is the "ping" the dashboard shows. */
@@ -66,6 +70,12 @@ class MurmurService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             if (::relay.isInitialized) relay.kick()
+        }
+        override fun onLost(network: Network) {
+            // Wi-Fi leaving drops the LAN link's interface — kill the
+            // link now instead of letting a zombie linger until the
+            // next write error (the badge would lie meanwhile).
+            if (::lan.isInitialized) lan.onNetworkChanged()
         }
     }
 
@@ -314,6 +324,16 @@ class MurmurService : Service() {
         // relay — the second copy collapses here. Dedupe only after a
         // successful open so forged frames can't poison the table.
         synchronized(seenSeq) {
+            val last = lastSeq[env.from] ?: 0L
+            if (env.seq <= last && last - env.seq > RESTART_GAP) {
+                // seq jumped far backwards — the peer restarted; its
+                // stored entries predate the restart and would swallow
+                // fresh frames.
+                seenSeq.removeIf { it.first == env.from }
+                lastSeq[env.from] = env.seq
+            } else if (env.seq > last) {
+                lastSeq[env.from] = env.seq
+            }
             if (!seenSeq.add(env.from to env.seq)) return
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
@@ -377,6 +397,10 @@ class MurmurService : Service() {
         private const val DEVICES_POLL_MS = 12_000L
         private const val ACTION_PAUSE = "dev.murmur.PAUSE"
         private const val SEEN_MAX = 4096
+        /** This far below the sender's high-water seq can't be an
+         *  in-flight duplicate — the LAN early copy is never that late;
+         *  it's a peer restart (seq resets to 1). */
+        private const val RESTART_GAP = 64L
 
         /** The dashboard is on screen — gates the device-list poller. */
         val uiVisible = MutableStateFlow(false)
