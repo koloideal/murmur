@@ -29,6 +29,9 @@ use tracing::{debug, info, warn};
 
 pub(crate) const BEACON_PORT: u16 = 17893;
 const LINK_PORT: u16 = 17894;
+/// Serverless pairing listener — fixed like the link port so a host
+/// firewall has something stable to allow.
+pub(crate) const PAIR_PORT: u16 = 17895;
 const BEACON_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -122,14 +125,24 @@ pub(crate) fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
         .collect()
 }
 
-/// Tunnel/overlay interfaces are not "the LAN" — a peer's advertised
-/// 10.x CGNAT address must not dial into tun0, and a VPN address is
-/// never what the LAN peer can reach us on.
+/// Tunnel/overlay/bridge interfaces are not "the LAN" — a peer's
+/// advertised 10.x CGNAT address must not dial into tun0, and a dead
+/// virbr0 is never what the LAN peer can reach us on.
 fn physical(name: &str) -> bool {
-    const TUNNELS: &[&str] = &[
+    const VIRTUAL: &[&str] = &[
         "tun", "tap", "wg", "ppp", "ippp", "tailscale", "ts-", "zt", "nord", "proton",
+        "virbr", "docker", "br-", "veth", "vmnet", "lxc", "podman", "cni", "flannel",
+        "kube", "vboxnet",
     ];
-    !TUNNELS.iter().any(|p| name.starts_with(p))
+    if VIRTUAL.iter().any(|p| name.starts_with(p)) {
+        return false;
+    }
+    // A bridge that exists but is down still owns an address — and would
+    // win find_map ordering over the real interface.
+    match std::fs::read_to_string(format!("/sys/class/net/{name}/operstate")) {
+        Ok(s) => matches!(s.trim(), "up" | "unknown"),
+        Err(_) => true,
+    }
 }
 
 /// First non-loopback, non-link-local IPv4 on a physical interface —

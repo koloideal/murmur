@@ -356,8 +356,8 @@ fn cmd_invite() -> anyhow::Result<()> {
         } else {
             // Serverless: `server` carries `host:port` of the one-shot
             // listener, and a LAN pair beacon makes the short code
-            // resolvable without a relay. The full invite goes on the
-            // terminal too — a laptop can't scan a QR.
+            // resolvable without a relay — it's what a laptop feeds
+            // to `murmurd pair --code`.
             println!("  code      {}", p.bold(short));
             println!("  direct    {}", server);
             println!("  {}", p.dim("lan only — expires in 10 minutes"));
@@ -369,8 +369,6 @@ fn cmd_invite() -> anyhow::Result<()> {
                 "  {}",
                 p.dim(format!("laptop: murmurd pair --code {short}"))
             );
-            println!("\n  {}", p.dim("invite:"));
-            println!("  {}", code);
         }
     }
     if std::io::stdout().is_terminal() {
@@ -403,6 +401,10 @@ fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let mut i = 0;
+    println!(
+        "  {}",
+        p.dim("ctrl-c finishes later with `murmurctl pair`")
+    );
     let req = loop {
         // Spinner ticks every 120ms; the daemon is asked every 6th tick.
         if i % 6 == 0 {
@@ -423,7 +425,7 @@ fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
         print!(
             "\r  {} {}",
             p.yellow(frames[i % frames.len()]),
-            p.dim("waiting for the device to scan or type the code…  Ctrl-C = finish later with `murmurctl pair`"),
+            p.dim("waiting for the device to scan or type the code…"),
         );
         std::io::stdout().flush()?;
         i += 1;

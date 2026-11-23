@@ -258,12 +258,14 @@ impl Shared {
             FamilyKind::Serverless => {
                 let ip = crate::lan::lan_ipv4()
                     .context("serverless invite needs a LAN address to listen on")?;
-                let l = std::net::TcpListener::bind((ip, 0))?;
-                let port = l.local_addr()?.port();
+                // Fixed port — a host firewall can allow it once; only
+                // one live invite per machine.
+                let l = std::net::TcpListener::bind((ip, crate::lan::PAIR_PORT))
+                    .context("pair port busy — is another invite live?")?;
                 l.set_nonblocking(true)?;
                 let listener = tokio::net::TcpListener::from_std(l)?;
                 tokio::spawn(pair_listen(self.clone(), listener));
-                format!("{ip}:{port}")
+                format!("{ip}:{}", crate::lan::PAIR_PORT)
             }
         };
         let invite = Invite::new(url, self.id, self.cfg.family_kind);

@@ -192,6 +192,33 @@ else
     warn "unit install failed — the daemon can still run bare: murmurd"
 fi
 
+# ---- firewall: LAN discovery, links and pairing all need inbound —
+# 17893/udp beacons, 17894/tcp links, 17895/tcp serverless pairing.
+FW=""
+if systemctl is-active --quiet ufw 2>/dev/null; then FW=ufw
+elif systemctl is-active --quiet firewalld 2>/dev/null; then FW=firewalld
+fi
+if [ -n "$FW" ]; then
+    if have_tty && askyn y "$FW is active — open murmur's lan ports (17893/udp + 17894-17895/tcp)?"; then
+        case "$FW" in
+            ufw)
+                sudo ufw allow 17893/udp comment 'murmur lan discovery' \
+                    && sudo ufw allow 17894/tcp comment 'murmur lan link' \
+                    && sudo ufw allow 17895/tcp comment 'murmur pairing' \
+                    && ok "ufw: murmur ports open" \
+                    || warn "ufw rules failed — open 17893/udp + 17894-17895/tcp manually" ;;
+            firewalld)
+                sudo firewall-cmd --permanent --add-port=17893/udp \
+                    --add-port=17894/tcp --add-port=17895/tcp \
+                    && sudo firewall-cmd --reload \
+                    && ok "firewalld: murmur ports open" \
+                    || warn "firewalld rules failed — open 17893/udp + 17894-17895/tcp manually" ;;
+        esac
+    else
+        warn "skipped — without them the phone can't reach this machine on the lan"
+    fi
+fi
+
 # ---- after a successful pair/init: daemon up + framed success + phone hint
 # $1 = box title (default "you're in the family")
 post_pair() {
