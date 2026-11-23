@@ -71,6 +71,10 @@ pub struct Shared {
     pub out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
     /// Live LAN link — `Route::Device(peer)` unicast skips the relay.
     lan: Mutex<Option<(DeviceId, mpsc::UnboundedSender<Envelope>)>>,
+    /// Dial requests for the LAN fast-path — fed by UDP beacons and
+    /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
+    /// subnet-checks and connects.
+    pub lan_dial: mpsc::UnboundedSender<(DeviceId, std::net::IpAddr, u16)>,
     /// Recent (sender, seq) pairs — broadcasts intentionally ride both
     /// LAN and relay, so the second copy must collapse here instead of
     /// duplicating notifications/clips at the features.
@@ -97,6 +101,7 @@ impl Shared {
         mut secrets: Secrets,
         out: mpsc::UnboundedSender<Envelope>,
         out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
+        lan_dial: mpsc::UnboundedSender<(DeviceId, std::net::IpAddr, u16)>,
     ) -> anyhow::Result<Self> {
         let (ctl_events, _) = broadcast::channel(64);
         let identity = crate::keyring::load_identity(&mut secrets)?;
@@ -115,6 +120,7 @@ impl Shared {
             out,
             out_lo,
             lan: Mutex::new(None),
+            lan_dial,
             seen: Mutex::new((std::collections::HashSet::new(), std::collections::VecDeque::new())),
             ctl_events,
             presence: Mutex::new(HashMap::new()),

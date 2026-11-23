@@ -35,7 +35,11 @@ const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// The dial direction for this node: laptops dial phones.
 const PEER_KIND: DeviceKind = DeviceKind::Phone;
 
-pub async fn run(shared: Arc<Shared>, hub: Arc<Hub>) -> anyhow::Result<()> {
+pub async fn run(
+    shared: Arc<Shared>,
+    hub: Arc<Hub>,
+    dial_rx: mpsc::UnboundedReceiver<(murmur_proto::DeviceId, std::net::IpAddr, u16)>,
+) -> anyhow::Result<()> {
     // A taken port must not kill the daemon — the relay stays the
     // control plane; LAN is a bonus fast-path only.
     let listener = match TcpListener::bind(("0.0.0.0", LINK_PORT)).await {
@@ -52,10 +56,11 @@ pub async fn run(shared: Arc<Shared>, hub: Arc<Hub>) -> anyhow::Result<()> {
             info!("lan: beacon :{BEACON_PORT}, link :{LINK_PORT}");
             let udp = Arc::new(udp);
             tokio::spawn(beacon_send(shared.clone(), udp.clone()));
-            tokio::spawn(beacon_recv(shared.clone(), hub.clone(), udp));
+            tokio::spawn(beacon_recv(shared.clone(), udp));
         }
         Err(e) => warn!("lan: beacon off ({e}); inbound links still accepted"),
     }
+    tokio::spawn(dial_loop(shared.clone(), hub.clone(), dial_rx));
     accept_loop(&shared, &hub, &listener).await
 }
 
@@ -70,21 +75,27 @@ async fn beacon_send(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
     let mut tick = tokio::time::interval(BEACON_EVERY);
     loop {
         tick.tick().await;
+        let beacon = Message::LanBeacon {
+            tcp_port: LINK_PORT,
+            kind: DeviceKind::Laptop,
+            lan_addr: lan_ipv4().map(|a| a.to_string()),
+        };
         let env = Envelope::seal(
             shared.id,
             Route::All,
             shared.next_seq(),
             &shared.keys.read().unwrap().current,
-            &Message::LanBeacon {
-                tcp_port: LINK_PORT,
-                kind: DeviceKind::Laptop,
-            },
+            &beacon,
         )?;
         let bytes = env.to_json().into_bytes();
         let _ = udp.send_to(&bytes, ("255.255.255.255", BEACON_PORT)).await;
         for bcast in broadcast_addrs() {
             let _ = udp.send_to(&bytes, (bcast, BEACON_PORT)).await;
         }
+        // The same beacon rides the relay — APs frequently suppress
+        // client broadcast entirely, and a relay copy makes discovery
+        // independent of L2 quirks.
+        let _ = shared.send(Route::All, &beacon);
     }
 }
 
@@ -103,11 +114,42 @@ fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
         .collect()
 }
 
+/// First non-loopback, non-link-local IPv4 — the address we advertise
+/// in beacons for peers to dial back to.
+fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .ok()?
+        .iter()
+        .find_map(|i| match &i.addr {
+            if_addrs::IfAddr::V4(v4)
+                if !v4.is_loopback() && !v4.ip.is_link_local() =>
+            {
+                Some(v4.ip)
+            }
+            _ => None,
+        })
+}
+
+/// Is `ip` inside any local interface's IPv4 subnet? Relay beacons are
+/// global — this keeps the dial strictly LAN-scoped.
+fn in_local_subnet(ip: std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(ip) = ip else { return false };
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return false;
+    };
+    ifaces.iter().any(|i| match &i.addr {
+        if_addrs::IfAddr::V4(v4) if !v4.is_loopback() => {
+            let mask = u32::from(v4.netmask);
+            (u32::from(v4.ip) & mask) == (u32::from(ip) & mask)
+        }
+        _ => false,
+    })
+}
+
 /// UDP → decode → open (auth) → dial. A beacon that can't be opened is
 /// dropped — a forged broadcast just doesn't go anywhere. A transient
 /// socket error must not kill discovery — keep listening.
-async fn beacon_recv(shared: Arc<Shared>, hub: Arc<Hub>, udp: Arc<UdpSocket>) -> anyhow::Result<()> {
-    let mut last_dial = std::collections::HashMap::new();
+async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let (n, src) = match udp.recv_from(&mut buf).await {
@@ -124,7 +166,7 @@ async fn beacon_recv(shared: Arc<Shared>, hub: Arc<Hub>, udp: Arc<UdpSocket>) ->
         if env.from == shared.id {
             continue;
         }
-        let Ok(Message::LanBeacon { tcp_port, kind }) =
+        let Ok(Message::LanBeacon { tcp_port, kind, .. }) =
             env.open(&shared.keys.read().unwrap().current)
         else {
             continue;
@@ -132,20 +174,35 @@ async fn beacon_recv(shared: Arc<Shared>, hub: Arc<Hub>, udp: Arc<UdpSocket>) ->
         if kind != PEER_KIND {
             continue;
         }
-        if shared.lan_peer() == Some(env.from) {
-            continue; // already linked to this peer
-        }
-        // Rate-limit dials per peer — beacons repeat every few seconds.
-        let now = std::time::Instant::now();
-        if last_dial.get(&env.from).is_some_and(|t| now - *t < DIAL_EVERY) {
+        let _ = shared.lan_dial.send((env.from, src.ip(), tcp_port));
+    }
+}
+
+/// One dialer for both discovery paths — UDP beacons and relay-delivered
+/// `LanBeacon`s end up here. A request is skipped when the peer is
+/// already linked or its address isn't in any local subnet (a relay
+/// beacon can legitimately arrive from another network — that's not
+/// a LAN peer for us). Per-peer rate-limit covers beacon bursts.
+async fn dial_loop(
+    shared: Arc<Shared>,
+    hub: Arc<Hub>,
+    mut rx: mpsc::UnboundedReceiver<(murmur_proto::DeviceId, std::net::IpAddr, u16)>,
+) {
+    let mut last_dial = std::collections::HashMap::new();
+    while let Some((peer, ip, port)) = rx.recv().await {
+        if shared.lan_peer() == Some(peer) || !in_local_subnet(ip) {
             continue;
         }
-        last_dial.insert(env.from, now);
-        let addr = SocketAddr::new(src.ip(), tcp_port);
+        let now = std::time::Instant::now();
+        if last_dial.get(&peer).is_some_and(|t| now - *t < DIAL_EVERY) {
+            continue;
+        }
+        last_dial.insert(peer, now);
+        let addr = SocketAddr::new(ip, port);
         match TcpStream::connect(addr).await {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
-                info!("lan: dialed {addr} ({})", env.from);
+                info!("lan: dialed {addr} ({peer})");
                 spawn_link(&shared, &hub, s);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),

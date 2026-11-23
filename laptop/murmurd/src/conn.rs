@@ -135,6 +135,19 @@ async fn connect_once(
                                     continue;
                                 }
                                 debug!("{} → {msg:?}", env.from);
+                                // A beacon that arrived via the relay
+                                // is still a dial hint — it carries the
+                                // sender's LAN address explicitly.
+                                if let murmur_proto::Message::LanBeacon {
+                                    tcp_port,
+                                    kind: murmur_proto::DeviceKind::Phone,
+                                    lan_addr: Some(ip),
+                                } = &msg
+                                {
+                                    if let Ok(ip) = ip.parse() {
+                                        let _ = shared.lan_dial.send((env.from, ip, *tcp_port));
+                                    }
+                                }
                                 hub.dispatch(env.from, &msg);
                             }
                             // An old key opening it = the sender missed a

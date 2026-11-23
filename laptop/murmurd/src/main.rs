@@ -87,7 +87,8 @@ async fn main() -> anyhow::Result<()> {
     // WS — hi (commands/control) always wins over lo (replaceable state).
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let (lo_tx, lo_rx) = mpsc::unbounded_channel();
-    let shared = Arc::new(Shared::new(cfg, secrets, out_tx, lo_tx)?);
+    let (dial_tx, dial_rx) = mpsc::unbounded_channel();
+    let shared = Arc::new(Shared::new(cfg, secrets, out_tx, lo_tx, dial_tx)?);
 
     // Wire features: each gets its filtered inbox, hub gets the sinks.
     let mut hub = Hub::new();
@@ -98,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
     let hub = Arc::new(hub);
     tasks.push(Box::pin(conn::run(shared.clone(), hub.clone(), out_rx, lo_rx)));
-    tasks.push(Box::pin(lan::run(shared.clone(), hub.clone())));
+    tasks.push(Box::pin(lan::run(shared.clone(), hub.clone(), dial_rx)));
 
     // All tasks are daemons; first error shuts everything down.
     futures_util::future::try_join_all(tasks).await?;

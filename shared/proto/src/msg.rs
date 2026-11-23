@@ -80,11 +80,19 @@ pub enum Message {
     /// only from frames that opened under the *current* family key.
     Identity { pub_b64: String, kind: DeviceKind },
 
-    /// LAN fast-path beacon: sealed envelope over UDP broadcast. Only a
-    /// family member can seal a frame that opens — the payload carries
-    /// just the sender's TCP listener port. `kind` lets receivers skip
+    /// LAN fast-path beacon: sealed envelope over UDP broadcast *and*
+    /// periodically via the relay. Only a family member can seal a
+    /// frame that opens — the payload carries just the sender's TCP
+    /// listener port and LAN address. `kind` lets receivers skip
     /// dialing non-peers of interest (e.g. laptops dial phones only).
-    LanBeacon { tcp_port: u16, kind: DeviceKind },
+    /// `lan_addr` is required for the relay path — a relay-delivered
+    /// beacon carries no source IP to dial back to.
+    LanBeacon {
+        tcp_port: u16,
+        kind: DeviceKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lan_addr: Option<String>,
+    },
 
     /// New family key after a revocation (or `murmurctl rotate`), sealed
     /// once per remaining member to its identity key — see

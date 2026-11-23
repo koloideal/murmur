@@ -130,10 +130,12 @@ sealed class Msg {
     @SerialName("identity")
     data class Identity(val pub_b64: String, val kind: String) : Msg()
 
-    /** Sealed UDP beacon — the envelope itself is the auth. */
+    /** Sealed beacon — rides UDP broadcast and the relay; the envelope
+     *  itself is the auth. `lan_addr` lets relay receivers dial back —
+     *  a relay envelope carries no usable source IP. */
     @Serializable
     @SerialName("lan_beacon")
-    data class LanBeacon(val tcp_port: Int, val kind: String) : Msg()
+    data class LanBeacon(val tcp_port: Int, val kind: String, val lan_addr: String? = null) : Msg()
 
     /** New family key, sealed once per member to its identity key. */
     @Serializable

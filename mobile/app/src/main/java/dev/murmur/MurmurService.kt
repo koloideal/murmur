@@ -102,7 +102,7 @@ class MurmurService : Service() {
         )
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
-        lan = LanLink(secrets.deviceId!!, key, scope) { onEnvelope(it) }
+        lan = LanLink(secrets.deviceId!!, key, scope, { onEnvelope(it) }) { send(it) }
         status.value = Status(provisioned = true, running = true)
         relay.start()
         lan.start()

@@ -28,6 +28,10 @@ class LanLink(
     private val key: FamilyKey,
     private val scope: CoroutineScope,
     private val onMsg: (Envelope) -> Unit,
+    /** Push a sealed message onto the relay — the beacon doubles as
+     *  relay-borne discovery because many APs suppress client
+     *  broadcast entirely. */
+    private val sendRelay: (Msg) -> Unit = {},
 ) {
     private val peer = AtomicReference<String?>(null)
 
@@ -98,9 +102,11 @@ class LanLink(
         // Limited broadcast PLUS every interface's directed broadcast:
         // on Android a raw 255.255.255.255 send can be routed to the
         // wrong (e.g. cellular) interface, while the subnet-directed
-        // address follows the interface's own route.
+        // address follows the interface's own route. The same beacon
+        // also rides the relay — many APs drop client broadcast
+        // outright, so L2-independent discovery is the reliable path.
         while (true) {
-            val msg = Msg.LanBeacon(LINK_PORT, "phone")
+            val msg = Msg.LanBeacon(LINK_PORT, "phone", lanAddr())
             val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
             val env = Envelope(
                 v = Envelope.VERSION,
@@ -116,9 +122,20 @@ class LanLink(
                     sock.send(DatagramPacket(bytes, bytes.size, dst))
                 }
             }
+            sendRelay(msg)
             delay(BEACON_MS)
         }
     }
+
+    /** First non-loopback IPv4 — the address peers dial us on. */
+    private fun lanAddr(): String? =
+        runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces().asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.interfaceAddresses.asSequence() }
+                .mapNotNull { it.address.hostAddress }
+                .firstOrNull { '.' in it && !it.startsWith("169.254.") }
+        }.getOrNull()
 
     /** Subnet-directed broadcast target per up non-loopback interface —
      *  e.g. 192.168.31.255 for wlan0. Java hands us the address directly;
