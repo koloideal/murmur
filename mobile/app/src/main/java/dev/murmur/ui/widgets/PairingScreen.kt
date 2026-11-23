@@ -30,6 +30,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -372,7 +373,7 @@ fun PairingScreen() {
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                             )
-                            OutlinedButton(
+                            TextButton(
                                 onClick = { inviteMode = false },
                                 modifier = Modifier.align(Alignment.End),
                             ) { Text("have a short code?") }
@@ -391,7 +392,7 @@ fun PairingScreen() {
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             )
-                            OutlinedButton(
+                            TextButton(
                                 onClick = { inviteMode = true },
                                 modifier = Modifier.align(Alignment.End),
                             ) { Text("paste a full invite instead") }
