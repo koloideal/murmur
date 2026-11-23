@@ -11,17 +11,18 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as Ws;
 use tracing::{debug, info, warn};
 
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(15);
 const REVOKED_RETRY: Duration = Duration::from_secs(1800);
 
 pub async fn run(
     shared: Arc<Shared>,
     hub: Arc<Hub>,
     mut out_rx: mpsc::UnboundedReceiver<murmur_proto::Envelope>,
+    mut lo_rx: mpsc::UnboundedReceiver<(u64, murmur_proto::Envelope)>,
 ) -> anyhow::Result<()> {
     let mut backoff = Duration::from_secs(1);
     loop {
-        match connect_once(&shared, &hub, &mut out_rx).await {
+        match connect_once(&shared, &hub, &mut out_rx, &mut lo_rx).await {
             Ok(()) => info!("connection closed cleanly"),
             Err(e) => warn!("connection lost: {e:#}"),
         }
@@ -42,6 +43,7 @@ async fn connect_once(
     shared: &Arc<Shared>,
     hub: &Hub,
     out_rx: &mut mpsc::UnboundedReceiver<murmur_proto::Envelope>,
+    lo_rx: &mut mpsc::UnboundedReceiver<(u64, murmur_proto::Envelope)>,
 ) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(&shared.cfg.server_url).await?;
     let (mut sink, mut source) = ws.split();
@@ -81,10 +83,26 @@ async fn connect_once(
 
     loop {
         tokio::select! {
-            // Outbound: sealed envelopes from features → WS.
+            // Commands/control always beat queued state — biased select
+            // polls the hi channel first.
+            biased;
             env = out_rx.recv() => {
                 let Some(env) = env else { return Ok(()) };
                 sink.send(Ws::Text(env.to_json().into())).await?;
+            }
+            // Replaceable state: drain the backlog and send only the
+            // newest frame per slot — a queue of stale snapshots
+            // collapses to one fresh send.
+            env = lo_rx.recv() => {
+                let Some((slot, env)) = env else { return Ok(()) };
+                let mut latest = std::collections::HashMap::new();
+                latest.insert(slot, env);
+                while let Ok((s, e)) = lo_rx.try_recv() {
+                    latest.insert(s, e);
+                }
+                for (_, e) in latest {
+                    sink.send(Ws::Text(e.to_json().into())).await?;
+                }
             }
             // Inbound: WS → decrypt → feature hub.
             msg = source.next() => {

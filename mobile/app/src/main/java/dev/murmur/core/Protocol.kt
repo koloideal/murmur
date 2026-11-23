@@ -91,16 +91,26 @@ sealed class Msg {
         val pos_ms: Long,
         val dur_ms: Long,
         val art_b64: String? = null,
+        /** Phone-reported shuffle (null = session doesn't expose it). */
+        val shuffle: Boolean? = null,
+        /** Phone-reported repeat: "none" | "track" | "playlist". */
+        val loop_status: String? = null,
         val ts: Long,
     ) : Msg()
 
     /**
      * Rust `MediaCommand { #[serde(flatten)] op: MediaOp }` — flat fields:
-     * `{"t":"media_command","op":"play"}` / `"op":"seek","pos_ms":N`.
+     * `{"t":"media_command","op":"play"}` / `"op":"seek","pos_ms":N` /
+     * `"op":"shuffle","on":B` / `"op":"loop","mode":"none|track|playlist"`.
      */
     @Serializable
     @SerialName("media_command")
-    data class MediaCommand(val op: String, val pos_ms: Long? = null) : Msg()
+    data class MediaCommand(
+        val op: String,
+        val pos_ms: Long? = null,
+        val on: Boolean? = null,
+        val mode: String? = null,
+    ) : Msg()
 
     @Serializable
     @SerialName("clipboard")
@@ -119,6 +129,11 @@ sealed class Msg {
     @Serializable
     @SerialName("identity")
     data class Identity(val pub_b64: String, val kind: String) : Msg()
+
+    /** Sealed UDP beacon — the envelope itself is the auth. */
+    @Serializable
+    @SerialName("lan_beacon")
+    data class LanBeacon(val tcp_port: Int, val kind: String) : Msg()
 
     /** New family key, sealed once per member to its identity key. */
     @Serializable

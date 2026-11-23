@@ -15,6 +15,7 @@ import dev.murmur.bridge.MediaBridge
 import dev.murmur.bridge.NotificationBridge
 import dev.murmur.core.Envelope
 import dev.murmur.core.FamilyKey
+import dev.murmur.core.LanLink
 import dev.murmur.core.Msg
 import dev.murmur.core.Relay
 import dev.murmur.core.Control
@@ -47,6 +48,7 @@ class MurmurService : Service() {
     private lateinit var secrets: Secrets
     private lateinit var key: FamilyKey
     private lateinit var relay: Relay
+    private lateinit var lan: LanLink
     private lateinit var media: MediaBridge
     private lateinit var identity: dev.murmur.core.IdentityKey
 
@@ -96,8 +98,10 @@ class MurmurService : Service() {
         )
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
+        lan = LanLink(secrets.deviceId!!, key, scope) { onEnvelope(it) }
         status.value = Status(provisioned = true, running = true)
         relay.start()
+        lan.start()
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
         scope.launch {
             relay.state.collect { st ->
@@ -233,7 +237,19 @@ class MurmurService : Service() {
     /** Seal and enqueue an E2E message. */
     fun send(msg: Msg, to: String = Envelope.ALL) {
         val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
-        relay.send(to, Base64.encodeToString(key.seal(pt), Base64.NO_WRAP), secrets.deviceId!!)
+        val env = Envelope(
+            v = Envelope.VERSION,
+            from = secrets.deviceId!!,
+            to = to,
+            seq = relay.nextSeq(),
+            payload = Base64.encodeToString(key.seal(pt), Base64.NO_WRAP),
+        )
+        // LAN unicast to the linked peer skips the relay entirely;
+        // broadcasts still ride the relay — the link just delivers an
+        // early copy to whoever is linked.
+        if (!lan.sendIfPeer(env.toJson(), to) || to == Envelope.ALL) {
+            relay.sendEnv(env)
+        }
     }
 
     /**

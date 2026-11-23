@@ -11,7 +11,7 @@
 use crate::feature::{Feature, FeatureCtx};
 use crate::state::Shared;
 use anyhow::Context;
-use murmur_proto::{DeviceId, MediaOp, Message, PlayStatus, Route};
+use murmur_proto::{DeviceId, LoopMode, MediaOp, Message, PlayStatus, Route};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -45,6 +45,10 @@ struct Media {
     dur_ms: u64,
     sampled: std::time::Instant,
     art_path: Option<std::path::PathBuf>,
+    /// Last known shuffle — written locally on `Shuffle` set, refreshed
+    /// from `MediaState` when the phone reports it.
+    shuffle: bool,
+    loop_status: LoopMode,
 }
 
 impl Default for Media {
@@ -60,6 +64,8 @@ impl Default for Media {
             dur_ms: 0,
             sampled: std::time::Instant::now(),
             art_path: None,
+            shuffle: false,
+            loop_status: LoopMode::None,
         }
     }
 }
@@ -202,8 +208,8 @@ impl Player {
         self.st.lock().await.position_ms() as i64 * 1000
     }
 
-    // Control surface: everything except volume/loop/shuffle maps to the
-    // phone. Rate/shuffle kept for MPRIS completeness, writes ignored.
+    // Control surface: everything except volume maps to the phone.
+    // Rate kept for MPRIS completeness, writes ignored.
     #[zbus(property)]
     async fn rate(&self) -> f64 {
         1.0
@@ -220,16 +226,41 @@ impl Player {
     }
     #[zbus(property)]
     async fn loop_status(&self) -> &str {
-        "None"
+        match self.st.lock().await.loop_status {
+            LoopMode::None => "None",
+            LoopMode::Track => "Track",
+            LoopMode::Playlist => "Playlist",
+        }
     }
     #[zbus(property)]
-    async fn set_loop_status(&self, _loop: String) {}
+    async fn set_loop_status(
+        &self,
+        mode: String,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) {
+        let m = match mode.as_str() {
+            "Track" => LoopMode::Track,
+            "Playlist" => LoopMode::Playlist,
+            _ => LoopMode::None,
+        };
+        self.st.lock().await.loop_status = m;
+        let _ = self.cmd(MediaOp::Loop { mode: m }).await;
+        let _ = self.loop_status_changed(&emitter).await;
+    }
     #[zbus(property)]
     async fn shuffle(&self) -> bool {
-        false
+        self.st.lock().await.shuffle
     }
     #[zbus(property)]
-    async fn set_shuffle(&self, _shuffle: bool) {}
+    async fn set_shuffle(
+        &self,
+        on: bool,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) {
+        self.st.lock().await.shuffle = on;
+        let _ = self.cmd(MediaOp::Shuffle { on }).await;
+        let _ = self.shuffle_changed(&emitter).await;
+    }
     #[zbus(property)]
     async fn volume(&self) -> f64 {
         1.0
@@ -331,13 +362,18 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             pos_ms,
             dur_ms,
             art_b64,
+            shuffle,
+            loop_status,
             ..
         } = msg
         else {
             continue;
         };
         debug!("mpris: {player} {title:?} {status:?} from {from}");
-        {
+        // Art decode+write outside the state lock — a big PNG must not
+        // stall concurrent MPRIS property reads.
+        let art_path = art_b64.as_deref().and_then(cache_art);
+        let (sh_changed, lp_changed) = {
             let mut m = st.lock().await;
             m.src = Some(from);
             m.player = player;
@@ -348,16 +384,35 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             m.pos_ms = pos_ms;
             m.dur_ms = dur_ms;
             m.sampled = std::time::Instant::now();
-            if let Some(b64) = art_b64 {
-                m.art_path = cache_art(&b64);
+            if art_b64.is_some() {
+                m.art_path = art_path;
             }
-        }
+            // Phone-authoritative control state — `None` keeps the
+            // locally written value when the session doesn't report.
+            let sh = shuffle.is_some_and(|s| {
+                let changed = s != m.shuffle;
+                m.shuffle = s;
+                changed
+            });
+            let lp = loop_status.is_some_and(|l| {
+                let changed = l != m.loop_status;
+                m.loop_status = l;
+                changed
+            });
+            (sh, lp)
+        };
         let Ok(iface) = conn.object_server().interface::<_, Player>(PATH).await else {
             continue;
         };
         let player_iface = iface.get().await;
         let _ = player_iface.playback_status_changed(&emitter).await;
         let _ = player_iface.metadata_changed(&emitter).await;
+        if sh_changed {
+            let _ = player_iface.shuffle_changed(&emitter).await;
+        }
+        if lp_changed {
+            let _ = player_iface.loop_status_changed(&emitter).await;
+        }
     }
     Ok(())
 }

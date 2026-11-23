@@ -40,6 +40,14 @@ pub enum Message {
         pos_ms: u64,
         dur_ms: u64,
         art_b64: Option<String>,
+        /// Phone-reported shuffle state — `Some` when the media session
+        /// exposes it (API 21+); laptops surface it via MPRIS `Shuffle`.
+        #[serde(default)]
+        shuffle: Option<bool>,
+        /// Phone-reported repeat mode — `Some` when exposed; laptops
+        /// surface it via MPRIS `LoopStatus`.
+        #[serde(default)]
+        loop_status: Option<LoopMode>,
         ts: u64,
     },
 
@@ -71,6 +79,12 @@ pub enum Message {
     /// identity pubkey. Peers pin the first key per device (TOFU), and
     /// only from frames that opened under the *current* family key.
     Identity { pub_b64: String, kind: DeviceKind },
+
+    /// LAN fast-path beacon: sealed envelope over UDP broadcast. Only a
+    /// family member can seal a frame that opens — the payload carries
+    /// just the sender's TCP listener port. `kind` lets receivers skip
+    /// dialing non-peers of interest (e.g. laptops dial phones only).
+    LanBeacon { tcp_port: u16, kind: DeviceKind },
 
     /// New family key after a revocation (or `murmurctl rotate`), sealed
     /// once per remaining member to its identity key — see
@@ -115,6 +129,15 @@ pub enum PlayStatus {
     Stopped,
 }
 
+/// MPRIS `LoopStatus`, snake_case on the wire: `"none" | "track" | "playlist"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopMode {
+    None,
+    Track,
+    Playlist,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum MediaOp {
@@ -123,4 +146,8 @@ pub enum MediaOp {
     Next,
     Previous,
     Seek { pos_ms: u64 },
+    /// `{"op":"shuffle","on":bool}` — phone sets its session shuffle.
+    Shuffle { on: bool },
+    /// `{"op":"loop","mode":"none"|"track"|"playlist"}` — phone repeat.
+    Loop { mode: LoopMode },
 }

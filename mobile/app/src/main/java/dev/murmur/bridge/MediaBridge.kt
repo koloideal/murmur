@@ -30,6 +30,7 @@ class MediaBridge(
     private val listenerName = ComponentName(ctx, NotificationBridge::class.java)
     private var controller: MediaController? = null
     private var ticker: Job? = null
+    private var pendingPublish: Job? = null
     /** Art we already sent this track — no point resending every 5s. */
     private var lastArtHash: Int? = null
 
@@ -84,8 +85,21 @@ class MediaBridge(
         }
     }
 
-    /** Snapshot → Msg.MediaState → all laptops. */
+    /**
+     * Conflated publish: session callbacks burst (metadata + state +
+     * queue all fire within ms on a track change) — collapse them into
+     * one sealed envelope so each burst costs one radio wakeup.
+     */
     fun publishNow() {
+        pendingPublish?.cancel()
+        pendingPublish = scope.launch {
+            delay(180)
+            publish()
+        }
+    }
+
+    /** Snapshot → Msg.MediaState → all laptops. */
+    private fun publish() {
         val c = controller
         val md = c?.metadata
         val ps = c?.playbackState
@@ -115,6 +129,14 @@ class MediaBridge(
                 } ?: 0,
                 dur_ms = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0,
                 art_b64 = artB64(md),
+                shuffle = controlState(c, "shuffle")?.let { it != 0 },
+                loop_status = controlState(c, "repeat", "loop")?.let {
+                    when (it) {
+                        0 -> "none"
+                        1 -> "track"
+                        else -> "playlist"
+                    }
+                },
                 ts = System.currentTimeMillis() / 1000,
             ),
         )
@@ -141,19 +163,65 @@ class MediaBridge(
             Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true)
         } else bmp
         val out = ByteArrayOutputStream()
-        small.compress(Bitmap.CompressFormat.PNG, 90, out)
+        // JPEG ~5-10x smaller than PNG for photo art — less radio time.
+        small.compress(Bitmap.CompressFormat.JPEG, 82, out)
         if (small !== bmp) small.recycle()
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
+    /**
+     * Framework sessions expose shuffle/repeat only as custom actions
+     * (no standard TransportControls op). Match by action/name needle.
+     * Returns the mode int when the action name encodes a state (e.g.
+     * "...SHUFFLE_ON", "...REPEAT_ONE"), else null.
+     */
+    private fun customAction(
+        ps: PlaybackState?, vararg needles: String,
+    ): PlaybackState.CustomAction? =
+        ps?.customActions?.firstOrNull { ca ->
+            needles.any { n ->
+                ca.action.contains(n, true) ||
+                    ca.name?.toString()?.contains(n, true) == true
+            }
+        }
+
+    /**
+     * Best-effort current value of a session toggle: extras key
+     * ("shuffle"=bool/int, "repeat"/"loop"=int) or a state-encoding
+     * custom action. null = unmeasurable → laptops keep last write.
+     */
+    private fun controlState(c: MediaController?, vararg keys: String): Int? {
+        val e = c?.playbackState?.extras ?: return null
+        for (k in keys) {
+            if (e.containsKey(k)) {
+                return runCatching {
+                    e.getInt(k)
+                }.getOrElse {
+                    runCatching { if (e.getBoolean(k)) 1 else 0 }.getOrNull()
+                } ?: continue
+            }
+        }
+        return null
+    }
+
     fun execute(cmd: Msg.MediaCommand) {
-        val tc = controller?.transportControls ?: return
+        val c = controller ?: return
+        val tc = c.transportControls ?: return
         when (cmd.op) {
             "play" -> tc.play()
             "pause" -> tc.pause()
             "next" -> tc.skipToNext()
             "previous" -> tc.skipToPrevious()
             "seek" -> cmd.pos_ms?.let(tc::seekTo)
+            // The player's own custom action performs the toggle/cycle —
+            // murmur only fires it; the reported state lands on the next
+            // publish so laptops converge on truth, not on what was asked.
+            "shuffle" -> customAction(c.playbackState, "shuffle")?.let {
+                tc.sendCustomAction(it.action, it.extras)
+            }
+            "loop" -> customAction(c.playbackState, "repeat", "loop")?.let {
+                tc.sendCustomAction(it.action, it.extras)
+            }
         }
     }
 }

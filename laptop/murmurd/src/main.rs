@@ -10,6 +10,7 @@ mod ctl;
 mod feature;
 mod install;
 mod keyring;
+mod lan;
 mod lockproc;
 mod logind;
 mod mpris;
@@ -82,9 +83,11 @@ async fn main() -> anyhow::Result<()> {
         cfg.server_url
     );
 
-    // Outbound envelopes: features seal and push here, conn drains to WS.
+    // Outbound envelopes: features seal and push here, conn drains to
+    // WS — hi (commands/control) always wins over lo (replaceable state).
     let (out_tx, out_rx) = mpsc::unbounded_channel();
-    let shared = Arc::new(Shared::new(cfg, secrets, out_tx)?);
+    let (lo_tx, lo_rx) = mpsc::unbounded_channel();
+    let shared = Arc::new(Shared::new(cfg, secrets, out_tx, lo_tx)?);
 
     // Wire features: each gets its filtered inbox, hub gets the sinks.
     let mut hub = Hub::new();
@@ -94,7 +97,8 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let hub = Arc::new(hub);
-    tasks.push(Box::pin(conn::run(shared.clone(), hub, out_rx)));
+    tasks.push(Box::pin(conn::run(shared.clone(), hub.clone(), out_rx, lo_rx)));
+    tasks.push(Box::pin(lan::run(shared.clone(), hub.clone())));
 
     // All tasks are daemons; first error shuts everything down.
     futures_util::future::try_join_all(tasks).await?;

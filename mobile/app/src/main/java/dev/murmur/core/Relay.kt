@@ -92,6 +92,15 @@ class Relay(
         ws?.send(env.toJson())
     }
 
+    /** Shared sequence so a caller can build the Envelope itself —
+     *  needed when the same frame may ride the LAN link instead. */
+    fun nextSeq(): Long = seq.getAndIncrement()
+
+    /** Send a pre-built envelope (LAN-prepared). */
+    fun sendEnv(env: Envelope) {
+        ws?.send(env.toJson())
+    }
+
     /** Cleartext control-plane to the server — device list, rename, revoke. */
     fun sendControl(ctl: Control, selfId: String) {
         ws?.send(Envelope.wrap(selfId, Envelope.SERVER, seq.getAndIncrement(), ctl).toJson())

@@ -19,7 +19,7 @@ pub use crypto::{FamilyKey, PairKey, sas_code};
 pub use envelope::{Envelope, Route};
 pub use id::{AuthToken, DeviceId, pair_code};
 pub use invite::Invite;
-pub use msg::{DeviceKind, MediaOp, Message, PlayStatus, PresenceState, SealedKey};
+pub use msg::{DeviceKind, LoopMode, MediaOp, Message, PlayStatus, PresenceState, SealedKey};
 pub use x25519_dalek::PublicKey;
 
 /// Protocol version. Bump on incompatible wire changes.

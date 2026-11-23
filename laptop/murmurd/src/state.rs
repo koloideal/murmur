@@ -63,7 +63,14 @@ pub struct Shared {
     pub rotating: Mutex<()>,
     token_hex: String,
     seq: AtomicU64,
+    /// Latency-critical envelopes — commands, control, pairing.
     pub out: mpsc::UnboundedSender<Envelope>,
+    /// Replaceable state (`Presence`/`MediaState`/`Clipboard`) tagged
+    /// with a slot key — conn keeps only the latest per slot, so a
+    /// backlog of stale snapshots drains as one fresh frame.
+    pub out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
+    /// Live LAN link — `Route::Device(peer)` unicast skips the relay.
+    lan: Mutex<Option<(DeviceId, mpsc::UnboundedSender<Envelope>)>>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
     pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
@@ -85,6 +92,7 @@ impl Shared {
         cfg: Config,
         mut secrets: Secrets,
         out: mpsc::UnboundedSender<Envelope>,
+        out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
     ) -> anyhow::Result<Self> {
         let (ctl_events, _) = broadcast::channel(64);
         let identity = crate::keyring::load_identity(&mut secrets)?;
@@ -101,6 +109,8 @@ impl Shared {
             cfg,
             seq: AtomicU64::new(1),
             out,
+            out_lo,
+            lan: Mutex::new(None),
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
@@ -113,11 +123,45 @@ impl Shared {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Seal and enqueue a message for the given route.
+    /// Seal and enqueue a message for the given route. A live LAN link
+    /// takes `Route::Device` unicast for its peer; otherwise relay —
+    /// commands via the hi-priority channel, replaceable state via the
+    /// coalesced lo channel.
     pub fn send(&self, to: Route, msg: &Message) -> anyhow::Result<()> {
-        let env = Envelope::seal(self.id, to, self.next_seq(), &self.keys.read().unwrap().current, msg)?;
-        let _ = self.out.send(env);
+        let env = Envelope::seal(self.id, to.clone(), self.next_seq(), &self.keys.read().unwrap().current, msg)?;
+        if let Route::Device(d) = to {
+            if let Some((peer, tx)) = self.lan.lock().unwrap().as_ref() {
+                if *peer == d {
+                    let _ = tx.send(env);
+                    return Ok(());
+                }
+            }
+        }
+        match replaceable_slot(&to, msg) {
+            Some(slot) => {
+                let _ = self.out_lo.send((slot, env));
+            }
+            None => {
+                let _ = self.out.send(env);
+            }
+        }
         Ok(())
+    }
+
+    /// Link bookkeeping for [`crate::lan`].
+    pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>) {
+        *self.lan.lock().unwrap() = Some((peer, tx));
+    }
+    pub fn lan_peer(&self) -> Option<DeviceId> {
+        self.lan.lock().unwrap().as_ref().map(|(p, _)| *p)
+    }
+    /// Tear down iff `tx` still owns the slot — a dying old link must
+    /// not clear a newer one that already adopted the peer.
+    pub fn lan_clear(&self, tx: &mpsc::UnboundedSender<Envelope>) {
+        let mut g = self.lan.lock().unwrap();
+        if g.as_ref().is_some_and(|(_, t)| t.same_channel(tx)) {
+            *g = None;
+        }
     }
 
     /// Cleartext control message to the server.
@@ -193,4 +237,21 @@ impl Shared {
             m.insert(id, (state, ts));
         }
     }
+}
+
+/// Coalescing slot for replaceable state messages — `None` means the
+/// message is latency-critical and goes to the hi channel as-is.
+fn replaceable_slot(to: &Route, msg: &Message) -> Option<u64> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let tag: u8 = match msg {
+        Message::Presence { .. } => 1,
+        Message::MediaState { .. } => 2,
+        Message::Clipboard { .. } => 3,
+        _ => return None,
+    };
+    let mut h = DefaultHasher::new();
+    tag.hash(&mut h);
+    format!("{to:?}").hash(&mut h);
+    Some(h.finish())
 }
