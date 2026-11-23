@@ -398,7 +398,23 @@ impl Shared {
             &Control::PairData { blob_b64 },
         )?;
         match pending.reply {
-            Some(tx) => tx.send(env).map_err(|_| anyhow::anyhow!("pair socket closed"))?,
+            Some(tx) => {
+                info!("pair: sending PairData to {session} over its direct socket");
+                tx.send(env.clone())
+                    .map_err(|_| anyhow::anyhow!("pair socket closed"))?;
+                // One frame over sleepy-wifi TCP can stall for minutes —
+                // resend a few times; the joiner finishes on the first
+                // PairData it reads and drops the socket, ending the loop.
+                let env = env.clone();
+                tokio::spawn(async move {
+                    for _ in 0..10 {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if tx.send(env.clone()).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
             None => {
                 let _ = self.out.send(env);
             }

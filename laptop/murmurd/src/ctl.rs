@@ -127,12 +127,17 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     })
                     .collect::<Vec<_>>()
             };
+            // "online" = the family can reach us: the relay for a
+            // serverful family, a live LAN link for a serverless one.
+            let online = shared.online.load(std::sync::atomic::Ordering::Relaxed)
+                || (shared.cfg.family_kind == murmur_proto::FamilyKind::Serverless
+                    && !shared.lan_peers().is_empty());
             Res::ok(serde_json::json!({
                 "self": shared.id.to_string(),
                 "name": shared.cfg.name,
                 "server": shared.cfg.server_url,
                 "family_kind": shared.cfg.family_kind,
-                "online": shared.online.load(std::sync::atomic::Ordering::Relaxed),
+                "online": online,
                 "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "lan_peers": shared.lan_peers().iter().map(|i| i.to_string()).collect::<Vec<_>>(),
                 "lan_rtt_ms": shared.lan_peers().iter()
