@@ -203,7 +203,7 @@ async fn dial_loop(
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 info!("lan: dialed {addr} ({peer})");
-                spawn_link(&shared, &hub, s);
+                spawn_link(&shared, &hub, s, Some(peer));
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }
@@ -218,7 +218,7 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
             Ok((s, addr)) => {
                 let _ = s.set_nodelay(true);
                 info!("lan: accepted {addr}");
-                spawn_link(shared, hub, s);
+                spawn_link(shared, hub, s, None);
             }
             Err(e) => {
                 warn!("lan: accept: {e}");
@@ -230,9 +230,28 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
 
 /// Split the socket: writer drains the per-link envelope queue; reader
 /// opens + dispatches. Either ending tears the link down.
-fn spawn_link(shared: &Arc<Shared>, hub: &Arc<Hub>, s: TcpStream) {
+///
+/// A dialed link is adopted immediately — the beacon that led us to
+/// the address was already authenticated, so waiting for the peer's
+/// first frame would deadlock (each side waits for the other to send).
+/// An accepted link waits for an openable frame like before.
+fn spawn_link(
+    shared: &Arc<Shared>,
+    hub: &Arc<Hub>,
+    s: TcpStream,
+    adopt_as: Option<murmur_proto::DeviceId>,
+) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
     let (r, w) = s.into_split();
+    if let Some(peer) = adopt_as {
+        let cur = shared.lan_peer();
+        if cur.is_none() || cur == Some(peer) {
+            if cur.is_none() {
+                info!("lan: link up with {peer}");
+            }
+            shared.lan_adopt(peer, tx.clone());
+        }
+    }
     tokio::spawn(link_writer(shared.clone(), w, rx, tx.clone()));
     tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx));
 }
