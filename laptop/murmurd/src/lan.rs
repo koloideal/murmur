@@ -223,7 +223,12 @@ async fn dial_loop(
             continue;
         }
         let now = std::time::Instant::now();
-        if last_dial.get(&hint.peer).is_some_and(|t| now - *t < DIAL_EVERY) {
+        // A link that just died gets one immediate redial — the fast
+        // path should come back on the next beacon, not a rate-limit
+        // window later.
+        if !shared.lan_redial_pending(&hint.peer)
+            && last_dial.get(&hint.peer).is_some_and(|t| now - *t < DIAL_EVERY)
+        {
             continue;
         }
         last_dial.insert(hint.peer, now);

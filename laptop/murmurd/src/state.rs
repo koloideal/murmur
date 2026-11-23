@@ -76,6 +76,9 @@ pub struct Shared {
     /// This node's last measured round-trip per peer in ms
     /// (0 = unknown); each peer measures its own on its side.
     lan_rtt: Mutex<HashMap<DeviceId, u64>>,
+    /// Peers whose link just died — one-shot redial markers for the
+    /// dialer (bounded by peer count, entries expire after a minute).
+    lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
@@ -126,6 +129,7 @@ impl Shared {
             out_lo,
             lan: Mutex::new(HashMap::new()),
             lan_rtt: Mutex::new(HashMap::new()),
+            lan_dropped: Mutex::new(HashMap::new()),
             lan_dial,
             seen: Mutex::new(Seen::default()),
             ctl_events,
@@ -202,13 +206,38 @@ impl Shared {
     }
     /// Tear down whichever peer slot still points at `tx` — a dying
     /// old link must not clear a newer one adopted under the same peer.
+    /// A genuinely lost peer (slot removed, not merely replaced) gets
+    /// a redial marker so the next beacon reconnects without waiting
+    /// out the rate limit.
     pub fn lan_clear(&self, tx: &mpsc::UnboundedSender<Envelope>) {
         let mut g = self.lan.lock().unwrap();
+        let removed: Vec<DeviceId> = g
+            .iter()
+            .filter(|(_, t)| t.same_channel(tx))
+            .map(|(p, _)| *p)
+            .collect();
         g.retain(|_, t| !t.same_channel(tx));
+        let remaining: std::collections::HashSet<DeviceId> = g.keys().copied().collect();
+        drop(g);
         self.lan_rtt
             .lock()
             .unwrap()
-            .retain(|p, _| g.contains_key(p));
+            .retain(|p, _| remaining.contains(p));
+        if !removed.is_empty() {
+            let now = std::time::Instant::now();
+            let mut d = self.lan_dropped.lock().unwrap();
+            for p in removed {
+                d.insert(p, now);
+            }
+            d.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(60));
+        }
+    }
+
+    /// Consume the "just lost this peer" marker — the dialer skips the
+    /// rate limit once so a broken fast path comes back on the very
+    /// next beacon instead of up to DIAL_EVERY + beacon cadence later.
+    pub fn lan_redial_pending(&self, peer: &DeviceId) -> bool {
+        self.lan_dropped.lock().unwrap().remove(peer).is_some()
     }
 
     /// True on first sight of this envelope — call only *after* a
