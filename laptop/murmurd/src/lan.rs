@@ -10,8 +10,9 @@
 //!     the *listener* accepts. Laptops dial only `Phone` beacons and
 //!     vice versa, so at most one direction connects per pair.
 //!   - A live link registers itself via [`Shared::lan_adopt`]: `send()`
-//!     routes `Route::Device(peer)` envelopes there; `Route::All` still
-//!     goes through the relay (broadcast semantics are relay-side).
+//!     gives `Route::Device(peer)` envelopes an early LAN copy while
+//!     the relay copy follows — LAN wins on latency, the relay copy is
+//!     deduped on receipt, and a dead link can never eat a command.
 //!
 //! Link liveness is detected by the reader hitting EOF / writer errors —
 //! no heartbeat; the relay remains the long-lived control plane.
@@ -80,12 +81,20 @@ async fn beacon_send(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
 }
 
 /// UDP → decode → open (auth) → dial. A beacon that can't be opened is
-/// dropped — a forged broadcast just doesn't go anywhere.
+/// dropped — a forged broadcast just doesn't go anywhere. A transient
+/// socket error must not kill discovery — keep listening.
 async fn beacon_recv(shared: Arc<Shared>, hub: Arc<Hub>, udp: Arc<UdpSocket>) -> anyhow::Result<()> {
     let mut last_dial = std::collections::HashMap::new();
     let mut buf = vec![0u8; 16 * 1024];
     loop {
-        let (n, src) = udp.recv_from(&mut buf).await?;
+        let (n, src) = match udp.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("lan: beacon recv: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         let Ok(env) = Envelope::from_json(std::str::from_utf8(&buf[..n]).unwrap_or("")) else {
             continue;
         };
@@ -121,13 +130,21 @@ async fn beacon_recv(shared: Arc<Shared>, hub: Arc<Hub>, udp: Arc<UdpSocket>) ->
     }
 }
 
-/// Accept inbound links (a phone dialing us).
+/// Accept inbound links (a phone dialing us). Transient accept errors
+/// (fd pressure, …) must not take the daemon down — retry briefly.
 async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListener) -> anyhow::Result<()> {
     loop {
-        let (s, addr) = listener.accept().await?;
-        let _ = s.set_nodelay(true);
-        info!("lan: accepted {addr}");
-        spawn_link(shared, hub, s);
+        match listener.accept().await {
+            Ok((s, addr)) => {
+                let _ = s.set_nodelay(true);
+                info!("lan: accepted {addr}");
+                spawn_link(shared, hub, s);
+            }
+            Err(e) => {
+                warn!("lan: accept: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
     }
 }
 
@@ -176,13 +193,19 @@ async fn link_reader(
         match env.open(&shared.keys.read().unwrap().current) {
             Ok(msg) => {
                 // A frame that opens proves family membership → adopt
-                // the link for outbound traffic (newest link wins — a
-                // redialed conn supersedes a stale one).
-                if shared.lan_peer() != Some(env.from) {
-                    info!("lan: link up with {}", env.from);
+                // the link for outbound traffic. Only an empty slot or
+                // the same peer re-adopts — a *different* peer must not
+                // evict a live link (multi-phone flap).
+                let cur = shared.lan_peer();
+                if cur.is_none() || cur == Some(env.from) {
+                    if cur.is_none() {
+                        info!("lan: link up with {}", env.from);
+                    }
                     shared.lan_adopt(env.from, tx.clone());
                 }
-                hub.dispatch(env.from, &msg);
+                if shared.dedupe(env.from, env.seq) {
+                    hub.dispatch(env.from, &msg);
+                }
             }
             Err(e) => debug!("lan: undecryptable from {}: {e}", env.from),
         }

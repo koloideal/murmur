@@ -31,6 +31,9 @@ class LanLink(
 ) {
     private val peer = AtomicReference<String?>(null)
 
+    /** Device id behind the live link — drives the "⇄ lan" UI badge. */
+    val peerFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
     @Volatile private var out: OutputStream? = null
 
     @Volatile private var linkSock: Socket? = null
@@ -43,6 +46,7 @@ class LanLink(
     fun stop() {
         runCatching { linkSock?.close() }
         peer.set(null)
+        peerFlow.value = null
         out = null
     }
 
@@ -52,8 +56,8 @@ class LanLink(
     /**
      * Write a sealed envelope over the LAN link iff it can reach the
      * linked peer: unicast to it, or `*` — the linked peer then gets an
-     * early copy (the relay still carries the broadcast to others).
-     * `false` → caller falls back to the relay.
+     * early copy while the relay copy follows. `false` just means "no
+     * early copy"; the caller always sends over the relay regardless.
      */
     fun sendIfPeer(envJson: String, to: String): Boolean {
         val s = out ?: return false
@@ -71,6 +75,7 @@ class LanLink(
 
     private fun drop() {
         peer.set(null)
+        peerFlow.value = null
         out = null
         runCatching { linkSock?.close() }
         linkSock = null
@@ -79,7 +84,17 @@ class LanLink(
     // -- beacon ---------------------------------------------------------------
 
     private suspend fun beaconLoop() {
-        val sock = DatagramSocket().apply { broadcast = true }
+        // Socket creation can fail transiently (VPN churn, fd pressure) —
+        // retry instead of killing discovery for the session's lifetime.
+        val sock = run {
+            var s: DatagramSocket? = null
+            while (s == null) {
+                s = runCatching { DatagramSocket().apply { broadcast = true } }
+                    .onFailure { Log.w(TAG, "beacon socket: $it") }.getOrNull()
+                if (s == null) delay(SOCKET_RETRY_MS)
+            }
+            s
+        }
         val dst = InetSocketAddress("255.255.255.255", BEACON_PORT)
         while (true) {
             val msg = Msg.LanBeacon(LINK_PORT, "phone")
@@ -99,8 +114,15 @@ class LanLink(
 
     // -- link -----------------------------------------------------------------
 
-    private fun acceptLoop() {
-        val srv = ServerSocket(LINK_PORT)
+    private suspend fun acceptLoop() {
+        // Same retry story as the beacon socket — a busy :17894 or a
+        // transient bind failure must not disable inbound links forever.
+        var srv: ServerSocket? = null
+        while (srv == null) {
+            srv = runCatching { ServerSocket(LINK_PORT) }
+                .onFailure { Log.w(TAG, "listen :$LINK_PORT: $it") }.getOrNull()
+            if (srv == null) delay(SOCKET_RETRY_MS)
+        }
         while (true) {
             val s = runCatching { srv.accept() }.getOrNull() ?: continue
             s.tcpNoDelay = true
@@ -123,6 +145,7 @@ class LanLink(
             // First frame that opens proves family membership → adopt.
             if (peer.get() == null) {
                 peer.set(env.from)
+                peerFlow.value = env.from
                 out = s.getOutputStream()
                 linkSock = s
                 Log.i(TAG, "lan link up with ${env.from}")
@@ -137,5 +160,6 @@ class LanLink(
         const val BEACON_PORT = 17893
         const val LINK_PORT = 17894
         const val BEACON_MS = 4000L
+        const val SOCKET_RETRY_MS = 2_000L
     }
 }

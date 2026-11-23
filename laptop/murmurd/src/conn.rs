@@ -129,6 +129,11 @@ async fn connect_once(
                         let opened = env.open(&shared.keys.read().unwrap().current);
                         match opened {
                             Ok(msg) => {
+                                // The same frame can arrive over the
+                                // LAN link as an early copy — collapse.
+                                if !shared.dedupe(env.from, env.seq) {
+                                    continue;
+                                }
                                 debug!("{} → {msg:?}", env.from);
                                 hub.dispatch(env.from, &msg);
                             }

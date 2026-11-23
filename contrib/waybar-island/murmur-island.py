@@ -62,6 +62,7 @@ def murmur_state() -> dict | None:
             data = {
                 "online": d.get("online") is True,
                 "revoked": d.get("revoked") is True,
+                "lan": d.get("lan_peer"),
                 "self": selfid,
                 "name": d.get("name", "?"),
                 "server": d.get("server", "?"),
@@ -131,8 +132,8 @@ def _mix(a: tuple, b: tuple, k: float) -> tuple:
     return tuple(round(a[i] + (b[i] - a[i]) * k) for i in range(3))
 
 
-def status_text(up: bool) -> str:
-    bg, fg, _accent = theme_colors()
+def status_text(up: bool, lan: bool = False) -> str:
+    bg, fg, accent = theme_colors()
     if not up:
         dot = "#fb4934"  # static red — nothing to breathe for
     else:
@@ -141,7 +142,9 @@ def status_text(up: bool) -> str:
         k = (math.sin(time.time() / 2.5 * math.tau) + 1) / 2
         dot = _hex(_mix(_mix(bg, fg, 0.55), green, k))
     word = "online" if up else "offline"
-    return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
+    # ⇄ — direct LAN link with a peer; accent-colored, left of the word.
+    mark = f'<span foreground="{_hex(accent)}">⇄ </span>' if lan else ""
+    return (f'{mark}<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
             f' <span foreground="{dot}">●</span>')
 
 
@@ -153,7 +156,8 @@ def status_tooltip(st: dict | None) -> str:
         "revoked — re-pair: murmurd pair --code …"
         if st["revoked"]
         else ("online" if st["online"] else "offline"),
-        f"relay  {st['server']}  ·  epoch {st['epoch']}",
+        f"relay  {st['server']}  ·  epoch {st['epoch']}"
+        + (f"   ·   lan ⇄ {st['lan']}" if st["lan"] else ""),
         f"active {st['active'] or 'none'}"
         + (" (me)" if st["active"] == st["self"] else ""),
         "",
@@ -174,7 +178,7 @@ def status() -> dict:
     st = murmur_state()
     up = murmur_up(st)
     return {
-        "text": status_text(up),
+        "text": status_text(up, lan=bool(st and st["lan"])),
         "class": "on" if up else "off",
         "tooltip": status_tooltip(st),
     }
@@ -222,12 +226,14 @@ def _measure(markup: str) -> int:
     return _pango.get_pixel_size()[0]
 
 
-def _geo_pill_center() -> int | None:
-    """Real center-x of the island pill, measured on the screen itself.
+def _geo_pill_rect() -> tuple[int, int, int, int] | None:
+    """(center-x, bottom, gap) of the island pill, measured on screen.
 
     The pill's flat background color is sampled just inside its left
     edge; a mid-height scan then finds both edges — a column counts as
-    inside the pill while background shows between the glyphs.
+    inside the pill while background shows between the glyphs. `bottom`
+    is the pill's lower edge; `gap` is the horizontal distance to the
+    previous pill — the popup uses it as its own vertical offset.
     """
     try:
         png = subprocess.run(
@@ -263,14 +269,47 @@ def _geo_pill_center() -> int | None:
 
         left = edge(ISLAND_LEFT + 6, -1)
         right = edge(ISLAND_LEFT + 6, 1)
-        return (left + right) // 2 if 40 < right - left < 700 else None
+        if not 40 < right - left < 700:
+            return None
+
+        def has_bg(x: int) -> bool:
+            # Any pill-colored pixel in the column — looser than
+            # `inside`, catches rounded-corner slivers at the edges.
+            return any(
+                all(abs(px[x, y][i] - bg[i]) <= 10 for i in range(3))
+                for y in PILL_ROWS)
+
+        # Pill bottom from the right padding column — guaranteed
+        # background, no glyphs.
+        bx = right - 3
+        bg_rows = [y for y in PILL_ROWS
+                   if all(abs(px[bx, y][i] - bg[i]) <= 10 for i in range(3))]
+        if not bg_rows:
+            return None
+        bottom = max(bg_rows)
+
+        # Horizontal gap to the previous pill — empty columns between
+        # our left edge and the neighbor's right edge.
+        gap = 8  # fallback ≈ waybar module spacing
+        x = left - 1
+        run = 0
+        while x > ISLAND_LEFT - 200 and not has_bg(x):
+            run += 1
+            x -= 1
+        if 0 < run < 200:
+            gap = run
+        return ((left + right) // 2, bottom, gap)
     except Exception:
         return None
 
 
 def _write_geo(media_markup: str, up: bool) -> None:
-    cx = _geo_pill_center()
-    if cx is None:
+    rect = _geo_pill_rect()
+    cx, pop_y = 0, 46
+    if rect is not None:
+        cx, bottom, gap = rect
+        pop_y = bottom + gap
+    else:
         # No grim/PIL — estimate from pango text metrics instead.
         try:
             s_px = _measure(status_text(up))
@@ -281,7 +320,7 @@ def _write_geo(media_markup: str, up: bool) -> None:
             return
     try:
         with open(GEO_FILE, "w") as f:
-            f.write(str(cx))
+            f.write(f"{cx} {pop_y}")
     except OSError:
         pass
 

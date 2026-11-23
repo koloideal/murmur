@@ -135,17 +135,33 @@ class Hyprland:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def island_anchor() -> tuple[int, int]:
+    """(center-x, y) published by the island's media stream —
+    y = pill bottom + the island's own horizontal gap, so the popup
+    hangs exactly one pill-gap under the bar. Defaults when missing.
+    """
+    try:
+        parts = open(GEO_FILE).read().split()
+        cx = int(parts[0])
+        y = int(parts[1]) if len(parts) > 1 else POPUP_Y
+        return cx, y
+    except (OSError, ValueError):
+        return 0, POPUP_Y
+
+
 def island_centered_x(width: int = WINDOW_WIDTH) -> int:
     """Window x that centers it under the waybar murmur island.
 
     The island's media stream publishes its center-x every frame;
     fall back to a fixed spot when the file is missing or stale.
     """
-    try:
-        center = int(open(GEO_FILE).read().strip())
-        return max(8, center - width // 2)
-    except (OSError, ValueError):
-        return FALLBACK_X
+    cx, _ = island_anchor()
+    return max(8, cx - width // 2) if cx else FALLBACK_X
+
+
+def popup_y() -> int:
+    _, y = island_anchor()
+    return y
 
 
 # --- MPRIS ------------------------------------------------------------------
@@ -395,12 +411,13 @@ class PlayerWindow(Gtk.ApplicationWindow):
         if self.get_surface() is None:
             return True
         x = island_centered_x()
-        if Hyprland.client_at(APP_ID) == [x, POPUP_Y]:
+        y = popup_y()
+        if Hyprland.client_at(APP_ID) == [x, y]:
             return False
         if self._place_tries >= PLACE_TRIES:
             return False
         self._place_tries += 1
-        Hyprland.move(APP_ID, x, POPUP_Y)
+        Hyprland.move(APP_ID, x, y)
         return True
 
     def _close_when_offline(self) -> bool:

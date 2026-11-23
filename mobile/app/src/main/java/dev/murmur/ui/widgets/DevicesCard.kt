@@ -77,6 +77,7 @@ fun DevicesCard() {
                         Text(
                             when {
                                 !d.online -> "offline"
+                                d.device_id == status.lanPeer -> "⇄ lan"
                                 d.rtt_ms != null -> "${d.rtt_ms} ms"
                                 else -> "online"
                             },

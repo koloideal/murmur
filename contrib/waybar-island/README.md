@@ -49,12 +49,14 @@ drop `Onest[wght].ttf` / `Unbounded[wght].ttf` into
 - `status-live`/`media-live` are streaming modules: the scripts keep
   running and waybar updates on every emitted line — that is what makes
   the dot/wave animation smooth.
-- The media stream publishes the island's real on-screen center-x to
-  `/tmp/murmur-island-cx` (measured from a screenshot, so it matches
-  the rendered pill exactly); the player reads it and centers the
-  popup underneath once per open. Set `MURMUR_ISLAND_LEFT` (px from
-  screen edge to the island's left edge) to point the measurement at
-  the right spot — the default fits the author's bar.
+- The media stream publishes the island's real on-screen geometry to
+  `/tmp/murmur-island-cx` as `cx y` (measured from a screenshot: pill
+  center-x, and popup-y = pill bottom + the gap to the left neighbor
+  pill, so the popup hangs exactly one module-gap below the bar); the
+  player reads it and positions the popup once per open. Set
+  `MURMUR_ISLAND_LEFT` (px from screen edge to the island's left edge)
+  to point the measurement at the right spot — the default fits the
+  author's bar.
 - Keys while the popup is focused: `Esc` close, `space` play/pause,
   `←`/`→` seek ±5s, `n`/`p` next/prev, `s` shuffle, `r` repeat —
   plus the standard media keys.

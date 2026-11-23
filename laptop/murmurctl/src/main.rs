@@ -209,6 +209,9 @@ fn cmd_status() -> anyhow::Result<()> {
         state,
     );
     println!("  relay   {}", d["server"].as_str().unwrap_or("?"));
+    if let Some(peer) = d["lan_peer"].as_str() {
+        println!("  lan     {}", p.green(format!("⇄ {peer}")));
+    }
     if revoked {
         println!(
             "  {}",

@@ -55,6 +55,10 @@ class MurmurService : Service() {
     /** device → (state, ts), mirrored from Presence broadcasts. */
     private val presence = mutableMapOf<String, Pair<String, Long>>()
 
+    /** Recently seen (sender, seq) — frames arrive over both the LAN
+     *  early-copy path and the relay; the duplicate collapses here. */
+    private val seenSeq = LinkedHashSet<Pair<String, Long>>()
+
     /** ElapsedRealtimeNanos of the in-flight ListDevices — its reply RTT
      *  is the "ping" the dashboard shows. */
     private val listSentAt = java.util.concurrent.atomic.AtomicLong()
@@ -102,6 +106,11 @@ class MurmurService : Service() {
         status.value = Status(provisioned = true, running = true)
         relay.start()
         lan.start()
+        scope.launch {
+            lan.peerFlow.collect { p ->
+                status.value = status.value.copy(lanPeer = p)
+            }
+        }
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
         scope.launch {
             relay.state.collect { st ->
@@ -244,12 +253,11 @@ class MurmurService : Service() {
             seq = relay.nextSeq(),
             payload = Base64.encodeToString(key.seal(pt), Base64.NO_WRAP),
         )
-        // LAN unicast to the linked peer skips the relay entirely;
-        // broadcasts still ride the relay — the link just delivers an
-        // early copy to whoever is linked.
-        if (!lan.sendIfPeer(env.toJson(), to) || to == Envelope.ALL) {
-            relay.sendEnv(env)
-        }
+        // LAN delivers an early copy when the route matches the link;
+        // the relay copy is authoritative and gets deduped on receipt —
+        // a silently dead link can never eat a frame.
+        lan.sendIfPeer(env.toJson(), to)
+        relay.sendEnv(env)
     }
 
     /**
@@ -302,6 +310,14 @@ class MurmurService : Service() {
             protoJson.decodeFromString(Msg.serializer(), pt.decodeToString())
         }.getOrNull() ?: return
 
+        // Broadcasts intentionally ride both LAN (early copy) and the
+        // relay — the second copy collapses here. Dedupe only after a
+        // successful open so forged frames can't poison the table.
+        synchronized(seenSeq) {
+            if (!seenSeq.add(env.from to env.seq)) return
+            if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
+        }
+
         when (msg) {
             is Msg.Presence -> presence[env.from] = msg.state to msg.ts
             is Msg.MediaCommand -> media.execute(msg)
@@ -348,6 +364,8 @@ class MurmurService : Service() {
         val running: Boolean = false,
         /** ListDevices round-trip — the phone's own ping to the relay. */
         val serverRttMs: Long? = null,
+        /** Device reachable directly over LAN — UI shows "⇄ lan". */
+        val lanPeer: String? = null,
         val devices: List<DeviceInfo> = emptyList(),
         val familyName: String? = null,
         val keyEpoch: Long = 0,
@@ -358,6 +376,7 @@ class MurmurService : Service() {
         private const val NOTIF_ID = 1
         private const val DEVICES_POLL_MS = 12_000L
         private const val ACTION_PAUSE = "dev.murmur.PAUSE"
+        private const val SEEN_MAX = 4096
 
         /** The dashboard is on screen — gates the device-list poller. */
         val uiVisible = MutableStateFlow(false)

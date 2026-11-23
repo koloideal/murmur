@@ -71,6 +71,10 @@ pub struct Shared {
     pub out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
     /// Live LAN link — `Route::Device(peer)` unicast skips the relay.
     lan: Mutex<Option<(DeviceId, mpsc::UnboundedSender<Envelope>)>>,
+    /// Recent (sender, seq) pairs — broadcasts intentionally ride both
+    /// LAN and relay, so the second copy must collapse here instead of
+    /// duplicating notifications/clips at the features.
+    seen: Mutex<(std::collections::HashSet<(DeviceId, u64)>, std::collections::VecDeque<(DeviceId, u64)>)>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
     pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
@@ -111,6 +115,7 @@ impl Shared {
             out,
             out_lo,
             lan: Mutex::new(None),
+            seen: Mutex::new((std::collections::HashSet::new(), std::collections::VecDeque::new())),
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
@@ -124,17 +129,23 @@ impl Shared {
     }
 
     /// Seal and enqueue a message for the given route. A live LAN link
-    /// takes `Route::Device` unicast for its peer; otherwise relay —
-    /// commands via the hi-priority channel, replaceable state via the
-    /// coalesced lo channel.
+    /// gets an *early copy* of everything that can reach its peer —
+    /// unicast to it, or a broadcast it is a member of. The frame still
+    /// rides the relay too: LAN is a latency fast-path, not a hard
+    /// dependency (a silently dead link must not eat the command).
+    /// `dedupe` on the receiving side collapses the second copy.
+    /// Outbound: commands via the hi-priority channel, replaceable
+    /// state via the coalesced lo channel.
     pub fn send(&self, to: Route, msg: &Message) -> anyhow::Result<()> {
         let env = Envelope::seal(self.id, to.clone(), self.next_seq(), &self.keys.read().unwrap().current, msg)?;
-        if let Route::Device(d) = to {
-            if let Some((peer, tx)) = self.lan.lock().unwrap().as_ref() {
-                if *peer == d {
-                    let _ = tx.send(env);
-                    return Ok(());
-                }
+        if let Some((peer, tx)) = self.lan.lock().unwrap().as_ref() {
+            let hit = match &to {
+                Route::All => true,
+                Route::Device(d) => d == peer,
+                _ => false,
+            };
+            if hit {
+                let _ = tx.send(env.clone());
             }
         }
         match replaceable_slot(&to, msg) {
@@ -162,6 +173,22 @@ impl Shared {
         if g.as_ref().is_some_and(|(_, t)| t.same_channel(tx)) {
             *g = None;
         }
+    }
+
+    /// True on first sight of this envelope — call only *after* a
+    /// successful `open()` so forged LAN frames can't poison the table.
+    pub fn dedupe(&self, from: DeviceId, seq: u64) -> bool {
+        let mut g = self.seen.lock().unwrap();
+        if !g.0.insert((from, seq)) {
+            return false;
+        }
+        g.1.push_back((from, seq));
+        if g.1.len() > 4096 {
+            if let Some(old) = g.1.pop_front() {
+                g.0.remove(&old);
+            }
+        }
+        true
     }
 
     /// Cleartext control message to the server.
