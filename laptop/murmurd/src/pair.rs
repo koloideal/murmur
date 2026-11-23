@@ -101,8 +101,16 @@ fn sweep_pairing(shared: &Shared) {
     let fresh = |t: &Instant| t.elapsed() < PAIR_TTL;
     pair.invites.retain(|_, e| fresh(&e.created));
     pair.pending.retain(|_, p| fresh(&p.created));
-    let pending_ids: Vec<DeviceId> = pair.pending.keys().copied().collect();
-    pair.pair_reply.retain(|s, _| pending_ids.contains(s));
+    // Staged sockets die with their session — but a PairHello can be
+    // sitting in ctl_events *between* the two maps, so keep a staged
+    // channel while the session is still a live invite too.
+    let live: Vec<DeviceId> = pair
+        .invites
+        .keys()
+        .chain(pair.pending.keys())
+        .copied()
+        .collect();
+    pair.pair_reply.retain(|s, _| live.contains(s));
 }
 
 // ---------- serverless invite listener ----------

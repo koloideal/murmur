@@ -93,6 +93,11 @@ fun PairingCard() {
     var celebrating by remember { mutableStateOf(false) }
     var burstFamily by remember { mutableStateOf<String?>(null) }
     var lanOnly by remember { mutableStateOf(false) }
+    /** Family kind the user picked on the split screen — null = the
+     *  choice itself is what's showing. The invite that arrives from
+     *  the laptop is the real truth; this only shapes which fields
+     *  the phone even offers (a serverless world has no server field). */
+    var kind by remember { mutableStateOf<String?>(null) }
 
     val codeReady = code.length == 8
 
@@ -296,8 +301,28 @@ fun PairingCard() {
                 }
 
                 else -> {
+                    if (kind == null) {
+                        // Two halves — the fundamental split. What the
+                        // laptop's invite carries is the truth either
+                        // way; this decides whether a server field
+                        // exists for the user at all.
+                        ModeChoice(
+                            "serverful",
+                            "through the relay — works from anywhere",
+                        ) { kind = "serverful" }
+                        Spacer(Modifier.height(10.dp))
+                        ModeChoice(
+                            "serverless",
+                            "direct on one network — no server, ever",
+                        ) {
+                            kind = "serverless"
+                            lanOnly = true
+                        }
+                        return@FeatureCard
+                    }
                     Text(
-                        "on a laptop that's already in the family, run",
+                        if (kind == "serverless") "on a laptop in your lan-only family, run"
+                        else "on a laptop that's already in the family, run",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -311,7 +336,25 @@ fun PairingCard() {
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("enter code manually") }
                     if (manual) {
-                        if (inviteMode) {
+                        if (kind == "serverless") {
+                            // A short code finds the inviter through the
+                            // relay — which doesn't exist here. The full
+                            // invite carries host:port itself.
+                            OutlinedTextField(
+                                value = invite,
+                                onValueChange = { invite = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("full invite") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Button(
+                                onClick = { runPairing(invite.trim()) },
+                                enabled = invite.isNotBlank(),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("pair") }
+                        } else if (inviteMode) {
                             OutlinedTextField(
                                 value = invite,
                                 onValueChange = { invite = it },
@@ -372,6 +415,16 @@ fun PairingCard() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    TextButton(
+                        onClick = {
+                            kind = null
+                            lanOnly = false
+                            manual = false
+                            error = null
+                            hint = null
+                        },
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text("‹ family kind") }
                 }
             }
         }
@@ -504,5 +557,30 @@ private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier, onTa
             color = if (ch != null) MaterialTheme.colorScheme.onSurface
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** One half of the family-kind split — a tappable row with the kind
+ *  name and what the choice actually means for the user. */
+@Composable
+private fun ModeChoice(title: String, desc: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Text(
+                desc,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+        }
     }
 }
