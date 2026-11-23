@@ -49,8 +49,11 @@ class Secrets(private val ctx: Context) {
      *  build model. Editable from the dashboard; the service pushes it
      *  to the server with RenameDevice. */
     var deviceName: String
-        get() = prefs.getString(KEY_NAME, null)
-            ?: systemDeviceName().also { deviceName = it }
+        get() = (prefs.getString(KEY_NAME, null) ?: systemDeviceName().also { deviceName = it })
+            // The side-by-side debug install is a second family member
+            // on the same handset — mark it even when the name was
+            // cached before the suffix existed.
+            .let { if (ctx.packageName.endsWith(".debug") && !it.endsWith("·dev")) "$it·dev" else it }
         set(v) = prefs.edit { putString(KEY_NAME, v) }
 
     private fun systemDeviceName(): String {

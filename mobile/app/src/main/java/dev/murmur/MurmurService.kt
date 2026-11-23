@@ -130,6 +130,11 @@ class MurmurService : Service() {
         scope.launch {
             relay.state.collect { st ->
                 status.value = status.value.copy(relay = st)
+                if (st == Relay.State.ONLINE) {
+                    // Cheap self-heal: the family list always shows the
+                    // current name — debug installs suffix it with ·dev.
+                    pushName()
+                }
                 if (st == Relay.State.REVOKED) {
                     // The relay forgot us — nothing to retry. Keep the keys
                     // off the wire and let the dashboard offer re-pairing.
