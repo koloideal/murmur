@@ -150,7 +150,14 @@ class MurmurService : Service() {
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
         lan = LanLink(secrets.deviceId!!, key, scope, { onEnvelope(it) }) { send(it) }
-        status.value = Status(provisioned = true, running = true, familyKind = secrets.familyKind)
+        status.value = Status(
+            provisioned = true,
+            running = true,
+            familyKind = secrets.familyKind,
+            // Serverless never gets a Devices reply — the name stored
+            // at pairing is the only source until gossip lands.
+            familyName = secrets.familyName,
+        )
         if (!serverless) relay.start()
         lan.start()
         var seenPeers = emptySet<String>()
