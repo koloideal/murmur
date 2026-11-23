@@ -60,6 +60,12 @@ class LanLink(
         kotlinx.coroutines.channels.Channel.UNLIMITED,
     )
 
+    /** Keepalives jump the data queue — a pong waiting behind a media
+     *  burst measures queue depth, not link latency. */
+    private val hiQ = kotlinx.coroutines.channels.Channel<Write>(
+        kotlinx.coroutines.channels.Channel.UNLIMITED,
+    )
+
     fun start() {
         scope.launch(Dispatchers.IO) { beaconLoop() }
         scope.launch(Dispatchers.IO) { acceptLoop() }
@@ -95,16 +101,31 @@ class LanLink(
         }
     }
 
-    /** The links' only writer — drains [writeQ] onto the peer's socket. */
+    /** The links' only writer — [hiQ] jumps [writeQ]: a keepalive
+     *  never waits behind queued media/notification traffic, so the
+     *  RTT reflects the wire, not the backlog. */
     private suspend fun writerLoop() {
-        for (w in writeQ) {
-            val l = links[w.peer] ?: continue
-            runCatching {
-                l.out.write(w.bytes)
-                l.out.flush()
-            }.onFailure {
-                drop(w.peer, "write: ${it.javaClass.simpleName}: ${it.message}")
+        while (true) {
+            val w = kotlinx.coroutines.selects.select<Write> {
+                hiQ.onReceive { it }
+                writeQ.onReceive { it }
             }
+            writeOne(w)
+            // Drain any hi backlog before blocking again.
+            while (true) {
+                val h = hiQ.tryReceive().getOrNull() ?: break
+                writeOne(h)
+            }
+        }
+    }
+
+    private fun writeOne(w: Write) {
+        val l = links[w.peer] ?: return
+        runCatching {
+            l.out.write(w.bytes)
+            l.out.flush()
+        }.onFailure {
+            drop(w.peer, "write: ${it.javaClass.simpleName}: ${it.message}")
         }
     }
 
@@ -136,7 +157,7 @@ class LanLink(
         while (true) {
             val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
             val bytes = (env.toJson() + "\n").toByteArray()
-            for (p in links.keys) writeQ.trySend(Write(p, bytes))
+            for (p in links.keys) hiQ.trySend(Write(p, bytes))
             delay(PING_MS)
         }
     }
@@ -283,7 +304,7 @@ class LanLink(
             when (msg) {
                 is Msg.LanPing -> {
                     val pong = sealedEnv(Msg.LanPong(msg.ts))
-                    writeQ.trySend(Write(env.from, (pong.toJson() + "\n").toByteArray()))
+                    hiQ.trySend(Write(env.from, (pong.toJson() + "\n").toByteArray()))
                     continue
                 }
                 is Msg.LanPong -> {

@@ -332,9 +332,19 @@ fn spawn_link(
             }
         });
     }
-    tokio::spawn(link_writer(shared.clone(), w, rx, tx.clone()));
-    tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx.clone(), validated));
-    tokio::spawn(ping_loop(shared.clone(), tx));
+    // Keepalives jump the data queue — a pong that waits behind a
+    // media burst measures queue depth, not link latency.
+    let (tx_hi, rx_hi) = mpsc::unbounded_channel::<Envelope>();
+    tokio::spawn(link_writer(shared.clone(), w, rx, rx_hi, tx.clone()));
+    tokio::spawn(link_reader(
+        shared.clone(),
+        hub.clone(),
+        r,
+        tx.clone(),
+        tx_hi.clone(),
+        validated,
+    ));
+    tokio::spawn(ping_loop(shared.clone(), tx_hi));
 }
 
 /// Local epoch milliseconds — timestamps for `LanPing` echoes; RTT is
@@ -373,9 +383,17 @@ async fn link_writer(
     shared: Arc<Shared>,
     mut w: tokio::net::tcp::OwnedWriteHalf,
     mut rx: mpsc::UnboundedReceiver<Envelope>,
+    mut rx_hi: mpsc::UnboundedReceiver<Envelope>,
     tx: mpsc::UnboundedSender<Envelope>,
 ) {
-    while let Some(env) = rx.recv().await {
+    loop {
+        // biased: keepalives are always drained before queued data.
+        let env = tokio::select! {
+            biased;
+            e = rx_hi.recv() => e,
+            e = rx.recv() => e,
+        };
+        let Some(env) = env else { break };
         let mut line = env.to_json();
         line.push('\n');
         if let Err(e) = w.write_all(line.as_bytes()).await {
@@ -397,6 +415,7 @@ async fn link_reader(
     hub: Arc<Hub>,
     r: tokio::net::tcp::OwnedReadHalf,
     tx: mpsc::UnboundedSender<Envelope>,
+    tx_hi: mpsc::UnboundedSender<Envelope>,
     validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut br = BufReader::new(r);
@@ -435,7 +454,7 @@ async fn link_reader(
                             &shared.keys.read().unwrap().current,
                             &Message::LanPong { ts: *ts },
                         ) {
-                            let _ = tx.send(env);
+                            let _ = tx_hi.send(env);
                         }
                         continue;
                     }
