@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -117,12 +118,16 @@ fun GrantGate(grants: Grants) {
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(horizontal = 28.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
+    // A bare Column leaves LocalContentColor black — unreadable on
+    // the gruvbox background. Surface owns both background and the
+    // default text color for everything inside.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 28.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
         Icon(
             Icons.Outlined.Shield,
             contentDescription = null,
@@ -177,6 +182,7 @@ fun GrantGate(grants: Grants) {
             onClick = { activity?.finish() },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("quit murmur") }
+        }
     }
 }
 

@@ -205,13 +205,16 @@ fun PairingScreen() {
         return
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
+    // A bare Column leaves LocalContentColor black — unreadable on
+    // the gruvbox background. Surface owns both for everything inside.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
         FeatureCard("pair this phone", Icons.Outlined.QrCodeScanner) {
             when {
                 celebrating -> Column(
@@ -422,6 +425,7 @@ fun PairingScreen() {
                 }
             }
         }
+        }
     }
 }
 
@@ -560,6 +564,9 @@ private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier, onTa
  *  only decides which fields the phone will offer at all. */
 @Composable
 private fun FamilyKindSplit(onPick: (String) -> Unit) {
+    // Surface, not a bare Box: it owns the background and the default
+    // text color — outside one, LocalContentColor is black.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             KindHalf(
@@ -590,6 +597,7 @@ private fun FamilyKindSplit(onPick: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
     }
 }
 

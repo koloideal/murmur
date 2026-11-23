@@ -151,8 +151,9 @@ def status_text(up: bool, lan: bool = False, kind: str = "serverful") -> str:
     link = ""
     if up and kind == "serverful":
         link = f'<span foreground="{dim}"> · on {"lan" if lan else "wan"}</span>'
-    # kind=None: daemon unreachable — there's no family to name.
-    tail = f'<span foreground="{dim}"> · as {kind}</span>' if kind else ""
+    # Offline is just "murmur offline" + the dot — a dead daemon has
+    # no route and no family kind worth naming.
+    tail = f'<span foreground="{dim}"> · as {kind}</span>' if up and kind else ""
     return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
             f'{link}{tail}'
             f' <span foreground="{dot}">●</span>')
