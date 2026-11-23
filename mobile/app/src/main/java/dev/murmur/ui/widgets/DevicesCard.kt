@@ -43,12 +43,43 @@ fun DevicesCard() {
     val removed by Secrets.removedFlow.collectAsState()
 
     val others = status.devices.filter { it.device_id != selfId && !it.revoked }
+    // The device list hides self by design, but then an all-offline
+    // roster reads like the phone itself is down — show "me" up top.
+    val me = status.devices.firstOrNull { it.device_id == selfId }
 
     AnimatedVisibility(
         visible = settled && !removed,
         enter = fadeIn(tween(600)) + expandVertically(tween(600)),
     ) {
         FeatureCard("family", Icons.Outlined.Devices) {
+            me?.let { d ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(
+                                if (d.online) MaterialTheme.colorScheme.secondary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                MaterialTheme.shapes.small,
+                            ),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "${d.name} (me)",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        if (d.online) "online" else "offline",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             if (others.isEmpty()) {
                 Text(
                     "no other devices yet — pair a laptop with murmurctl invite",
