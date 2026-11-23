@@ -78,7 +78,15 @@ pub enum Message {
     /// Authed device → "*" after every (re)connect: its long-term X25519
     /// identity pubkey. Peers pin the first key per device (TOFU), and
     /// only from frames that opened under the *current* family key.
-    Identity { pub_b64: String, kind: DeviceKind },
+    /// `name` is the roster gossip the LAN-only (serverless) world
+    /// needs — a relay family gets names from `Control::Devices`
+    /// instead. Absent in old frames.
+    Identity {
+        pub_b64: String,
+        kind: DeviceKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 
     /// LAN fast-path beacon: sealed envelope over UDP broadcast *and*
     /// periodically via the relay. Only a family member can seal a

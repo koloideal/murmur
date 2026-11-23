@@ -339,19 +339,29 @@ fn cmd_invite() -> anyhow::Result<()> {
 
     print_qr(code);
     if !short.is_empty() {
-        println!("  code      {}", p.bold(short));
-        println!("  server    {}", server);
-        println!("  {}", p.dim("expires in 10 minutes"));
-        println!(
-            "\n  {}",
-            p.dim("phone:  open murmur → enter the code · or scan the QR")
-        );
-        println!(
-            "  {}",
-            p.dim(format!(
-                "laptop: murmurd pair --server {server} --code {short}"
-            ))
-        );
+        if server.starts_with("ws") {
+            println!("  code      {}", p.bold(short));
+            println!("  server    {}", server);
+            println!("  {}", p.dim("expires in 10 minutes"));
+            println!(
+                "\n  {}",
+                p.dim("phone:  open murmur → enter the code · or scan the QR")
+            );
+            println!(
+                "  {}",
+                p.dim(format!(
+                    "laptop: murmurd pair --server {server} --code {short}"
+                ))
+            );
+        } else {
+            // Serverless: `server` carries `host:port` of the one-shot
+            // listener. No relay exists to rendezvous on, so the short
+            // code can't locate us — the full invite (QR) is the way in.
+            println!("  direct    {}", server);
+            println!("  {}", p.dim("lan only — expires in 10 minutes"));
+            println!("\n  {}", p.dim("phone:  open murmur → scan the QR"));
+            println!("  {}", p.dim("laptop: murmurd pair --code <full invite>"));
+        }
     }
     if std::io::stdout().is_terminal() {
         let session = d["session"].as_str().unwrap_or_default().to_owned();

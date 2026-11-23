@@ -90,6 +90,10 @@ impl Keyring {
 pub struct Member {
     pub pub_b64: String,
     pub kind: DeviceKind,
+    /// Display name learned from the member's `Identity` announcements
+    /// — absent for rosters pinned before names rode the frame.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Member {
@@ -145,37 +149,49 @@ impl Shared {
         }
     }
 
-    /// Tell the family who we are. Runs after every authed connect.
+    /// Tell the family who we are. Runs after every authed connect —
+    /// and on every new LAN link, where it's the only rendezvous a
+    /// serverless family has.
     pub fn announce_identity(&self) {
         let _ = self.send(
             Route::All,
             &Message::Identity {
                 pub_b64: self.identity.public_b64(),
                 kind: DeviceKind::Laptop,
+                name: Some(self.cfg.name.clone()),
             },
         );
     }
 
-    fn pin(&self, id: DeviceId, pub_b64: String, kind: DeviceKind) {
+    fn pin(&self, id: DeviceId, pub_b64: String, kind: DeviceKind, name: Option<String>) {
         if id == self.id
             || PairKey::public_from_b64(&pub_b64).is_err()
             || self.keys.read().unwrap().revoked.contains(&id)
         {
             return;
         }
-        let mut r = self.roster.lock().unwrap();
-        match r.get(&id) {
-            Some(m) if m.pub_b64 == pub_b64 => return,
-            Some(_) => {
-                warn!("{id} announced a different identity key — keeping the pinned one");
-                return;
-            }
-            None => {
-                info!("pinned identity of {id} ({kind:?})");
-                r.insert(id, Member { pub_b64, kind });
+        {
+            let mut r = self.roster.lock().unwrap();
+            match r.get_mut(&id) {
+                Some(m) if m.pub_b64 == pub_b64 => {
+                    // Same pinned key — a fresh name is still welcome.
+                    if name.is_some() && m.name != name {
+                        m.name = name;
+                        drop(r);
+                        self.persist_roster();
+                    }
+                    return;
+                }
+                Some(_) => {
+                    warn!("{id} announced a different identity key — keeping the pinned one");
+                    return;
+                }
+                None => {
+                    info!("pinned identity of {id} ({kind:?})");
+                    r.insert(id, Member { pub_b64, kind, name });
+                }
             }
         }
-        drop(r);
         self.persist_roster();
         // A newcomer missed our own announcement — introduce ourselves.
         let _ = self.send(
@@ -183,6 +199,7 @@ impl Shared {
             &Message::Identity {
                 pub_b64: self.identity.public_b64(),
                 kind: DeviceKind::Laptop,
+                name: Some(self.cfg.name.clone()),
             },
         );
     }
@@ -341,7 +358,9 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             m = inbox.recv() => match m {
-                Some((from, Message::Identity { pub_b64, kind })) => shared.pin(from, pub_b64, kind),
+                Some((from, Message::Identity { pub_b64, kind, name })) => {
+                    shared.pin(from, pub_b64, kind, name)
+                }
                 Some((from, Message::KeyRotate { epoch, revoked, keys })) => {
                     shared.apply_rotation(from, epoch, revoked, keys)
                 }

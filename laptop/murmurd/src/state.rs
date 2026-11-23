@@ -24,6 +24,11 @@ pub struct Pairing {
     pub invites: HashMap<DeviceId, InviteEntry>,
     /// `PairHello` received for one of our invites.
     pub pending: HashMap<DeviceId, Pending>,
+    /// Serverless pair sockets staged by session id: `serve_pair`
+    /// registers the joiner's socket writer here *before* the
+    /// PairHello reaches `pair::handle_ctl`, which moves it into the
+    /// fresh `Pending`.
+    pub pair_reply: HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>,
 }
 
 /// How long an invite/pending stays around without progress.
@@ -43,6 +48,9 @@ pub struct Pending {
     pub name: String,
     /// When the invite was issued (TTL counts from then, not from hello).
     pub created: std::time::Instant,
+    /// Serverless pairing: the joiner's direct socket writer — its
+    /// PairAccept/PairData ride this instead of the (absent) relay.
+    pub reply: Option<mpsc::UnboundedSender<Envelope>>,
 }
 
 /// Shared daemon state: identity, key, presence table, outbound queue.
@@ -172,27 +180,41 @@ impl Shared {
                 _ => {}
             }
         }
-        match replaceable_slot(&to, msg) {
-            Some(slot) => {
-                let _ = self.out_lo.send((slot, env));
-            }
-            None => {
-                let _ = self.out.send(env);
+        if self.has_relay() {
+            match replaceable_slot(&to, msg) {
+                Some(slot) => {
+                    let _ = self.out_lo.send((slot, env));
+                }
+                None => {
+                    let _ = self.out.send(env);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Serverless families have no relay consumer — outbound queues
+    /// would grow forever.
+    fn has_relay(&self) -> bool {
+        self.cfg.family_kind == murmur_proto::FamilyKind::Serverful
     }
 
     /// Link bookkeeping for [`crate::lan`]. Called on every valid
     /// frame — a no-op while the map already points at this channel,
     /// so it never tramples the link's measured RTT.
     pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>) {
-        let mut lan = self.lan.lock().unwrap();
-        if matches!(lan.get(&peer), Some(t) if t.same_channel(&tx)) {
-            return;
+        {
+            let mut lan = self.lan.lock().unwrap();
+            if matches!(lan.get(&peer), Some(t) if t.same_channel(&tx)) {
+                return;
+            }
+            lan.insert(peer, tx);
+            self.lan_rtt.lock().unwrap().insert(peer, 0);
         }
-        lan.insert(peer, tx);
-        self.lan_rtt.lock().unwrap().insert(peer, 0);
+        // The link-up is a rendezvous: announce so the peer pins our
+        // identity + name. In a serverless family it's the *only*
+        // rendezvous — there is no relay connect to hang this on.
+        self.announce_identity();
     }
     /// Live peers — the ctl/island "on lan" truth.
     pub fn lan_peers(&self) -> Vec<DeviceId> {
@@ -283,6 +305,12 @@ impl Shared {
     /// Cleartext control message to any route — pairing frames go unicast
     /// to a session conn (`Route::Device(session)`).
     pub fn send_control_to(&self, to: Route, ctl: &Control) -> anyhow::Result<()> {
+        // Serverless: no relay exists to carry control frames — a
+        // no-op, not an error. Pair frames ride their own socket via
+        // `pair_reply` and never come through here.
+        if !self.has_relay() {
+            return Ok(());
+        }
         let env = Envelope::control(self.id, to, self.next_seq(), ctl)?;
         let _ = self.out.send(env);
         Ok(())

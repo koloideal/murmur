@@ -125,10 +125,12 @@ sealed class Msg {
         val ts: Long,
     ) : Msg()
 
-    /** Long-term identity pubkey, announced after every connect. */
+    /** Long-term identity pubkey, announced after every connect.
+     *  `name` carries roster gossip a serverless family has no relay
+     *  registry for — absent in old frames. */
     @Serializable
     @SerialName("identity")
-    data class Identity(val pub_b64: String, val kind: String) : Msg()
+    data class Identity(val pub_b64: String, val kind: String, val name: String? = null) : Msg()
 
     /** Sealed beacon — rides UDP broadcast and the relay; the envelope
      *  itself is the auth. `lan_addr` lets relay receivers dial back —

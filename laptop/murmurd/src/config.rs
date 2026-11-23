@@ -188,12 +188,23 @@ pub fn init(args: &[String]) -> anyhow::Result<()> {
             |_| prompt("device name", std::env::var("HOSTNAME").ok().as_deref()),
             Ok,
         )?;
-    let device_id = flag(args, "--device-id")?;
-    let token_hex = flag(args, "--token")?;
+    // Credentials are relay-issued in a serverful family; a serverless
+    // founder mints them locally (the token is only ever sent to a
+    // relay, and there is none — the family key authenticates links).
+    let (device_id, token_hex) = match kind {
+        murmur_proto::FamilyKind::Serverful => (
+            flag(args, "--device-id")?.to_owned(),
+            flag(args, "--token")?.to_owned(),
+        ),
+        murmur_proto::FamilyKind::Serverless => (
+            DeviceId::random().to_string(),
+            AuthToken::random().to_hex(),
+        ),
+    };
 
     // Fail early on typos — better here than at first connect.
     let id: DeviceId = device_id.parse()?;
-    AuthToken::from_hex(token_hex)?;
+    AuthToken::from_hex(&token_hex)?;
 
     let cfg = Config {
         family_kind: kind,

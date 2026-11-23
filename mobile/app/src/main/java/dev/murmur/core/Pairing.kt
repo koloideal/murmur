@@ -4,8 +4,12 @@ import android.util.Base64
 import com.goterl.lazysodium.LazySodiumAndroid
 import com.goterl.lazysodium.SodiumAndroid
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -60,6 +64,11 @@ suspend fun pair(
     val session: String
     val url: String
     if (invite != null) {
+        if (invite.kind == "serverless") {
+            // `serverUrl` is `host:port` of the inviter's ephemeral
+            // listener — dial it directly; there is no relay.
+            return pairLan(invite.serverUrl, invite.session, deviceName, onStage, onSas)
+        }
         session = invite.session
         url = invite.serverUrl
     } else {
@@ -221,4 +230,128 @@ suspend fun pair(
 
 private const val TIMEOUT_MS = 180_000L
 private const val HELLO_RETRY_MS = 3_000L
+private const val CONNECT_MS = 10_000
 private const val ZERO_ID = "0000000000000000"
+
+/**
+ * Joiner side of a serverless invite: `addr` is the inviter's
+ * `host:port`. Same frame semantics as the relay path, carried as
+ * newline-delimited JSON envelopes over a raw socket — no `Hello`
+ * handshake (the session id in `from` is the introduction), no
+ * bootstrap codes (no relay exists to mint them).
+ */
+private suspend fun pairLan(
+    addr: String,
+    session: String,
+    deviceName: String,
+    onStage: (PairStage) -> Unit,
+    onSas: suspend (code: String) -> Boolean,
+): Provisioning {
+    val host = addr.substringBefore(':')
+    val port = addr.substringAfter(':').toIntOrNull()
+        ?: throw PairingException("bad direct invite: $addr")
+    val sodium = LazySodiumAndroid(SodiumAndroid())
+    val pairKey = PairKey(sodium)
+
+    val socket = withContext(Dispatchers.IO) {
+        java.net.Socket().apply {
+            connect(java.net.InetSocketAddress(host, port), CONNECT_MS)
+            tcpNoDelay = true
+        }
+    }
+    return try {
+        coroutineScope {
+            val out = socket.getOutputStream()
+            val br = java.io.BufferedReader(java.io.InputStreamReader(socket.getInputStream()))
+            val frames = Channel<Pair<String, Control>>(Channel.UNLIMITED)
+            val failure = CompletableDeferred<PairingException>()
+
+            launch(Dispatchers.IO) {
+                try {
+                    while (true) {
+                        val line = br.readLine() ?: break
+                        val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: continue
+                        env.controlPayload()?.let { frames.trySend(env.from to it) }
+                    }
+                    failure.complete(PairingException("connection closed"))
+                } catch (e: java.io.IOException) {
+                    failure.complete(PairingException(e.message ?: "connection failed"))
+                }
+            }
+
+            suspend fun sendFrame(env: Envelope) = withContext(Dispatchers.IO) {
+                out.write("${env.toJson()}\n".toByteArray())
+                out.flush()
+            }
+
+            suspend fun next(): Pair<String, Control> {
+                val f = select {
+                    frames.onReceive { it }
+                    failure.onAwait { throw it }
+                }
+                (f.second as? Control.PairReject)?.let { throw PairingException(it.reason) }
+                return f
+            }
+
+            withTimeout(TIMEOUT_MS) {
+                onStage(PairStage.AwaitingAccept(session))
+                var seq = 1L
+                suspend fun hello() = sendFrame(
+                    Envelope.wrap(
+                        from = session,
+                        to = Envelope.SERVER,
+                        seq = seq++,
+                        ctl = Control.PairHello(
+                            pubkey_b64 = pairKey.publicB64,
+                            name = deviceName,
+                        ),
+                    ),
+                )
+
+                var inviter = ""
+                var frame: Control? = null
+                while (frame !is Control.PairAccept) {
+                    hello()
+                    val got = withTimeoutOrNull(HELLO_RETRY_MS) { next() }
+                    if (got != null) {
+                        inviter = got.first
+                        frame = got.second
+                    }
+                }
+                val accept = frame as Control.PairAccept
+                val peerPub = Base64.decode(accept.pubkey_b64, Base64.NO_WRAP)
+                val dh = pairKey.dh(peerPub)
+                val sas = sasCode(
+                    pairKey.public,
+                    peerPub,
+                    hexToBytes(session),
+                    hexToBytes(inviter),
+                )
+                if (!onSas(sas)) {
+                    throw PairingException("rejected — codes didn't match")
+                }
+                onStage(PairStage.AwaitingConfirm(session))
+
+                val data = next().second as? Control.PairData
+                    ?: throw PairingException("expected pair_data")
+                val blobBytes = Base64.decode(data.blob_b64, Base64.NO_WRAP)
+                val blob = protoJson.decodeFromString<PairBlob>(
+                    FamilyKey.fromBytes(dh).open(blobBytes).decodeToString(),
+                )
+                Provisioning(
+                    deviceId = blob.device_id,
+                    tokenHex = blob.token_hex,
+                    familyKey = Base64.decode(blob.family_key_b64, Base64.NO_WRAP),
+                    // There is no server to keep — the invite's
+                    // `host:port` was a one-shot rendezvous.
+                    serverUrl = "",
+                    keyEpoch = blob.key_epoch,
+                    familyName = blob.family_name,
+                    familyKind = "serverless",
+                )
+            }
+        }
+    } finally {
+        runCatching { socket.close() }
+    }
+}

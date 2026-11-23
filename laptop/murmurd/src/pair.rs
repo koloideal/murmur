@@ -18,9 +18,14 @@ use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use murmur_proto::control::{HelloRole, PairBlob};
 use murmur_proto::{
-    AuthToken, Control, DeviceId, Envelope, FamilyKey, Invite, PairKey, Route, sas_code,
+    AuthToken, Control, DeviceId, Envelope, FamilyKey, FamilyKind, Invite, PairKey, Route,
+    sas_code,
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as Ws;
 use tracing::{info, warn};
@@ -70,6 +75,9 @@ fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
     let mut pair = shared.pair.lock().unwrap();
     match pair.invites.remove(&from) {
         Some(entry) => {
+            // A serverless PairHello arrived over a direct socket —
+            // its reply channel was staged by `serve_pair`.
+            let reply = pair.pair_reply.remove(&from);
             pair.pending.insert(
                 from,
                 Pending {
@@ -77,6 +85,7 @@ fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
                     peer_pub,
                     name: name.clone(),
                     created: entry.created,
+                    reply,
                 },
             );
             info!("pairing pending: {from} ({name}) — `murmurctl pair` to confirm");
@@ -92,13 +101,96 @@ fn sweep_pairing(shared: &Shared) {
     let fresh = |t: &Instant| t.elapsed() < PAIR_TTL;
     pair.invites.retain(|_, e| fresh(&e.created));
     pair.pending.retain(|_, p| fresh(&p.created));
+    let pending_ids: Vec<DeviceId> = pair.pending.keys().copied().collect();
+    pair.pair_reply.retain(|s, _| pending_ids.contains(s));
+}
+
+// ---------- serverless invite listener ----------
+
+/// A serverless invite's rendezvous: an ephemeral TCP listener that
+/// exists only while the invite does. Each accepted socket gets its
+/// own `serve_pair` — a straggler can't block a second attempt.
+async fn pair_listen(shared: Arc<Shared>, listener: TcpListener) {
+    let deadline = Instant::now() + PAIR_TTL;
+    loop {
+        match tokio::time::timeout_at(deadline.into(), listener.accept()).await {
+            Ok(Ok((s, _))) => {
+                let _ = s.set_nodelay(true);
+                tokio::spawn(serve_pair(shared.clone(), s));
+            }
+            Ok(Err(e)) => {
+                warn!("pair-listen accept: {e}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(_) => break, // invite expired — free the port
+        }
+    }
+}
+
+/// One inbound joiner socket: newline-JSON envelopes carrying cleartext
+/// `Control` frames — the same shape the relay forwards in a serverful
+/// family. A `PairHello` registers this socket as the session's reply
+/// channel *before* the frame hits `ctl_events`, so `pair_accept`/
+/// `pair_confirm` answers land back on the wire that asked.
+async fn serve_pair(shared: Arc<Shared>, s: TcpStream) {
+    let (r, mut w) = s.into_split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
+    tokio::spawn(async move {
+        while let Some(env) = rx.recv().await {
+            let mut line = env.to_json();
+            line.push('\n');
+            if w.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut br = BufReader::new(r);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match tokio::time::timeout(JOIN_TIMEOUT, br.read_line(&mut line)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(_)) => {}
+        }
+        let Ok(env) = Envelope::from_json(line.trim_end()) else {
+            continue;
+        };
+        let Ok(ctl) = env.control_payload() else {
+            continue;
+        };
+        if let Control::PairHello { .. } = ctl {
+            shared
+                .pair
+                .lock()
+                .unwrap()
+                .pair_reply
+                .insert(env.from, tx.clone());
+        }
+        let _ = shared.ctl_events.send((env.from, ctl));
+    }
 }
 
 impl Shared {
     /// `murmurctl invite`: mint a session, keep our DH key, hand back the
-    /// code the new device feeds to `murmurd pair --code`.
-    pub fn invite(&self) -> Invite {
-        let invite = Invite::new(self.cfg.server_url.clone(), self.id, self.cfg.family_kind);
+    /// code the new device feeds to `murmurd pair --code` (or scans as
+    /// a QR on the phone). In a serverless family the invite carries a
+    /// direct `host:port` the joiner dials — the listener lives as long
+    /// as the invite does.
+    pub fn invite(self: &Arc<Self>) -> anyhow::Result<Invite> {
+        let url = match self.cfg.family_kind {
+            FamilyKind::Serverful => self.cfg.server_url.clone(),
+            FamilyKind::Serverless => {
+                let ip = crate::lan::lan_ipv4()
+                    .context("serverless invite needs a LAN address to listen on")?;
+                let l = std::net::TcpListener::bind((ip, 0))?;
+                let port = l.local_addr()?.port();
+                l.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(l)?;
+                tokio::spawn(pair_listen(self.clone(), listener));
+                format!("{ip}:{port}")
+            }
+        };
+        let invite = Invite::new(url, self.id, self.cfg.family_kind);
         self.pair.lock().unwrap().invites.insert(
             invite.session,
             InviteEntry {
@@ -108,11 +200,14 @@ impl Shared {
         );
         // Register the session with the server so joiners can reach us
         // without knowing our device id (short-code path). Queued if we
-        // happen to be offline — flushed on reconnect.
-        let _ = self.send_control(&Control::PairOpen {
-            session: invite.session,
-        });
-        invite
+        // happen to be offline — flushed on reconnect. Serverless has
+        // no server — the direct listener is the rendezvous.
+        if self.cfg.family_kind == FamilyKind::Serverful {
+            let _ = self.send_control(&Control::PairOpen {
+                session: invite.session,
+            });
+        }
+        Ok(invite)
     }
 
     /// Pending joiners with their SAS codes (computable once both pubkeys
@@ -143,7 +238,32 @@ impl Shared {
                 .map(|p| p.key.public_b64())
                 .with_context(|| format!("no pending pairing {session}"))?
         };
-        self.send_control_to(Route::Device(session), &Control::PairAccept { pubkey_b64 })
+        self.send_pair_frame(session, &Control::PairAccept { pubkey_b64 })
+    }
+
+    /// Pair frames take the joiner's own transport: a direct socket
+    /// for a serverless session, the relay otherwise.
+    fn send_pair_frame(&self, session: DeviceId, ctl: &Control) -> anyhow::Result<()> {
+        let reply = self
+            .pair
+            .lock()
+            .unwrap()
+            .pending
+            .get(&session)
+            .and_then(|p| p.reply.clone());
+        match reply {
+            Some(tx) => {
+                let env = Envelope::control(
+                    self.id,
+                    Route::Device(session),
+                    self.next_seq(),
+                    ctl,
+                )?;
+                tx.send(env).map_err(|_| anyhow::anyhow!("pair socket closed"))?;
+            }
+            None => self.send_control_to(Route::Device(session), ctl)?,
+        }
+        Ok(())
     }
 
     /// `murmurctl pair confirm <session>`: register the joiner on the
@@ -159,11 +279,16 @@ impl Shared {
 
         let device_id = DeviceId::random();
         let token = AuthToken::random();
-        self.send_control(&Control::RegisterDevice {
-            device_id,
-            name: pending.name,
-            token_hash_hex: token.hash_hex(),
-        })?;
+        // Serverful families register the member on the relay;
+        // serverless ones mint the id locally — roster gossip
+        // distributes it (there is no server to ask).
+        if self.cfg.family_kind == FamilyKind::Serverful {
+            self.send_control(&Control::RegisterDevice {
+                device_id,
+                name: pending.name.clone(),
+                token_hash_hex: token.hash_hex(),
+            })?;
+        }
 
         let blob = PairBlob {
             device_id,
@@ -183,7 +308,20 @@ impl Shared {
             let sealed = FamilyKey::from_raw(dh).seal(&serde_json::to_vec(&blob)?)?;
             base64::engine::general_purpose::STANDARD.encode(sealed)
         };
-        self.send_control_to(Route::Device(session), &Control::PairData { blob_b64 })?;
+        // `pending` is already out of the map — send its reply channel
+        // along instead of re-entering `send_pair_frame`'s lookup.
+        let env = Envelope::control(
+            self.id,
+            Route::Device(session),
+            self.next_seq(),
+            &Control::PairData { blob_b64 },
+        )?;
+        match pending.reply {
+            Some(tx) => tx.send(env).map_err(|_| anyhow::anyhow!("pair socket closed"))?,
+            None => {
+                let _ = self.out.send(env);
+            }
+        }
         Ok(device_id)
     }
 }
@@ -205,17 +343,22 @@ pub struct Paired {
 /// A full invite carries server+session; a short code derives the
 /// session and needs `--server`.
 pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Result<Paired> {
-    let (session, server_url) = match Invite::decode(code) {
-        Ok(inv) => (inv.session, inv.server_url),
+    let (session, server_url, kind) = match Invite::decode(code) {
+        Ok(inv) => (inv.session, inv.server_url, inv.kind),
         Err(_) => {
-            // Not a bundle — try the typeable XXXX-XXXX form.
+            // Not a bundle — try the typeable XXXX-XXXX form. Short
+            // codes exist only for relay families: in a serverless
+            // one the rendezvous is the invite's own `host:port`.
             let session = DeviceId::from_code(code.trim());
             let server_url = server
                 .map(str::to_owned)
                 .context("short invite codes need --server ws(s)://…")?;
-            (session, server_url)
+            (session, server_url, FamilyKind::Serverful)
         }
     };
+    if kind == FamilyKind::Serverless {
+        return join_direct(&server_url, session, name).await;
+    }
     let key = PairKey::generate();
 
     let (ws, _) = tokio_tungstenite::connect_async(&server_url).await?;
@@ -340,6 +483,88 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
             }
         }
         bail!("connection closed before PairData")
+    })
+    .await
+    .context("pairing timed out — the inviter didn't confirm in time")?
+}
+
+/// Joiner side of a serverless invite: `addr` is the inviter's
+/// ephemeral `host:port`. Newline-JSON envelopes — the same `Control`
+/// frames as the relay path, no `Hello` handshake (there is no
+/// server to introduce us; the session id in `from` is the
+/// introduction).
+async fn join_direct(addr: &str, session: DeviceId, name: &str) -> anyhow::Result<Paired> {
+    let key = PairKey::generate();
+    let s = TcpStream::connect(addr).await?;
+    let _ = s.set_nodelay(true);
+    let (r, mut w) = s.into_split();
+    eprintln!("  ✓ connected to {addr} — direct");
+    eprintln!("  › pair session {session} — waiting for the other side");
+
+    let hello = Envelope::control(
+        session,
+        Route::Server,
+        1,
+        &Control::PairHello {
+            pubkey_b64: key.public_b64(),
+            name: name.into(),
+        },
+    )?;
+    w.write_all(format!("{}\n", hello.to_json()).as_bytes())
+        .await?;
+
+    tokio::time::timeout(JOIN_TIMEOUT, async {
+        let mut dh_key: Option<FamilyKey> = None;
+        let mut br = BufReader::new(r);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if br.read_line(&mut line).await? == 0 {
+                bail!("connection closed before PairData");
+            }
+            let Ok(env) = Envelope::from_json(line.trim_end()) else {
+                continue;
+            };
+            match env.control_payload()? {
+                Control::PairAccept { pubkey_b64 } => {
+                    let peer = PairKey::public_from_b64(&pubkey_b64)?;
+                    dh_key = Some(FamilyKey::from_raw(key.dh(&peer)));
+                    let sas = sas_code(&key.public, &peer, &session, &env.from);
+                    eprintln!("  │");
+                    eprintln!("  │  verification code   {sas}");
+                    eprintln!("  │");
+                    eprintln!("  │  confirm it on the inviter — `murmurctl pair` there");
+                }
+                Control::PairReject { reason } => {
+                    bail!("pairing rejected: {reason}")
+                }
+                Control::PairData { blob_b64 } => {
+                    use base64::Engine;
+                    let dk = dh_key.context("PairData before PairAccept")?;
+                    let ct = base64::engine::general_purpose::STANDARD.decode(blob_b64)?;
+                    let blob: PairBlob = serde_json::from_slice(&dk.open(&ct)?)?;
+                    return anyhow::Ok(Paired {
+                        // No relay exists to fall back to — the invite's
+                        // `host:port` was a one-shot rendezvous, not a
+                        // server.
+                        server_url: blob.server_url.unwrap_or_default(),
+                        device_id: blob.device_id,
+                        token_hex: blob.token_hex,
+                        family_key_hex: match &blob.family_key_b64 {
+                            Some(b64) => {
+                                let raw =
+                                    base64::engine::general_purpose::STANDARD.decode(b64)?;
+                                hex::encode(raw)
+                            }
+                            None => hex::encode(FamilyKey::random().0),
+                        },
+                        key_epoch: blob.key_epoch,
+                        kind: blob.kind,
+                    });
+                }
+                _ => {}
+            }
+        }
     })
     .await
     .context("pairing timed out — the inviter didn't confirm in time")?

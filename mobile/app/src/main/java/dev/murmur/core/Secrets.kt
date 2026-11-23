@@ -176,6 +176,14 @@ class Secrets(private val ctx: Context) {
             )
         }
 
+    /** Display names gossiped in members' Identity frames — the only
+     *  way a serverless family ever learns them. */
+    var peerNames: Map<String, String>
+        get() = prefs.getString(KEY_PEER_NAMES, null)?.let { s ->
+            runCatching { protoJson.decodeFromString<Map<String, String>>(s) }.getOrNull()
+        } ?: emptyMap()
+        set(v) = prefs.edit { putString(KEY_PEER_NAMES, protoJson.encodeToString(v)) }
+
     companion object {
         /** UI gate: true once the dashboard may be shown. Set on cold
          *  start when already provisioned, or by the pairing card when
@@ -203,6 +211,7 @@ class Secrets(private val ctx: Context) {
         private const val KEY_ROTATOR = "key_rotator"
         private const val KEY_REVOKED = "revoked_ids"
         private const val KEY_ROSTER = "roster"
+        private const val KEY_PEER_NAMES = "peer_names"
         private const val KEY_REMOVED = "removed"
     }
 }

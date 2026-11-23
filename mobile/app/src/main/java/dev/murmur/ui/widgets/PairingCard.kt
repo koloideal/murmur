@@ -92,6 +92,7 @@ fun PairingCard() {
     var hint by remember { mutableStateOf<String?>(null) }
     var celebrating by remember { mutableStateOf(false) }
     var burstFamily by remember { mutableStateOf<String?>(null) }
+    var lanOnly by remember { mutableStateOf(false) }
 
     val codeReady = code.length == 8
 
@@ -99,6 +100,9 @@ fun PairingCard() {
         phase = "connecting"
         error = null
         hint = null
+        // The invite itself declares the family's kind — a serverless
+        // one dials the laptop directly and never sees a server.
+        lanOnly = !short && dev.murmur.core.Invite.decode(input)?.kind == "serverless"
         job = scope.launch {
             try {
                 val prov = pair(
@@ -210,7 +214,7 @@ fun PairingCard() {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(12.dp))
                     Text(
-                        "connecting to the relay…",
+                        if (lanOnly) "connecting to the laptop…" else "connecting to the relay…",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -228,6 +232,14 @@ fun PairingCard() {
                         )
                     }
                     Spacer(Modifier.height(18.dp))
+                    if (lanOnly) {
+                        Text(
+                            "lan-only family — devices talk directly on one network",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
                     StepList(laptopSteps, current = if (phase == "accept") 0 else 2)
                     Spacer(Modifier.height(12.dp))
                     TextButton(

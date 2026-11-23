@@ -134,7 +134,7 @@ fn physical(name: &str) -> bool {
 
 /// First non-loopback, non-link-local IPv4 on a physical interface —
 /// the address we advertise in beacons for peers to dial back to.
-fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+pub(crate) fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
     if_addrs::get_if_addrs()
         .ok()?
         .iter()

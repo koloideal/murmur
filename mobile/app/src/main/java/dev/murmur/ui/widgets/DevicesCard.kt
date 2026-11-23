@@ -128,10 +128,14 @@ fun DevicesCard() {
                                                 else -> "online"
                                             },
                                         )
-                                        withStyle(
-                                            SpanStyle(color = MaterialTheme.colorScheme.outline),
-                                        ) {
-                                            append(if (lanRtt != null) " · on lan" else " · on wan")
+                                        // No route words in a serverless
+                                        // family — lan is the only road.
+                                        if (status.familyKind != "serverless") {
+                                            withStyle(
+                                                SpanStyle(color = MaterialTheme.colorScheme.outline),
+                                            ) {
+                                                append(if (lanRtt != null) " · on lan" else " · on wan")
+                                            }
                                         }
                                     }
                                 }

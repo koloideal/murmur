@@ -63,18 +63,25 @@ fun StatusCard() {
     var confirmLeave by remember { mutableStateOf(false) }
     var deviceName by remember { mutableStateOf(secrets.deviceName) }
 
+    // In a serverless family there is no relay — "online" means a
+    // peer is actually linked over LAN.
+    val online = if (status.familyKind == "serverless") {
+        status.lanPeers.isNotEmpty()
+    } else {
+        status.relay == Relay.State.ONLINE
+    }
+
     val (color, label) = when {
         removed -> MaterialTheme.colorScheme.error to "removed"
         !status.running -> MaterialTheme.colorScheme.onSurfaceVariant to "paused"
-        status.relay == Relay.State.ONLINE ->
-            MaterialTheme.colorScheme.secondary to "online"
+        online -> MaterialTheme.colorScheme.secondary to "online"
         status.relay == Relay.State.CONNECTING ->
             MaterialTheme.colorScheme.primary to "connecting"
         else -> MaterialTheme.colorScheme.error to "offline"
     }
 
-    // The wave breathes while the relay is online.
-    val phase by if (status.running && status.relay == Relay.State.ONLINE) {
+    // The wave breathes while the link is alive.
+    val phase by if (status.running && online) {
         rememberInfiniteTransition(label = "wave").animateFloat(
             initialValue = 0f,
             targetValue = 6.2832f,

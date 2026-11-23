@@ -145,6 +145,33 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             }))
         }
         Req::Devices => {
+            // Serverless: there is no registry to ask — the roster we
+            // pinned from Identity gossip IS the family list.
+            if shared.cfg.family_kind == murmur_proto::FamilyKind::Serverless {
+                let peers: std::collections::HashSet<murmur_proto::DeviceId> =
+                    shared.lan_peers().into_iter().collect();
+                let revoked = &shared.keys.read().unwrap().revoked;
+                let roster = shared.roster.lock().unwrap();
+                let devices: Vec<_> = roster
+                    .iter()
+                    .map(|(id, m)| {
+                        serde_json::json!({
+                            "device_id": id.to_string(),
+                            "name": m.name.clone().unwrap_or_else(|| id.to_string()),
+                            "online": peers.contains(id),
+                            "revoked": revoked.contains(id),
+                            "rtt_ms": peers.contains(id).then(|| shared.lan_rtt(id)),
+                            "kind": m.kind,
+                        })
+                    })
+                    .collect();
+                let family = shared.family_name.lock().unwrap().clone();
+                return Res::ok(serde_json::json!({
+                    "self": shared.id.to_string(),
+                    "family": family,
+                    "devices": devices,
+                }));
+            }
             let mut rx = shared.ctl_events.subscribe();
             match shared.send_control(&Control::ListDevices) {
                 Ok(()) => {
@@ -214,15 +241,17 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             }
             Err(e) => Res::err(e),
         },
-        Req::Invite => {
-            let invite = shared.invite();
-            Res::ok(serde_json::json!({
+        Req::Invite => match shared.invite() {
+            Ok(invite) => Res::ok(serde_json::json!({
                 "code": invite.encode(),
                 "short": invite.code,
                 "session": invite.session.to_string(),
-                "server": shared.cfg.server_url,
-            }))
-        }
+                // Serverful: the relay URL. Serverless: `host:port` of
+                // the ephemeral direct listener — the joiner dials it.
+                "server": invite.server_url,
+            })),
+            Err(e) => Res::err(e),
+        },
         Req::Rotate => match shared.rotate(vec![]) {
             Ok(epoch) => Res::ok(serde_json::json!({"epoch": epoch})),
             Err(e) => Res::err(e),

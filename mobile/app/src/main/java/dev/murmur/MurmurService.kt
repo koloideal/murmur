@@ -67,6 +67,37 @@ class MurmurService : Service() {
      *  is the "ping" the dashboard shows. */
     private val listSentAt = java.util.concurrent.atomic.AtomicLong()
 
+    /** True in a serverless family — the relay object never exists. */
+    private var serverless = false
+
+    /** Envelope seq for a family with no relay counter. */
+    private val localSeq = java.util.concurrent.atomic.AtomicLong(1)
+
+    /** The family card in a serverless world: roster members + self,
+     *  online = currently holding a live LAN link. Names arrive with
+     *  roster gossip; until then a peer shows as its device id. */
+    private fun localDevices(peers: Map<String, Long>): List<DeviceInfo> {
+        val ros = secrets.roster
+        val names = secrets.peerNames
+        val selfId = secrets.deviceId
+        val rows = ros.keys.map { id ->
+            DeviceInfo(
+                device_id = id,
+                name = names[id] ?: id,
+                revoked = false,
+                online = peers.containsKey(id),
+                rtt_ms = peers[id],
+            )
+        }
+        return rows + DeviceInfo(
+            device_id = selfId ?: "",
+            name = secrets.deviceName,
+            revoked = false,
+            online = true,
+            rtt_ms = null,
+        )
+    }
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             if (::relay.isInitialized) relay.kick()
@@ -93,48 +124,73 @@ class MurmurService : Service() {
             return
         }
 
-        relay = Relay(
-            url = secrets.serverUrl,
-            hello = {
-                dev.murmur.core.Control.Hello(
-                    device_id = secrets.deviceId!!,
-                    name = secrets.deviceName,
-                    role = "auth",
-                    token_hex = secrets.authTokenHex(),
-                )
-            },
-            scope = scope,
-            onAuthed = {
-                announceIdentity()
-                media.publishNow()
-                pollDevices()
-            },
-        )
+        // A serverless family has no relay in its world — the whole
+        // transport is the LAN mesh, and nothing below may touch a
+        // websocket.
+        serverless = secrets.familyKind == "serverless"
+        if (!serverless) {
+            relay = Relay(
+                url = secrets.serverUrl,
+                hello = {
+                    dev.murmur.core.Control.Hello(
+                        device_id = secrets.deviceId!!,
+                        name = secrets.deviceName,
+                        role = "auth",
+                        token_hex = secrets.authTokenHex(),
+                    )
+                },
+                scope = scope,
+                onAuthed = {
+                    announceIdentity()
+                    media.publishNow()
+                    pollDevices()
+                },
+            )
+        }
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
         lan = LanLink(secrets.deviceId!!, key, scope, { onEnvelope(it) }) { send(it) }
         status.value = Status(provisioned = true, running = true, familyKind = secrets.familyKind)
-        relay.start()
+        if (!serverless) relay.start()
         lan.start()
+        var seenPeers = emptySet<String>()
         scope.launch {
             lan.peersFlow.collect { p ->
-                status.value = status.value.copy(lanPeers = p)
+                val st = status.value.copy(lanPeers = p)
+                // Serverless has no ListDevices — the family card is
+                // synthesised locally from the roster + live links
+                // until roster gossip lands.
+                status.value = if (serverless) st.copy(devices = localDevices(p)) else st
+                if (serverless) {
+                    // No relay connect event exists — a link-up IS the
+                    // rendezvous. Announce so the peer pins our identity
+                    // and name; fresh media state follows so its
+                    // dashboard isn't blank.
+                    val arrived = p.keys - seenPeers
+                    if (arrived.isNotEmpty()) {
+                        arrived.forEach { announceIdentity(to = it) }
+                        media.publishNow()
+                    }
+                }
+                seenPeers = p.keys
             }
         }
-        scope.launch { relay.incoming.collect { onEnvelope(it) } }
-        scope.launch {
-            relay.state.collect { st ->
-                status.value = status.value.copy(relay = st)
-                if (st == Relay.State.ONLINE) {
-                    // Cheap self-heal: the family list always shows the
-                    // current name — debug installs suffix it with ·dev.
-                    pushName()
-                }
-                if (st == Relay.State.REVOKED) {
-                    // The relay forgot us — nothing to retry. Keep the keys
-                    // off the wire and let the dashboard offer re-pairing.
-                    secrets.removed = true
-                    stopSelf()
+        if (!serverless) {
+            scope.launch { relay.incoming.collect { onEnvelope(it) } }
+            scope.launch {
+                relay.state.collect { st ->
+                    status.value = status.value.copy(relay = st)
+                    if (st == Relay.State.ONLINE) {
+                        // Cheap self-heal: the family list always shows the
+                        // current name — debug installs suffix it with ·dev.
+                        pushName()
+                    }
+                    if (st == Relay.State.REVOKED) {
+                        // The relay forgot us — nothing to retry. Keep the keys
+                        // off the wire and let the dashboard offer re-pairing.
+                        secrets.removed = true
+                        stopSelf()
+                    }
                 }
             }
         }
@@ -145,7 +201,12 @@ class MurmurService : Service() {
                 val laptops = st.devices.count {
                     it.online && !it.revoked && it.device_id != secrets.deviceId
                 }
-                val text = when (st.relay) {
+                val text = if (serverless) {
+                    when (st.lanPeers.size) {
+                        0 -> "offline — no peers"
+                        else -> "online · ${st.lanPeers.size} peer(s) · lan only"
+                    }
+                } else when (st.relay) {
                     Relay.State.ONLINE -> when (laptops) {
                         0 -> "online · no laptop around"
                         1 -> "online · 1 device"
@@ -160,23 +221,25 @@ class MurmurService : Service() {
             }
         }
 
-        // Push our display name (idempotent server-side upsert) and keep
-        // the family list + server ping fresh while online.
-        scope.launch {
-            relay.state.collect { st ->
-                if (st == Relay.State.ONLINE) pushName()
-            }
-        }
-        // Device list + ping only matter while someone looks at them —
-        // poll while the dashboard is visible, stay silent otherwise.
-        scope.launch {
-            combine(uiVisible, relay.state) { v, st -> v && st == Relay.State.ONLINE }
-                .collectLatest { live ->
-                    while (live) {
-                        pollDevices()
-                        kotlinx.coroutines.delay(DEVICES_POLL_MS)
-                    }
+        if (!serverless) {
+            // Push our display name (idempotent server-side upsert) and keep
+            // the family list + server ping fresh while online.
+            scope.launch {
+                relay.state.collect { st ->
+                    if (st == Relay.State.ONLINE) pushName()
                 }
+            }
+            // Device list + ping only matter while someone looks at them —
+            // poll while the dashboard is visible, stay silent otherwise.
+            scope.launch {
+                combine(uiVisible, relay.state) { v, st -> v && st == Relay.State.ONLINE }
+                    .collectLatest { live ->
+                        while (live) {
+                            pollDevices()
+                            kotlinx.coroutines.delay(DEVICES_POLL_MS)
+                        }
+                    }
+            }
         }
 
         getSystemService(ConnectivityManager::class.java)
@@ -213,12 +276,13 @@ class MurmurService : Service() {
     }
 
     private fun announceIdentity(to: String = Envelope.ALL) =
-        send(Msg.Identity(identity.publicB64, "phone"), to)
+        send(Msg.Identity(identity.publicB64, "phone", secrets.deviceName), to)
 
     /** TOFU: the first identity a member announces under the current
      *  family key is the one we trust for its key rotations. */
     private fun pin(from: String, id: Msg.Identity) {
         if (from == secrets.deviceId || from in secrets.revokedIds) return
+        id.name?.let { secrets.peerNames = secrets.peerNames + (from to it) }
         val roster = secrets.roster
         if (roster.containsKey(from)) return
         secrets.roster = roster + (from to (id.pub_b64 to id.kind))
@@ -265,14 +329,15 @@ class MurmurService : Service() {
             v = Envelope.VERSION,
             from = secrets.deviceId!!,
             to = to,
-            seq = relay.nextSeq(),
+            seq = if (::relay.isInitialized) relay.nextSeq() else localSeq.getAndIncrement(),
             payload = Base64.encodeToString(key.seal(pt), Base64.NO_WRAP),
         )
         // LAN delivers an early copy when the route matches the link;
         // the relay copy is authoritative and gets deduped on receipt —
-        // a silently dead link can never eat a frame.
+        // a silently dead link can never eat a frame. A serverless
+        // family has no relay at all — links are the whole transport.
         lan.sendIfPeer(env.toJson(), to)
-        relay.sendEnv(env)
+        if (::relay.isInitialized) relay.sendEnv(env)
     }
 
     /**
