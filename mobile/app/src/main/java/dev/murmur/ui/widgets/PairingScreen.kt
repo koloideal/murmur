@@ -4,32 +4,33 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -66,17 +68,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
- * Guided pairing: QR is the primary path, the typeable XXXX-XXXX code is
- * the manual fallback. Both converge on the six-digit SAS comparison.
- * Once the phone is provisioned and the welcome burst has played, this
- * card folds away and the dashboard takes over.
+ * Everything an unpaired phone sees — the entire screen. First the
+ * literal split: two halves, serverful vs serverless. Then the guided
+ * pairing: QR is the primary path, the typeable XXXX-XXXX code is the
+ * manual fallback. Both converge on the six-digit SAS comparison.
+ * Once the phone is provisioned and the welcome burst has played,
+ * MainActivity swaps this for the dashboard.
  */
 @Composable
-fun PairingCard() {
+fun PairingScreen() {
     val ctx = LocalContext.current
     val secrets = remember { Secrets(ctx) }
     val scope = rememberCoroutineScope()
-    val settled by Secrets.settledFlow.collectAsState()
 
     var phase by remember { mutableStateOf("idle") }
     var manual by remember { mutableStateOf(false) }
@@ -194,10 +197,20 @@ fun PairingCard() {
         phase = "idle"
     }
 
-    AnimatedVisibility(
-        visible = !settled,
-        exit = fadeOut() + shrinkVertically(),
-        enter = fadeIn() + expandVertically(),
+    if (kind == null) {
+        FamilyKindSplit { picked ->
+            kind = picked
+            if (picked == "serverless") lanOnly = true
+        }
+        return
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
     ) {
         FeatureCard("pair this phone", Icons.Outlined.QrCodeScanner) {
             when {
@@ -301,25 +314,6 @@ fun PairingCard() {
                 }
 
                 else -> {
-                    if (kind == null) {
-                        // Two halves — the fundamental split. What the
-                        // laptop's invite carries is the truth either
-                        // way; this decides whether a server field
-                        // exists for the user at all.
-                        ModeChoice(
-                            "serverful",
-                            "through the relay — works from anywhere",
-                        ) { kind = "serverful" }
-                        Spacer(Modifier.height(10.dp))
-                        ModeChoice(
-                            "serverless",
-                            "direct on one network — no server, ever",
-                        ) {
-                            kind = "serverless"
-                            lanOnly = true
-                        }
-                        return@FeatureCard
-                    }
                     Text(
                         if (kind == "serverless") "on a laptop in your lan-only family, run"
                         else "on a laptop that's already in the family, run",
@@ -560,26 +554,77 @@ private fun Cell(ch: Char?, active: Boolean, modifier: Modifier = Modifier, onTa
     }
 }
 
-/** One half of the family-kind split — a tappable row with the kind
- *  name and what the choice actually means for the user. */
+/** The first thing an unpaired phone ever sees: the screen literally
+ *  split in two. The family's transport is the one decision nothing
+ *  else can be built on — the invite still carries the truth, this
+ *  only decides which fields the phone will offer at all. */
 @Composable
-private fun ModeChoice(title: String, desc: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+private fun FamilyKindSplit(onPick: (String) -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            KindHalf(
+                Modifier.weight(1f),
+                Icons.Outlined.Cloud,
+                "serverful",
+                "through the relay — works from anywhere",
+            ) { onPick("serverful") }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            KindHalf(
+                Modifier.weight(1f),
+                Icons.Outlined.Wifi,
+                "serverless",
+                "direct on one network — no server, ever",
+            ) { onPick("serverless") }
+        }
+        Surface(
+            Modifier.align(Alignment.Center),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            shadowElevation = 3.dp,
+        ) {
             Text(
-                title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                "what kind of family?",
+                Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+@Composable
+private fun KindHalf(
+    modifier: Modifier,
+    icon: ImageVector,
+    title: String,
+    sub: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.padding(horizontal = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(72.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(title, style = MaterialTheme.typography.displaySmall)
+            Spacer(Modifier.height(6.dp))
             Text(
-                desc,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                sub,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
         }
     }

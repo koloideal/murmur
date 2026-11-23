@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,8 +34,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import dev.murmur.core.Secrets
 import dev.murmur.ui.theme.MurmurTheme
+import dev.murmur.ui.widgets.GrantGate
+import dev.murmur.ui.widgets.PairingScreen
 import dev.murmur.ui.widgets.homeWidgets
+import dev.murmur.ui.widgets.rememberGrants
 
 class MainActivity : ComponentActivity() {
 
@@ -53,35 +58,48 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Publishes settledFlow before the first frame decides which
+        // world to show.
+        Secrets(this)
         setContent {
-            var about by remember { mutableStateOf(false) }
             MurmurTheme {
-                Scaffold(
-                    topBar = {
-                        TopAppBar(
-                            title = {
-                                Text(
-                                    "murmur",
-                                    style = MaterialTheme.typography.headlineSmall,
+                val grants = rememberGrants()
+                val settled by Secrets.settledFlow.collectAsState()
+                when {
+                    // No access, no app — the gate asks at entry and
+                    // offers grant-or-quit, nothing else.
+                    !grants.all -> GrantGate(grants)
+                    !settled -> PairingScreen()
+                    else -> {
+                        var about by remember { mutableStateOf(false) }
+                        Scaffold(
+                            topBar = {
+                                TopAppBar(
+                                    title = {
+                                        Text(
+                                            "murmur",
+                                            style = MaterialTheme.typography.headlineSmall,
+                                        )
+                                    },
+                                    actions = {
+                                        FilledTonalIconButton(onClick = { about = true }) {
+                                            Icon(
+                                                Icons.AutoMirrored.Outlined.HelpOutline,
+                                                contentDescription = "what is murmur",
+                                            )
+                                        }
+                                    },
+                                    colors = TopAppBarDefaults.topAppBarColors(
+                                        titleContentColor = MaterialTheme.colorScheme.primary,
+                                    ),
                                 )
                             },
-                            actions = {
-                                FilledTonalIconButton(onClick = { about = true }) {
-                                    Icon(
-                                        Icons.AutoMirrored.Outlined.HelpOutline,
-                                        contentDescription = "what is murmur",
-                                    )
-                                }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                titleContentColor = MaterialTheme.colorScheme.primary,
-                            ),
-                        )
-                    },
-                ) { padding ->
-                    HomeScreen(Modifier.padding(padding))
+                        ) { padding ->
+                            HomeScreen(Modifier.padding(padding))
+                        }
+                        if (about) AboutSheet(onDismiss = { about = false })
+                    }
                 }
-                if (about) AboutSheet(onDismiss = { about = false })
             }
         }
     }

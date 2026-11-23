@@ -11,6 +11,4 @@ val homeWidgets: List<@Composable () -> Unit> = listOf(
     { StatusCard() },
     { DevicesCard() },
     { NotificationsCard() },
-    { PairingCard() },
-    { PermissionsCard() },
 )
