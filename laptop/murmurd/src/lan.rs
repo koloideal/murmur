@@ -61,8 +61,12 @@ pub async fn run(shared: Arc<Shared>, hub: Arc<Hub>) -> anyhow::Result<()> {
 
 /// Periodic sealed-beacon broadcast — proves family membership to anyone
 /// listening on the subnet.
+///
+/// Targets every interface's *directed* broadcast (192.168.31.255-style)
+/// plus the limited one: under a full-tunnel VPN `255.255.255.255`
+/// routes into the tunnel and never reaches the LAN, while directed
+/// broadcasts follow each interface's own subnet route.
 async fn beacon_send(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result<()> {
-    let dst = ("255.255.255.255", BEACON_PORT);
     let mut tick = tokio::time::interval(BEACON_EVERY);
     loop {
         tick.tick().await;
@@ -76,8 +80,27 @@ async fn beacon_send(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
                 kind: DeviceKind::Laptop,
             },
         )?;
-        let _ = udp.send_to(env.to_json().as_bytes(), dst).await;
+        let bytes = env.to_json().into_bytes();
+        let _ = udp.send_to(&bytes, ("255.255.255.255", BEACON_PORT)).await;
+        for bcast in broadcast_addrs() {
+            let _ = udp.send_to(&bytes, (bcast, BEACON_PORT)).await;
+        }
     }
+}
+
+/// Directed broadcast addresses of all non-loopback IPv4 interfaces —
+/// empty on any error (the limited broadcast still goes out).
+fn broadcast_addrs() -> Vec<std::net::Ipv4Addr> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    ifaces
+        .iter()
+        .filter_map(|i| match &i.addr {
+            if_addrs::IfAddr::V4(v4) if !v4.is_loopback() => v4.broadcast,
+            _ => None,
+        })
+        .collect()
 }
 
 /// UDP → decode → open (auth) → dial. A beacon that can't be opened is

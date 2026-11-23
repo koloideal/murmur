@@ -95,7 +95,10 @@ class LanLink(
             }
             s
         }
-        val dst = InetSocketAddress("255.255.255.255", BEACON_PORT)
+        // Limited broadcast PLUS every interface's directed broadcast:
+        // on Android a raw 255.255.255.255 send can be routed to the
+        // wrong (e.g. cellular) interface, while the subnet-directed
+        // address follows the interface's own route.
         while (true) {
             val msg = Msg.LanBeacon(LINK_PORT, "phone")
             val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
@@ -107,10 +110,28 @@ class LanLink(
                 payload = android.util.Base64.encodeToString(key.seal(pt), android.util.Base64.NO_WRAP),
             )
             val bytes = env.toJson().encodeToByteArray()
-            runCatching { sock.send(DatagramPacket(bytes, bytes.size, dst)) }
+            runCatching {
+                sock.send(DatagramPacket(bytes, bytes.size, LIMITED_BCAST))
+                for (dst in directedBroadcasts()) {
+                    sock.send(DatagramPacket(bytes, bytes.size, dst))
+                }
+            }
             delay(BEACON_MS)
         }
     }
+
+    /** Subnet-directed broadcast target per up non-loopback interface —
+     *  e.g. 192.168.31.255 for wlan0. Java hands us the address directly;
+     *  no permissions needed. */
+    private fun directedBroadcasts(): List<InetSocketAddress> =
+        runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces().asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.interfaceAddresses.asSequence() }
+                .mapNotNull { it.broadcast?.hostAddress }
+                .map { InetSocketAddress(it, BEACON_PORT) }
+                .toList()
+        }.getOrElse { emptyList() }
 
     // -- link -----------------------------------------------------------------
 
@@ -161,5 +182,6 @@ class LanLink(
         const val LINK_PORT = 17894
         const val BEACON_MS = 4000L
         const val SOCKET_RETRY_MS = 2_000L
+        val LIMITED_BCAST = InetSocketAddress("255.255.255.255", BEACON_PORT)
     }
 }
