@@ -43,6 +43,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Side-by-side dev install — "murmur dev" lives next to the
+            // release app, so fast local iterations never fight its
+            // signing. Pause the release service before running it:
+            // both would bind the same LAN ports.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "murmur dev")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

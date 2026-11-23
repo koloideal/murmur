@@ -47,15 +47,19 @@ class LanLink(
 
     @Volatile private var linkSock: Socket? = null
 
-    /** Every link write goes through this monitor — OutputStream.write
-     *  is not atomic across threads, and interleaved bytes would
-     *  corrupt the newline-delimited JSON framing. */
-    private val writeLock = Any()
+    /** One writer owns the socket: media/notification callbacks run on
+     *  the main thread, where a socket write is a fatal
+     *  NetworkOnMainThreadException — and several writers racing on one
+     *  OutputStream would corrupt the newline framing anyway. */
+    private val writeQ = kotlinx.coroutines.channels.Channel<ByteArray>(
+        kotlinx.coroutines.channels.Channel.UNLIMITED,
+    )
 
     fun start() {
         scope.launch(Dispatchers.IO) { beaconLoop() }
         scope.launch(Dispatchers.IO) { acceptLoop() }
         scope.launch(Dispatchers.IO) { pingLoop() }
+        scope.launch(Dispatchers.IO) { writerLoop() }
     }
 
     fun stop() {
@@ -75,23 +79,30 @@ class LanLink(
      * early copy"; the caller always sends over the relay regardless.
      */
     fun sendIfPeer(envJson: String, to: String): Boolean {
-        val s = out ?: return false
+        out ?: return false
         val p = peer.get() ?: return false
         if (to != p && to != Envelope.ALL) return false
-        return runCatching {
-            synchronized(writeLock) {
-                s.write((envJson + "\n").toByteArray())
+        writeQ.trySend((envJson + "\n").toByteArray())
+        return true
+    }
+
+    /** The link's only writer — drains [writeQ] onto whatever socket is
+     *  current, so a send from any thread is just a queue push. */
+    private suspend fun writerLoop() {
+        for (bytes in writeQ) {
+            val s = out ?: continue
+            runCatching {
+                s.write(bytes)
                 s.flush()
+            }.onFailure {
+                drop("write: ${it.javaClass.simpleName}: ${it.message}")
             }
-            true
-        }.getOrElse {
-            Log.i(TAG, "link dropped (write: ${it.message})")
-            drop()
-            false
         }
     }
 
-    private fun drop() {
+    private fun drop(reason: String = "unspecified") {
+        if (peer.get() != null) Log.i(TAG, "link dropped ($reason)")
+        while (writeQ.tryReceive().isSuccess) {}
         peer.set(null)
         peerFlow.value = null
         rttFlow.value = null
@@ -121,15 +132,7 @@ class LanLink(
             val s = out
             if (s != null && peer.get() != null) {
                 val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
-                runCatching {
-                    synchronized(writeLock) {
-                        s.write((env.toJson() + "\n").toByteArray())
-                        s.flush()
-                    }
-                }.onFailure {
-                    Log.i(TAG, "link dropped (ping write: ${it.message})")
-                    drop()
-                }
+                writeQ.trySend((env.toJson() + "\n").toByteArray())
             }
             delay(PING_MS)
         }
@@ -261,12 +264,7 @@ class LanLink(
             when (msg) {
                 is Msg.LanPing -> {
                     val pong = sealedEnv(Msg.LanPong(msg.ts))
-                    runCatching {
-                        synchronized(writeLock) {
-                            s.getOutputStream().write((pong.toJson() + "\n").toByteArray())
-                            s.getOutputStream().flush()
-                        }
-                    }
+                    writeQ.trySend((pong.toJson() + "\n").toByteArray())
                     continue
                 }
                 is Msg.LanPong -> {

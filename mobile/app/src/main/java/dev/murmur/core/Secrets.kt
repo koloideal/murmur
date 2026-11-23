@@ -59,7 +59,10 @@ class Secrets(private val ctx: Context) {
                 ctx.contentResolver, "device_name",
             )
         }.getOrNull()
-        return sys?.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL
+        val base = sys?.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL
+        // The side-by-side debug install is a second family member on
+        // the same handset — mark it so the device list reads sanely.
+        return if (ctx.packageName.endsWith(".debug")) "$base·dev" else base
     }
 
     /** Full local logout: prefs + the Keystore key material. */

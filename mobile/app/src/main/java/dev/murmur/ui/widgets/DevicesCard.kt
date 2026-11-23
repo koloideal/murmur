@@ -36,7 +36,8 @@ import dev.murmur.core.Secrets
 @Composable
 fun DevicesCard() {
     val ctx = LocalContext.current
-    val selfId = remember { Secrets(ctx).deviceId }
+    val secrets = remember { Secrets(ctx) }
+    val selfId = remember { secrets.deviceId }
     val status by MurmurService.status.collectAsState()
     val settled by Secrets.settledFlow.collectAsState()
     val removed by Secrets.removedFlow.collectAsState()
@@ -81,6 +82,11 @@ fun DevicesCard() {
                             buildAnnotatedString {
                                 when {
                                     !d.online -> append("offline")
+                                    // Phones get a bare status — a relay
+                                    // RTT or link route means nothing on
+                                    // a handset row.
+                                    secrets.roster[d.device_id]?.second == "phone" ->
+                                        append("online")
                                     else -> {
                                         val onLan = d.device_id == status.lanPeer
                                         append(
