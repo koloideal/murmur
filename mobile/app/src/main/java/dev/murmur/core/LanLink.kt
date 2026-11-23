@@ -47,6 +47,11 @@ class LanLink(
 
     @Volatile private var linkSock: Socket? = null
 
+    /** Every link write goes through this monitor — OutputStream.write
+     *  is not atomic across threads, and interleaved bytes would
+     *  corrupt the newline-delimited JSON framing. */
+    private val writeLock = Any()
+
     fun start() {
         scope.launch(Dispatchers.IO) { beaconLoop() }
         scope.launch(Dispatchers.IO) { acceptLoop() }
@@ -74,8 +79,10 @@ class LanLink(
         val p = peer.get() ?: return false
         if (to != p && to != Envelope.ALL) return false
         return runCatching {
-            s.write((envJson + "\n").toByteArray())
-            s.flush()
+            synchronized(writeLock) {
+                s.write((envJson + "\n").toByteArray())
+                s.flush()
+            }
             true
         }.getOrElse {
             Log.i(TAG, "link dropped (write: ${it.message})")
@@ -115,8 +122,10 @@ class LanLink(
             if (s != null && peer.get() != null) {
                 val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
                 runCatching {
-                    s.write((env.toJson() + "\n").toByteArray())
-                    s.flush()
+                    synchronized(writeLock) {
+                        s.write((env.toJson() + "\n").toByteArray())
+                        s.flush()
+                    }
                 }.onFailure {
                     Log.i(TAG, "link dropped (ping write: ${it.message})")
                     drop()
@@ -253,8 +262,10 @@ class LanLink(
                 is Msg.LanPing -> {
                     val pong = sealedEnv(Msg.LanPong(msg.ts))
                     runCatching {
-                        s.getOutputStream().write((pong.toJson() + "\n").toByteArray())
-                        s.getOutputStream().flush()
+                        synchronized(writeLock) {
+                            s.getOutputStream().write((pong.toJson() + "\n").toByteArray())
+                            s.getOutputStream().flush()
+                        }
                     }
                     continue
                 }
