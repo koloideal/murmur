@@ -151,8 +151,10 @@ def status_text(up: bool, lan: bool = False, kind: str = "serverful") -> str:
     link = ""
     if up and kind == "serverful":
         link = f'<span foreground="{dim}"> · on {"lan" if lan else "wan"}</span>'
+    # kind=None: daemon unreachable — there's no family to name.
+    tail = f'<span foreground="{dim}"> · as {kind}</span>' if kind else ""
     return (f'<span foreground="{_hex(fg)}"><b>murmur</b> {word}</span>'
-            f'{link}<span foreground="{dim}"> · as {kind}</span>'
+            f'{link}{tail}'
             f' <span foreground="{dot}">●</span>')
 
 
@@ -198,7 +200,7 @@ def status() -> dict:
     if st and st["kind"] == "serverless" and not st["lan_peers"]:
         up = False
     return {
-        "text": status_text(up, lan=bool(st and st["lan"]), kind=st["kind"] if st else "serverful"),
+        "text": status_text(up, lan=bool(st and st["lan"]), kind=st["kind"] if st else None),
         "class": "on" if up else "off",
         "tooltip": status_tooltip(st),
     }
