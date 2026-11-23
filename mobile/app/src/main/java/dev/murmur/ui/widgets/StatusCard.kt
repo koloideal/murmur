@@ -146,9 +146,11 @@ fun StatusCard() {
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (status.familyKind != "serverless") {
-                    status.familyName?.let { StatusRow("family", it) }
-                }
+                StatusRow(
+                    "family",
+                    status.familyName ?: "—",
+                    dim = status.familyName == null,
+                )
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -163,30 +165,32 @@ fun StatusCard() {
                     }
                 }
                 StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
-                if (status.familyKind == "serverless") {
-                    // No server exists anywhere in this family's world.
-                    StatusRow(
-                        "family",
-                        listOfNotNull(status.familyName, "serverless · lan only")
-                            .joinToString(" · "),
-                    )
-                } else {
-                    StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
-                    if (secrets.serverUrl.startsWith("ws://")) {
-                        Text(
-                            "plain ws — messages stay end-to-end sealed, but the " +
-                                "relay login travels unencrypted. Prefer wss://.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.tertiary,
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-                        )
-                    }
-                    StatusRow(
-                        "ping",
-                        status.serverRttMs?.let { "$it ms" } ?: "—",
-                        dim = status.serverRttMs == null,
+                StatusRow(
+                    "server",
+                    if (status.familyKind == "serverless") "none — lan only"
+                    else secrets.serverUrl.ifEmpty { "—" },
+                )
+                if (status.familyKind != "serverless" && secrets.serverUrl.startsWith("ws://")) {
+                    Text(
+                        "plain ws — messages stay end-to-end sealed, but the " +
+                            "relay login travels unencrypted. Prefer wss://.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
                     )
                 }
+                StatusRow(
+                    "ping",
+                    if (status.familyKind == "serverless") {
+                        status.lanPeers.values.filter { it > 0 }.maxOrNull()
+                            ?.let { "$it ms" } ?: "—"
+                    } else {
+                        status.serverRttMs?.let { "$it ms" } ?: "—"
+                    },
+                    dim = if (status.familyKind == "serverless")
+                        status.lanPeers.values.all { it <= 0 }
+                    else status.serverRttMs == null,
+                )
                 Spacer(Modifier.height(8.dp))
                 Row {
                     OutlinedButton(

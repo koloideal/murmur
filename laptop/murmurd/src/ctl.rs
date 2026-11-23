@@ -137,6 +137,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "name": shared.cfg.name,
                 "server": shared.cfg.server_url,
                 "family_kind": shared.cfg.family_kind,
+                "family_name": shared.family_name.lock().unwrap().clone(),
                 "online": online,
                 "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "lan_peers": shared.lan_peers().iter().map(|i| i.to_string()).collect::<Vec<_>>(),

@@ -209,9 +209,11 @@ fn cmd_status() -> anyhow::Result<()> {
         state,
     );
     println!("  relay   {}", d["server"].as_str().unwrap_or("?"));
+    let fam_name = d["family_name"].as_str().filter(|s| !s.is_empty());
     println!(
-        "  family  {}",
-        p.dim(format!("as {}", d["family_kind"].as_str().unwrap_or("serverful"))),
+        "  family  {} {}",
+        fam_name.unwrap_or("—"),
+        p.dim(format!("· {}", d["family_kind"].as_str().unwrap_or("serverful"))),
     );
     if let Some(peers) = d["lan_peers"].as_array().filter(|p| !p.is_empty()) {
         let rtt = d["lan_rtt_ms"].as_object();
