@@ -32,13 +32,20 @@ const LINK_PORT: u16 = 17894;
 const BEACON_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The dial direction for this node: laptops dial phones.
-const PEER_KIND: DeviceKind = DeviceKind::Phone;
+/// A peer someone discovered for us — UDP beacon or a relay-delivered
+/// `LanBeacon` both land here; `dial_loop` does the connecting.
+#[derive(Clone, Copy, Debug)]
+pub struct DialHint {
+    pub peer: murmur_proto::DeviceId,
+    pub addr: std::net::IpAddr,
+    pub port: u16,
+    pub kind: DeviceKind,
+}
 
 pub async fn run(
     shared: Arc<Shared>,
     hub: Arc<Hub>,
-    dial_rx: mpsc::UnboundedReceiver<(murmur_proto::DeviceId, std::net::IpAddr, u16)>,
+    dial_rx: mpsc::UnboundedReceiver<DialHint>,
 ) -> anyhow::Result<()> {
     // A taken port must not kill the daemon — the relay stays the
     // control plane; LAN is a bonus fast-path only.
@@ -184,10 +191,12 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
         else {
             continue;
         };
-        if kind != PEER_KIND {
-            continue;
-        }
-        let _ = shared.lan_dial.send((env.from, src.ip(), tcp_port));
+        let _ = shared.lan_dial.send(DialHint {
+            peer: env.from,
+            addr: src.ip(),
+            port: tcp_port,
+            kind,
+        });
     }
 }
 
@@ -196,29 +205,34 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
 /// already linked or its address isn't in any local subnet (a relay
 /// beacon can legitimately arrive from another network — that's not
 /// a LAN peer for us). Per-peer rate-limit covers beacon bursts.
+///
+/// Dial direction is deterministic so a pair never holds two
+/// connections: phones only listen, so a laptop always calls a phone;
+/// between two dialing-capable nodes the lower device id calls.
 async fn dial_loop(
     shared: Arc<Shared>,
     hub: Arc<Hub>,
-    mut rx: mpsc::UnboundedReceiver<(murmur_proto::DeviceId, std::net::IpAddr, u16)>,
+    mut rx: mpsc::UnboundedReceiver<DialHint>,
 ) {
     let mut last_dial = std::collections::HashMap::new();
-    while let Some((peer, ip, port)) = rx.recv().await {
-        // One link at a time — dialing a second peer while linked
-        // just builds never-adopted zombie sockets on both ends.
-        if shared.lan_peer().is_some() || !in_local_subnet(ip) {
+    while let Some(hint) = rx.recv().await {
+        if hint.kind != DeviceKind::Phone && shared.id > hint.peer {
+            continue; // the lower-id side initiates
+        }
+        if shared.lan_peers().contains(&hint.peer) || !in_local_subnet(hint.addr) {
             continue;
         }
         let now = std::time::Instant::now();
-        if last_dial.get(&peer).is_some_and(|t| now - *t < DIAL_EVERY) {
+        if last_dial.get(&hint.peer).is_some_and(|t| now - *t < DIAL_EVERY) {
             continue;
         }
-        last_dial.insert(peer, now);
-        let addr = SocketAddr::new(ip, port);
+        last_dial.insert(hint.peer, now);
+        let addr = SocketAddr::new(hint.addr, hint.port);
         match TcpStream::connect(addr).await {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
-                info!("lan: dialed {addr} ({peer})");
-                spawn_link(&shared, &hub, s, Some(peer));
+                info!("lan: dialed {addr} ({})", hint.peer);
+                spawn_link(&shared, &hub, s, Some(hint.peer));
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }
@@ -280,13 +294,10 @@ fn spawn_link(
     };
     let (r, w) = s.into_split();
     if let Some(peer) = adopt_as {
-        let cur = shared.lan_peer();
-        if cur.is_none() || cur == Some(peer) {
-            if cur.is_none() {
-                info!("lan: link up with {peer}");
-            }
-            shared.lan_adopt(peer, tx.clone());
+        if !shared.lan_peers().contains(&peer) {
+            info!("lan: link up with {peer}");
         }
+        shared.lan_adopt(peer, tx.clone());
     }
     if let Ok(env) = Envelope::seal(
         shared.id,
@@ -424,24 +435,20 @@ async fn link_reader(
                         continue;
                     }
                     Message::LanPong { ts } => {
-                        shared
-                            .lan_rtt
-                            .store(now_ms().saturating_sub(*ts), std::sync::atomic::Ordering::Relaxed);
+                        // The peer is already adopted at this point —
+                        // the pong arrives after the beacon exchange.
+                        shared.lan_rtt_set(env.from, now_ms().saturating_sub(*ts));
                         continue;
                     }
                     _ => {}
                 }
-                // A frame that opens proves family membership → adopt
-                // the link for outbound traffic. Only an empty slot or
-                // the same peer re-adopts — a *different* peer must not
-                // evict a live link (multi-phone flap).
-                let cur = shared.lan_peer();
-                if cur.is_none() || cur == Some(env.from) {
-                    if cur.is_none() {
-                        info!("lan: link up with {}", env.from);
-                    }
-                    shared.lan_adopt(env.from, tx.clone());
+                // A frame that opens proves family membership → adopt.
+                // Each peer owns its own map slot — a second device
+                // links alongside, never evicts.
+                if !shared.lan_peers().contains(&env.from) {
+                    info!("lan: link up with {}", env.from);
                 }
+                shared.lan_adopt(env.from, tx.clone());
                 if shared.dedupe(env.from, env.seq) {
                     hub.dispatch(env.from, &msg);
                 }

@@ -11,7 +11,7 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * LAN fast-path sibling of [Relay]: sealed-envelope UDP beacon +
@@ -19,9 +19,9 @@ import java.util.concurrent.atomic.AtomicReference
  * shape as the WS transport, zero extra auth (a frame that opens =
  * family member).
  *
- * The phone only LISTENS and beacons — laptops dial. [sendIfPeer]
- * short-circuits Device-unicast to the linked peer; everything else
- * (broadcast `*`, other devices) keeps going through the relay.
+ * The phone only LISTENS and beacons — laptops dial. Every peer gets
+ * its own entry in [links]: several laptops can hold a link at once
+ * (a star with the phone as hub), [sendIfPeer] picks the right link.
  */
 class LanLink(
     private val selfId: String,
@@ -33,25 +33,30 @@ class LanLink(
      *  broadcast entirely. */
     private val sendRelay: (Msg) -> Unit = {},
 ) {
-    private val peer = AtomicReference<String?>(null)
+    /** One live link to a peer — socket + writer handle + last RTT. */
+    private class Link(val sock: Socket, val out: OutputStream) {
+        @Volatile var rttMs: Long? = null
+    }
 
-    /** Device id behind the live link — drives the "on lan" UI badge. */
-    val peerFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val links = ConcurrentHashMap<String, Link>()
 
-    /** Last measured round-trip over the live link in ms — the real
-     *  LAN latency the UI shows next to "on lan" (the relay RTT the
-     *  device list reports looks identical on lan and wan otherwise). */
-    val rttFlow = kotlinx.coroutines.flow.MutableStateFlow<Long?>(null)
+    /** peer id → measured LAN round-trip in ms (missing entry = not
+     *  linked, null rtt = not yet measured) — drives the per-device
+     *  "on lan" badge and the real ping in the UI. */
+    val peersFlow = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Long>>(emptyMap())
 
-    @Volatile private var out: OutputStream? = null
+    private fun publishPeers() {
+        peersFlow.value = links.mapValues { it.value.rttMs ?: 0L }
+    }
 
-    @Volatile private var linkSock: Socket? = null
+    /** A queued socket write tagged with its target peer. */
+    private class Write(val peer: String, val bytes: ByteArray)
 
-    /** One writer owns the socket: media/notification callbacks run on
-     *  the main thread, where a socket write is a fatal
-     *  NetworkOnMainThreadException — and several writers racing on one
-     *  OutputStream would corrupt the newline framing anyway. */
-    private val writeQ = kotlinx.coroutines.channels.Channel<ByteArray>(
+    /** One writer owns every link's socket: media/notification
+     *  callbacks run on the main thread, where a socket write is a
+     *  fatal NetworkOnMainThreadException — a send from any thread is
+     *  just a queue push, and writes can't interleave mid-line. */
+    private val writeQ = kotlinx.coroutines.channels.Channel<Write>(
         kotlinx.coroutines.channels.Channel.UNLIMITED,
     )
 
@@ -63,52 +68,52 @@ class LanLink(
     }
 
     fun stop() {
-        runCatching { linkSock?.close() }
-        peer.set(null)
-        peerFlow.value = null
-        out = null
+        links.values.forEach { runCatching { it.sock.close() } }
+        links.clear()
+        publishPeers()
     }
 
-    /** Device id currently behind the link — `null` while unlinked. */
-    fun linkedPeer(): String? = peer.get()
+    /** Device ids behind live links. */
+    fun linkedPeers(): Set<String> = links.keys.toSet()
 
     /**
-     * Write a sealed envelope over the LAN link iff it can reach the
-     * linked peer: unicast to it, or `*` — the linked peer then gets an
-     * early copy while the relay copy follows. `false` just means "no
-     * early copy"; the caller always sends over the relay regardless.
+     * Queue a sealed envelope over the LAN link(s) it can reach:
+     * unicast targets that peer's link, `*` gets an early copy on every
+     * link. `false` just means "no early copy"; the caller always sends
+     * over the relay regardless.
      */
     fun sendIfPeer(envJson: String, to: String): Boolean {
-        out ?: return false
-        val p = peer.get() ?: return false
-        if (to != p && to != Envelope.ALL) return false
-        writeQ.trySend((envJson + "\n").toByteArray())
-        return true
+        val bytes = (envJson + "\n").toByteArray()
+        return if (to == Envelope.ALL) {
+            if (links.isEmpty()) return false
+            for (p in links.keys) writeQ.trySend(Write(p, bytes))
+            true
+        } else {
+            if (!links.containsKey(to)) return false
+            writeQ.trySend(Write(to, bytes))
+            true
+        }
     }
 
-    /** The link's only writer — drains [writeQ] onto whatever socket is
-     *  current, so a send from any thread is just a queue push. */
+    /** The links' only writer — drains [writeQ] onto the peer's socket. */
     private suspend fun writerLoop() {
-        for (bytes in writeQ) {
-            val s = out ?: continue
+        for (w in writeQ) {
+            val l = links[w.peer] ?: continue
             runCatching {
-                s.write(bytes)
-                s.flush()
+                l.out.write(w.bytes)
+                l.out.flush()
             }.onFailure {
-                drop("write: ${it.javaClass.simpleName}: ${it.message}")
+                drop(w.peer, "write: ${it.javaClass.simpleName}: ${it.message}")
             }
         }
     }
 
-    private fun drop(reason: String = "unspecified") {
-        if (peer.get() != null) Log.i(TAG, "link dropped ($reason)")
-        while (writeQ.tryReceive().isSuccess) {}
-        peer.set(null)
-        peerFlow.value = null
-        rttFlow.value = null
-        out = null
-        runCatching { linkSock?.close() }
-        linkSock = null
+    private fun drop(peer: String, reason: String) {
+        Log.i(TAG, "link to $peer dropped ($reason)")
+        // Queued writes to the dead peer expire in writerLoop —
+        // links[w.peer] is gone by the time they surface.
+        links.remove(peer)?.let { runCatching { it.sock.close() } }
+        publishPeers()
     }
 
     /** Seal a message into the link wire shape — same envelope form
@@ -124,16 +129,14 @@ class LanLink(
         )
     }
 
-    /** Periodic RTT probes — the peer echoes LanPong back and the
-     *  round-trip lands in [rttFlow]. Also real traffic, so a truly
-     *  dead link gets noticed by the reader's idle timeout too. */
+    /** Periodic RTT probes — each peer echoes LanPong back and its
+     *  round-trip lands in the link's rttMs. Also real traffic, so a
+     *  truly dead link gets noticed by the reader's idle timeout too. */
     private suspend fun pingLoop() {
         while (true) {
-            val s = out
-            if (s != null && peer.get() != null) {
-                val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
-                writeQ.trySend((env.toJson() + "\n").toByteArray())
-            }
+            val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
+            val bytes = (env.toJson() + "\n").toByteArray()
+            for (p in links.keys) writeQ.trySend(Write(p, bytes))
             delay(PING_MS)
         }
     }
@@ -194,17 +197,19 @@ class LanLink(
     private fun lanAddr(): String? =
         lanIfAddrs()?.let { a -> (a.firstOrNull { it.second } ?: a.firstOrNull())?.first }
 
-    /** Called on connectivity changes — if the interface the live link
+    /** Called on connectivity changes — if the interface a live link
      *  arrived on went away (Wi-Fi off), the link is already dead;
      *  drop it now instead of waiting for a write error. A failed
      *  enumeration must not kill a healthy link — onLost fires for
      *  unrelated networks (cellular, VPN churn) all the time. */
     fun onNetworkChanged() {
-        val local = linkSock?.localAddress?.hostAddress ?: return
+        if (links.isEmpty()) return
         val addrs = lanIfAddrs() ?: return
-        if (addrs.none { it.first == local }) {
-            Log.i(TAG, "link dropped (local addr $local gone)")
-            drop()
+        for ((peer, l) in links) {
+            val local = l.sock.localAddress?.hostAddress ?: continue
+            if (addrs.none { it.first == local }) {
+                drop(peer, "local addr $local gone")
+            }
         }
     }
 
@@ -244,6 +249,7 @@ class LanLink(
         // longer silence = dead transport (Wi-Fi off kills the route
         // without RST, and TCP alone would idle for minutes).
         s.soTimeout = LINK_IDLE_MS
+        var peerId: String? = null
         val r = s.getInputStream().bufferedReader()
         while (true) {
             val read = runCatching { r.readLine() }
@@ -259,31 +265,40 @@ class LanLink(
             val msg = runCatching {
                 protoJson.decodeFromString(Msg.serializer(), pt.decodeToString())
             }.getOrNull() ?: continue
+            // Every frame that opens proves family membership → adopt
+            // this socket under its sender. A reconnect from the same
+            // peer replaces the stale link; different peers coexist.
+            if (peerId != env.from) {
+                peerId = env.from
+                val fresh = !links.containsKey(env.from)
+                // A reconnect replaces the stale link — close the old
+                // socket so its reader thread exits too.
+                links.put(env.from, Link(s, s.getOutputStream()))
+                    ?.let { runCatching { it.sock.close() } }
+                if (fresh) Log.i(TAG, "lan link up with ${env.from}")
+                publishPeers()
+            }
             // Link-local keepalives stay in the transport — never reach
             // the service's dispatch/dedup.
             when (msg) {
                 is Msg.LanPing -> {
                     val pong = sealedEnv(Msg.LanPong(msg.ts))
-                    writeQ.trySend((pong.toJson() + "\n").toByteArray())
+                    writeQ.trySend(Write(env.from, (pong.toJson() + "\n").toByteArray()))
                     continue
                 }
                 is Msg.LanPong -> {
-                    rttFlow.value = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
+                    links[env.from]?.let {
+                        it.rttMs = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
+                        publishPeers()
+                    }
                     continue
                 }
                 else -> {}
             }
-            // First frame that opens proves family membership → adopt.
-            if (peer.get() == null) {
-                peer.set(env.from)
-                peerFlow.value = env.from
-                out = s.getOutputStream()
-                linkSock = s
-                Log.i(TAG, "lan link up with ${env.from}")
-            }
             onMsg(env)
         }
-        if (linkSock === s) drop() else runCatching { s.close() }
+        peerId?.let { if (links[it]?.sock === s) drop(it, "read ended") }
+        runCatching { s.close() }
     }
 
     private companion object {

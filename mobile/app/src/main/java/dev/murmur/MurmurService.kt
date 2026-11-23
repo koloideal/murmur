@@ -117,13 +117,8 @@ class MurmurService : Service() {
         relay.start()
         lan.start()
         scope.launch {
-            lan.peerFlow.collect { p ->
-                status.value = status.value.copy(lanPeer = p)
-            }
-        }
-        scope.launch {
-            lan.rttFlow.collect { r ->
-                status.value = status.value.copy(lanRttMs = r)
+            lan.peersFlow.collect { p ->
+                status.value = status.value.copy(lanPeers = p)
             }
         }
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
@@ -394,11 +389,10 @@ class MurmurService : Service() {
         val running: Boolean = false,
         /** ListDevices round-trip — the phone's own ping to the relay. */
         val serverRttMs: Long? = null,
-        /** Device reachable directly over LAN — UI shows "on lan". */
-        val lanPeer: String? = null,
-        /** Real round-trip over the LAN link in ms — the ping shown
-         *  next to "on lan" (relay RTT is the same on lan and wan). */
-        val lanRttMs: Long? = null,
+        /** Peer id → measured LAN round-trip in ms (0 = linked but not
+         *  yet measured). Several laptops may each hold a link — the
+         *  UI shows "on lan" per device row with the real ping. */
+        val lanPeers: Map<String, Long> = emptyMap(),
         val devices: List<DeviceInfo> = emptyList(),
         val familyName: String? = null,
         val keyEpoch: Long = 0,

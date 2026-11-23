@@ -209,8 +209,18 @@ fn cmd_status() -> anyhow::Result<()> {
         state,
     );
     println!("  relay   {}", d["server"].as_str().unwrap_or("?"));
-    if let Some(peer) = d["lan_peer"].as_str() {
-        println!("  lan     {}", p.green(format!("⇄ {peer}")));
+    if let Some(peers) = d["lan_peers"].as_array().filter(|p| !p.is_empty()) {
+        let rtt = d["lan_rtt_ms"].as_object();
+        let list = peers
+            .iter()
+            .filter_map(|p| p.as_str())
+            .map(|p| {
+                let ms = rtt.and_then(|m| m.get(p)).and_then(|v| v.as_u64()).unwrap_or(0);
+                if ms > 0 { format!("{p} {ms}ms") } else { p.to_string() }
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!("  lan     {}", p.green(format!("⇄ {list}")));
     }
     if revoked {
         println!(

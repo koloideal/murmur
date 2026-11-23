@@ -119,10 +119,11 @@ fun DevicesCard() {
                                     secrets.roster[d.device_id]?.second == "phone" ->
                                         append("online")
                                     else -> {
-                                        val onLan = d.device_id == status.lanPeer
+                                        val lanRtt = status.lanPeers[d.device_id]
                                         append(
                                             when {
-                                                onLan && status.lanRttMs != null -> "${status.lanRttMs} ms"
+                                                lanRtt != null && lanRtt > 0 -> "$lanRtt ms"
+                                                lanRtt != null -> "online"
                                                 d.rtt_ms != null -> "${d.rtt_ms} ms"
                                                 else -> "online"
                                             },
@@ -130,7 +131,7 @@ fun DevicesCard() {
                                         withStyle(
                                             SpanStyle(color = MaterialTheme.colorScheme.outline),
                                         ) {
-                                            append(if (onLan) " · on lan" else " · on wan")
+                                            append(if (lanRtt != null) " · on lan" else " · on wan")
                                         }
                                     }
                                 }

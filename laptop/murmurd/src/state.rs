@@ -69,15 +69,17 @@ pub struct Shared {
     /// with a slot key — conn keeps only the latest per slot, so a
     /// backlog of stale snapshots drains as one fresh frame.
     pub out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
-    /// Live LAN link — `Route::Device(peer)` unicast skips the relay.
-    lan: Mutex<Option<(DeviceId, mpsc::UnboundedSender<Envelope>)>>,
-    /// This node's last measured round-trip over the LAN link in ms
-    /// (0 = unknown); the peer measures its own on its side.
-    pub lan_rtt: AtomicU64,
+    /// Live LAN links keyed by peer — a star/mesh fast-path: several
+    /// devices can each hold a direct link, unicast picks its peer,
+    /// broadcast gets an early copy on every link.
+    lan: Mutex<HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>>,
+    /// This node's last measured round-trip per peer in ms
+    /// (0 = unknown); each peer measures its own on its side.
+    lan_rtt: Mutex<HashMap<DeviceId, u64>>,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
-    pub lan_dial: mpsc::UnboundedSender<(DeviceId, std::net::IpAddr, u16)>,
+    pub lan_dial: mpsc::UnboundedSender<crate::lan::DialHint>,
     /// Inbound dedup bookkeeping — broadcasts intentionally ride both
     /// LAN and relay, so the second copy must collapse here instead of
     /// duplicating notifications/clips at the features.
@@ -104,7 +106,7 @@ impl Shared {
         mut secrets: Secrets,
         out: mpsc::UnboundedSender<Envelope>,
         out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
-        lan_dial: mpsc::UnboundedSender<(DeviceId, std::net::IpAddr, u16)>,
+        lan_dial: mpsc::UnboundedSender<crate::lan::DialHint>,
     ) -> anyhow::Result<Self> {
         let (ctl_events, _) = broadcast::channel(64);
         let identity = crate::keyring::load_identity(&mut secrets)?;
@@ -122,8 +124,8 @@ impl Shared {
             seq: AtomicU64::new(1),
             out,
             out_lo,
-            lan: Mutex::new(None),
-            lan_rtt: AtomicU64::new(0),
+            lan: Mutex::new(HashMap::new()),
+            lan_rtt: Mutex::new(HashMap::new()),
             lan_dial,
             seen: Mutex::new(Seen::default()),
             ctl_events,
@@ -148,14 +150,22 @@ impl Shared {
     /// state via the coalesced lo channel.
     pub fn send(&self, to: Route, msg: &Message) -> anyhow::Result<()> {
         let env = Envelope::seal(self.id, to.clone(), self.next_seq(), &self.keys.read().unwrap().current, msg)?;
-        if let Some((peer, tx)) = self.lan.lock().unwrap().as_ref() {
-            let hit = match &to {
-                Route::All => true,
-                Route::Device(d) => d == peer,
-                _ => false,
-            };
-            if hit {
-                let _ = tx.send(env.clone());
+        {
+            let lan = self.lan.lock().unwrap();
+            match &to {
+                // Broadcast rides every live link — each peer gets its
+                // early copy; the relay copy follows as always.
+                Route::All => {
+                    for tx in lan.values() {
+                        let _ = tx.send(env.clone());
+                    }
+                }
+                Route::Device(d) => {
+                    if let Some(tx) = lan.get(d) {
+                        let _ = tx.send(env.clone());
+                    }
+                }
+                _ => {}
             }
         }
         match replaceable_slot(&to, msg) {
@@ -169,21 +179,36 @@ impl Shared {
         Ok(())
     }
 
-    /// Link bookkeeping for [`crate::lan`].
+    /// Link bookkeeping for [`crate::lan`]. Called on every valid
+    /// frame — a no-op while the map already points at this channel,
+    /// so it never tramples the link's measured RTT.
     pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>) {
-        self.lan_rtt.store(0, Ordering::Relaxed);
-        *self.lan.lock().unwrap() = Some((peer, tx));
+        let mut lan = self.lan.lock().unwrap();
+        if matches!(lan.get(&peer), Some(t) if t.same_channel(&tx)) {
+            return;
+        }
+        lan.insert(peer, tx);
+        self.lan_rtt.lock().unwrap().insert(peer, 0);
     }
-    pub fn lan_peer(&self) -> Option<DeviceId> {
-        self.lan.lock().unwrap().as_ref().map(|(p, _)| *p)
+    /// Live peers — the ctl/island "on lan" truth.
+    pub fn lan_peers(&self) -> Vec<DeviceId> {
+        self.lan.lock().unwrap().keys().copied().collect()
     }
-    /// Tear down iff `tx` still owns the slot — a dying old link must
-    /// not clear a newer one that already adopted the peer.
+    pub fn lan_rtt(&self, peer: &DeviceId) -> u64 {
+        self.lan_rtt.lock().unwrap().get(peer).copied().unwrap_or(0)
+    }
+    pub fn lan_rtt_set(&self, peer: DeviceId, ms: u64) {
+        self.lan_rtt.lock().unwrap().insert(peer, ms);
+    }
+    /// Tear down whichever peer slot still points at `tx` — a dying
+    /// old link must not clear a newer one adopted under the same peer.
     pub fn lan_clear(&self, tx: &mpsc::UnboundedSender<Envelope>) {
         let mut g = self.lan.lock().unwrap();
-        if g.as_ref().is_some_and(|(_, t)| t.same_channel(tx)) {
-            *g = None;
-        }
+        g.retain(|_, t| !t.same_channel(tx));
+        self.lan_rtt
+            .lock()
+            .unwrap()
+            .retain(|p, _| g.contains_key(p));
     }
 
     /// True on first sight of this envelope — call only *after* a
