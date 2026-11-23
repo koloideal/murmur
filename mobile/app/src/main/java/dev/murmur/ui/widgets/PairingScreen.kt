@@ -19,6 +19,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Button
@@ -347,7 +349,15 @@ fun PairingScreen() {
                     OutlinedButton(
                         onClick = { manual = !manual },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("enter code manually") }
+                    ) {
+                        Text("enter code manually", textAlign = TextAlign.Center)
+                        Icon(
+                            if (manual) Icons.Outlined.KeyboardArrowUp
+                            else Icons.Outlined.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                     if (manual) {
                         if (kind == "serverless") {
                             // The laptop's LAN pair beacon resolves the
