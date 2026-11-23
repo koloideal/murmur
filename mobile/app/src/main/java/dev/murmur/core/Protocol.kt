@@ -137,6 +137,17 @@ sealed class Msg {
     @SerialName("lan_beacon")
     data class LanBeacon(val tcp_port: Int, val kind: String, val lan_addr: String? = null) : Msg()
 
+    /** LAN-link keepalive — echoed back as [LanPong] with the same
+     *  ts; the pinger measures RTT on its own clock. Handled inside
+     *  the transport, never reaches the service's dispatch. */
+    @Serializable
+    @SerialName("lan_ping")
+    data class LanPing(val ts: Long) : Msg()
+
+    @Serializable
+    @SerialName("lan_pong")
+    data class LanPong(val ts: Long) : Msg()
+
     /** New family key, sealed once per member to its identity key. */
     @Serializable
     @SerialName("key_rotate")

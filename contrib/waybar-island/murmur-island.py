@@ -63,6 +63,7 @@ def murmur_state() -> dict | None:
                 "online": d.get("online") is True,
                 "revoked": d.get("revoked") is True,
                 "lan": d.get("lan_peer"),
+                "lan_rtt": d.get("lan_rtt_ms"),
                 "self": selfid,
                 "name": d.get("name", "?"),
                 "server": d.get("server", "?"),
@@ -160,7 +161,7 @@ def status_tooltip(st: dict | None) -> str:
         if st["revoked"]
         else ("online" if st["online"] else "offline"),
         f"relay  {st['server']}  ·  epoch {st['epoch']}"
-        + (f"   ·   lan ⇄ {st['lan']}" if st["lan"] else ""),
+        + (f"   ·   lan ⇄ {st['lan']} · {st.get('lan_rtt') or 0} ms" if st["lan"] else ""),
         f"active {st['active'] or 'none'}"
         + (" (me)" if st["active"] == st["self"] else ""),
         "",

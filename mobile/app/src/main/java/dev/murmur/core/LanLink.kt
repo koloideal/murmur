@@ -35,8 +35,13 @@ class LanLink(
 ) {
     private val peer = AtomicReference<String?>(null)
 
-    /** Device id behind the live link — drives the "⇄ lan" UI badge. */
+    /** Device id behind the live link — drives the "on lan" UI badge. */
     val peerFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+    /** Last measured round-trip over the live link in ms — the real
+     *  LAN latency the UI shows next to "on lan" (the relay RTT the
+     *  device list reports looks identical on lan and wan otherwise). */
+    val rttFlow = kotlinx.coroutines.flow.MutableStateFlow<Long?>(null)
 
     @Volatile private var out: OutputStream? = null
 
@@ -45,6 +50,7 @@ class LanLink(
     fun start() {
         scope.launch(Dispatchers.IO) { beaconLoop() }
         scope.launch(Dispatchers.IO) { acceptLoop() }
+        scope.launch(Dispatchers.IO) { pingLoop() }
     }
 
     fun stop() {
@@ -72,6 +78,7 @@ class LanLink(
             s.flush()
             true
         }.getOrElse {
+            Log.i(TAG, "link dropped (write: ${it.message})")
             drop()
             false
         }
@@ -80,9 +87,43 @@ class LanLink(
     private fun drop() {
         peer.set(null)
         peerFlow.value = null
+        rttFlow.value = null
         out = null
         runCatching { linkSock?.close() }
         linkSock = null
+    }
+
+    /** Seal a message into the link wire shape — same envelope form
+     *  the relay carries. */
+    private fun sealedEnv(msg: Msg): Envelope {
+        val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
+        return Envelope(
+            v = Envelope.VERSION,
+            from = selfId,
+            to = Envelope.ALL,
+            seq = 0,
+            payload = android.util.Base64.encodeToString(key.seal(pt), android.util.Base64.NO_WRAP),
+        )
+    }
+
+    /** Periodic RTT probes — the peer echoes LanPong back and the
+     *  round-trip lands in [rttFlow]. Also real traffic, so a truly
+     *  dead link gets noticed by the reader's idle timeout too. */
+    private suspend fun pingLoop() {
+        while (true) {
+            val s = out
+            if (s != null && peer.get() != null) {
+                val env = sealedEnv(Msg.LanPing(System.currentTimeMillis()))
+                runCatching {
+                    s.write((env.toJson() + "\n").toByteArray())
+                    s.flush()
+                }.onFailure {
+                    Log.i(TAG, "link dropped (ping write: ${it.message})")
+                    drop()
+                }
+            }
+            delay(PING_MS)
+        }
     }
 
     // -- beacon ---------------------------------------------------------------
@@ -107,15 +148,7 @@ class LanLink(
         // outright, so L2-independent discovery is the reliable path.
         while (true) {
             val msg = Msg.LanBeacon(LINK_PORT, "phone", lanAddr())
-            val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
-            val env = Envelope(
-                v = Envelope.VERSION,
-                from = selfId,
-                to = Envelope.ALL,
-                seq = 0,
-                payload = android.util.Base64.encodeToString(key.seal(pt), android.util.Base64.NO_WRAP),
-            )
-            val bytes = env.toJson().encodeToByteArray()
+            val bytes = sealedEnv(msg).toJson().encodeToByteArray()
             runCatching {
                 sock.send(DatagramPacket(bytes, bytes.size, LIMITED_BCAST))
                 for (dst in directedBroadcasts()) {
@@ -127,8 +160,10 @@ class LanLink(
         }
     }
 
-    /** Up, non-loopback IPv4s as (address, hasBroadcast). */
-    private fun lanIfAddrs(): List<Pair<String, Boolean>> =
+    /** Up, non-loopback IPv4s as (address, hasBroadcast), or `null`
+     *  when enumeration fails — callers must treat "don't know" as
+     *  "keep the link", never as "the interface is gone". */
+    private fun lanIfAddrs(): List<Pair<String, Boolean>>? =
         runCatching {
             java.net.NetworkInterface.getNetworkInterfaces().asSequence()
                 .filter { it.isUp && !it.isLoopback }
@@ -139,20 +174,26 @@ class LanLink(
                         ?.let { it to (ia.broadcast != null) }
                 }
                 .toList()
-        }.getOrElse { emptyList() }
+        }.getOrNull()
 
     /** The address peers dial us on — prefer a broadcast-capable (LAN)
      *  interface so a cellular/VPN point-to-point address is never
      *  advertised while Wi-Fi is up. */
     private fun lanAddr(): String? =
-        (lanIfAddrs().firstOrNull { it.second } ?: lanIfAddrs().firstOrNull())?.first
+        lanIfAddrs()?.let { a -> (a.firstOrNull { it.second } ?: a.firstOrNull())?.first }
 
     /** Called on connectivity changes — if the interface the live link
      *  arrived on went away (Wi-Fi off), the link is already dead;
-     *  drop it now instead of waiting for a write error. */
+     *  drop it now instead of waiting for a write error. A failed
+     *  enumeration must not kill a healthy link — onLost fires for
+     *  unrelated networks (cellular, VPN churn) all the time. */
     fun onNetworkChanged() {
         val local = linkSock?.localAddress?.hostAddress ?: return
-        if (lanIfAddrs().none { it.first == local }) drop()
+        val addrs = lanIfAddrs() ?: return
+        if (addrs.none { it.first == local }) {
+            Log.i(TAG, "link dropped (local addr $local gone)")
+            drop()
+        }
     }
 
     /** Subnet-directed broadcast target per up non-loopback interface —
@@ -193,7 +234,11 @@ class LanLink(
         s.soTimeout = LINK_IDLE_MS
         val r = s.getInputStream().bufferedReader()
         while (true) {
-            val line = runCatching { r.readLine() }.getOrNull() ?: break
+            val read = runCatching { r.readLine() }
+            val line = read.getOrNull() ?: run {
+                Log.i(TAG, "link read ended (${read.exceptionOrNull()?.javaClass?.simpleName}: ${read.exceptionOrNull()?.message})")
+                break
+            }
             if (line.isNullOrEmpty()) continue
             val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: continue
             val pt = runCatching {
@@ -202,6 +247,23 @@ class LanLink(
             val msg = runCatching {
                 protoJson.decodeFromString(Msg.serializer(), pt.decodeToString())
             }.getOrNull() ?: continue
+            // Link-local keepalives stay in the transport — never reach
+            // the service's dispatch/dedup.
+            when (msg) {
+                is Msg.LanPing -> {
+                    val pong = sealedEnv(Msg.LanPong(msg.ts))
+                    runCatching {
+                        s.getOutputStream().write((pong.toJson() + "\n").toByteArray())
+                        s.getOutputStream().flush()
+                    }
+                    continue
+                }
+                is Msg.LanPong -> {
+                    rttFlow.value = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
+                    continue
+                }
+                else -> {}
+            }
             // First frame that opens proves family membership → adopt.
             if (peer.get() == null) {
                 peer.set(env.from)
@@ -220,6 +282,7 @@ class LanLink(
         const val BEACON_PORT = 17893
         const val LINK_PORT = 17894
         const val BEACON_MS = 4000L
+        const val PING_MS = 5000L
         const val LINK_IDLE_MS = 20_000
         const val SOCKET_RETRY_MS = 2_000L
         val LIMITED_BCAST = InetSocketAddress("255.255.255.255", BEACON_PORT)

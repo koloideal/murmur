@@ -71,6 +71,9 @@ pub struct Shared {
     pub out_lo: mpsc::UnboundedSender<(u64, Envelope)>,
     /// Live LAN link — `Route::Device(peer)` unicast skips the relay.
     lan: Mutex<Option<(DeviceId, mpsc::UnboundedSender<Envelope>)>>,
+    /// This node's last measured round-trip over the LAN link in ms
+    /// (0 = unknown); the peer measures its own on its side.
+    pub lan_rtt: AtomicU64,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
@@ -120,6 +123,7 @@ impl Shared {
             out,
             out_lo,
             lan: Mutex::new(None),
+            lan_rtt: AtomicU64::new(0),
             lan_dial,
             seen: Mutex::new(Seen::default()),
             ctl_events,
@@ -167,6 +171,7 @@ impl Shared {
 
     /// Link bookkeeping for [`crate::lan`].
     pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>) {
+        self.lan_rtt.store(0, Ordering::Relaxed);
         *self.lan.lock().unwrap() = Some((peer, tx));
     }
     pub fn lan_peer(&self) -> Option<DeviceId> {

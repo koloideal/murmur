@@ -82,14 +82,18 @@ fun DevicesCard() {
                                 when {
                                     !d.online -> append("offline")
                                     else -> {
-                                        append(d.rtt_ms?.let { "$it ms" } ?: "online")
+                                        val onLan = d.device_id == status.lanPeer
+                                        append(
+                                            when {
+                                                onLan && status.lanRttMs != null -> "${status.lanRttMs} ms"
+                                                d.rtt_ms != null -> "${d.rtt_ms} ms"
+                                                else -> "online"
+                                            },
+                                        )
                                         withStyle(
                                             SpanStyle(color = MaterialTheme.colorScheme.outline),
                                         ) {
-                                            append(
-                                                if (d.device_id == status.lanPeer) " · on lan"
-                                                else " · on wan",
-                                            )
+                                            append(if (onLan) " · on lan" else " · on wan")
                                         }
                                     }
                                 }

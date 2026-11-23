@@ -121,6 +121,11 @@ class MurmurService : Service() {
                 status.value = status.value.copy(lanPeer = p)
             }
         }
+        scope.launch {
+            lan.rttFlow.collect { r ->
+                status.value = status.value.copy(lanRttMs = r)
+            }
+        }
         scope.launch { relay.incoming.collect { onEnvelope(it) } }
         scope.launch {
             relay.state.collect { st ->
@@ -384,8 +389,11 @@ class MurmurService : Service() {
         val running: Boolean = false,
         /** ListDevices round-trip — the phone's own ping to the relay. */
         val serverRttMs: Long? = null,
-        /** Device reachable directly over LAN — UI shows "⇄ lan". */
+        /** Device reachable directly over LAN — UI shows "on lan". */
         val lanPeer: String? = null,
+        /** Real round-trip over the LAN link in ms — the ping shown
+         *  next to "on lan" (relay RTT is the same on lan and wan). */
+        val lanRttMs: Long? = null,
         val devices: List<DeviceInfo> = emptyList(),
         val familyName: String? = null,
         val keyEpoch: Long = 0,
@@ -394,7 +402,7 @@ class MurmurService : Service() {
     companion object {
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
-        private const val DEVICES_POLL_MS = 12_000L
+        private const val DEVICES_POLL_MS = 5_000L
         private const val ACTION_PAUSE = "dev.murmur.PAUSE"
         private const val SEEN_MAX = 4096
         /** This far below the sender's high-water seq can't be an

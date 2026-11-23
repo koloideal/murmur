@@ -94,6 +94,13 @@ pub enum Message {
         lan_addr: Option<String>,
     },
 
+    /// LAN-link keepalive: each side pings over the link; the peer
+    /// echoes `LanPong` with the same timestamp — RTT is measured by
+    /// the pinger on its own clock (no cross-device skew). Handled
+    /// inside the transport, never dispatched to features.
+    LanPing { ts: u64 },
+    LanPong { ts: u64 },
+
     /// New family key after a revocation (or `murmurctl rotate`), sealed
     /// once per remaining member to its identity key — see
     /// [`crate::rekey`]. `revoked` are dropped from everyone's roster.

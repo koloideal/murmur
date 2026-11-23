@@ -310,14 +310,47 @@ fn spawn_link(
         tokio::spawn(async move {
             tokio::time::sleep(VERIFY_AFTER).await;
             if !validated.load(std::sync::atomic::Ordering::Relaxed) {
-                debug!("lan: unvalidated link — dropping");
+                info!("lan: link down (unvalidated)");
                 let _ = probe.shutdown(std::net::Shutdown::Both);
                 shared.lan_clear(&tx2);
             }
         });
     }
     tokio::spawn(link_writer(shared.clone(), w, rx, tx.clone()));
-    tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx, validated));
+    tokio::spawn(link_reader(shared.clone(), hub.clone(), r, tx.clone(), validated));
+    tokio::spawn(ping_loop(shared.clone(), tx));
+}
+
+/// Local epoch milliseconds — timestamps for `LanPing` echoes; RTT is
+/// computed on the pinger's clock only.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Every link gets its own RTT probe — the pong replies land back in
+/// `link_reader` and refresh `Shared::lan_rtt`. Dies with the channel.
+const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn ping_loop(shared: Arc<Shared>, tx: mpsc::UnboundedSender<Envelope>) {
+    let mut tick = tokio::time::interval(PING_EVERY);
+    loop {
+        tick.tick().await;
+        let Ok(env) = Envelope::seal(
+            shared.id,
+            Route::All,
+            shared.next_seq(),
+            &shared.keys.read().unwrap().current,
+            &Message::LanPing { ts: now_ms() },
+        ) else {
+            continue;
+        };
+        if tx.send(env).is_err() {
+            return; // writer is gone — the reader/writer tears the link down
+        }
+    }
 }
 
 async fn link_writer(
@@ -329,7 +362,8 @@ async fn link_writer(
     while let Some(env) = rx.recv().await {
         let mut line = env.to_json();
         line.push('\n');
-        if w.write_all(line.as_bytes()).await.is_err() {
+        if let Err(e) = w.write_all(line.as_bytes()).await {
+            info!("lan: link down (writer: {e})");
             break;
         }
     }
@@ -355,7 +389,18 @@ async fn link_reader(
         line.clear();
         match tokio::time::timeout(LINK_IDLE, br.read_line(&mut line)).await {
             Ok(Ok(n)) if n > 0 => {}
-            _ => break,
+            Ok(Ok(_)) => {
+                info!("lan: link down (peer closed)");
+                break;
+            }
+            Ok(Err(e)) => {
+                info!("lan: link down (reader: {e})");
+                break;
+            }
+            Err(_) => {
+                info!("lan: link down (idle timeout)");
+                break;
+            }
         }
         let Ok(env) = Envelope::from_json(line.trim_end()) else {
             continue;
@@ -363,6 +408,29 @@ async fn link_reader(
         match env.open(&shared.keys.read().unwrap().current) {
             Ok(msg) => {
                 validated.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Link-local keepalives are transport chatter — pong
+                // replies and RTT records never reach dedupe/features.
+                match &msg {
+                    Message::LanPing { ts } => {
+                        if let Ok(env) = Envelope::seal(
+                            shared.id,
+                            Route::All,
+                            shared.next_seq(),
+                            &shared.keys.read().unwrap().current,
+                            &Message::LanPong { ts: *ts },
+                        ) {
+                            let _ = tx.send(env);
+                        }
+                        continue;
+                    }
+                    Message::LanPong { ts } => {
+                        shared
+                            .lan_rtt
+                            .store(now_ms().saturating_sub(*ts), std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    _ => {}
+                }
                 // A frame that opens proves family membership → adopt
                 // the link for outbound traffic. Only an empty slot or
                 // the same peer re-adopts — a *different* peer must not

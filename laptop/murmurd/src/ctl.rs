@@ -134,6 +134,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "online": shared.online.load(std::sync::atomic::Ordering::Relaxed),
                 "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "lan_peer": shared.lan_peer().map(|i| i.to_string()),
+                "lan_rtt_ms": shared.lan_rtt.load(std::sync::atomic::Ordering::Relaxed),
                 "active_node": shared.active_node().map(|i| i.to_string()),
                 "key_epoch": shared.keys.read().unwrap().epoch,
                 "members": shared.roster.lock().unwrap().len(),
