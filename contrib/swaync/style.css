@@ -32,7 +32,6 @@
     background-position: right bottom, 0 0, 0 0;
     background-repeat: no-repeat;
     background-clip: padding-box, padding-box, border-box;
-    padding-bottom: 24px;
 }
 
 /* The phone app icon — fills the left edge, minimal breathing room. */
