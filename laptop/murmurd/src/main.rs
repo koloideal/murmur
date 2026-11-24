@@ -222,8 +222,12 @@ async fn doctor() -> anyhow::Result<()> {
         );
     }
 
-    // relay reachability: bare WS handshake, no auth frame.
-    if let Some(c) = &cfg {
+    // relay reachability: bare WS handshake, no auth frame. A
+    // serverless family has no relay — nothing to check.
+    if let Some(c) = cfg
+        .as_ref()
+        .filter(|c| c.family_kind == murmur_proto::FamilyKind::Serverful)
+    {
         let t0 = std::time::Instant::now();
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
@@ -287,6 +291,7 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         auth_token_hex: paired.token_hex,
         family_key_hex: paired.family_key_hex,
         key_epoch: paired.key_epoch,
+        family_name: paired.family_name,
         ..config::Secrets::default()
     };
     config::provision(&cfg, &secrets)?;

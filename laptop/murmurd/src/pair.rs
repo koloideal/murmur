@@ -433,6 +433,7 @@ pub struct Paired {
     pub family_key_hex: String,
     pub key_epoch: u64,
     pub kind: murmur_proto::FamilyKind,
+    pub family_name: Option<String>,
 }
 
 /// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
@@ -574,6 +575,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         },
                         key_epoch: blob.key_epoch,
                         kind: blob.kind,
+                        family_name: blob.family_name,
                     });
                 }
                 _ => {}
@@ -667,6 +669,7 @@ async fn join_direct(addr: &str, session: DeviceId, name: &str) -> anyhow::Resul
                         },
                         key_epoch: blob.key_epoch,
                         kind: blob.kind,
+                        family_name: blob.family_name,
                     });
                 }
                 _ => {}

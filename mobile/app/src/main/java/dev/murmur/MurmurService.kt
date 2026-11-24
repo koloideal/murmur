@@ -370,13 +370,20 @@ class MurmurService : Service() {
     /** Active laptop = newest `active` presence; ties → smaller id. The
      *  same deterministic rule murmurd uses, computed over laptop ids only
      *  (the phone never reports presence). */
-    fun activeDevice(): String? = presence
-        .filterValues { (state, _) -> state == "active" }
-        .maxWithOrNull(
-            compareBy<Map.Entry<String, Pair<String, Long>>> { it.value.second }
-                .thenByDescending { it.key },
-        )
-        ?.key
+    fun activeDevice(): String? {
+        // Same election as murmurd::active_node: newest active wins,
+        // ties → smaller id, and anything silent past the stale cutoff
+        // is dead — a crashed "active" laptop must not win forever or
+        // clips/commands route to a ghost.
+        val cutoff = System.currentTimeMillis() / 1000 - PRESENCE_STALE_S
+        return presence
+            .filterValues { (state, ts) -> state == "active" && ts >= cutoff }
+            .maxWithOrNull(
+                compareBy<Map.Entry<String, Pair<String, Long>>> { it.value.second }
+                    .thenByDescending { it.key },
+            )
+            ?.key
+    }
 
     private fun onEnvelope(env: Envelope) {
         // Cleartext control replies (Devices) — handled before decrypt.
@@ -485,6 +492,9 @@ class MurmurService : Service() {
          *  in-flight duplicate — the LAN early copy is never that late;
          *  it's a peer restart (seq resets to 1). */
         private const val RESTART_GAP = 64L
+        /** 2.5× the 60s presence heartbeat — mirrors murmurd's
+         *  PRESENCE_STALE. Older entries lose the election. */
+        private const val PRESENCE_STALE_S = 150L
 
         /** The dashboard is on screen — gates the device-list poller. */
         val uiVisible = MutableStateFlow(false)

@@ -490,7 +490,24 @@ async fn link_reader(
                     hub.dispatch(env.from, &msg);
                 }
             }
-            Err(e) => debug!("lan: undecryptable from {}: {e}", env.from),
+            Err(e) => {
+                // Same stale-member recovery as the relay path: an old
+                // key opening the frame means the sender missed a
+                // rotation. In a serverless family this link is the
+                // only way the re-key can ever reach it.
+                let old = shared
+                    .keys
+                    .read()
+                    .unwrap()
+                    .old()
+                    .iter()
+                    .find(|k| env.open(k).is_ok())
+                    .cloned();
+                match old {
+                    Some(k) => shared.on_stale(env.from, &k, Some(&tx_hi)),
+                    None => debug!("lan: undecryptable from {}: {e}", env.from),
+                }
+            }
         }
     }
     shared.lan_clear(&tx);

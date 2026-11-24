@@ -174,7 +174,7 @@ async fn connect_once(
                                     .find(|k| env.open(k).is_ok())
                                     .cloned();
                                 match old {
-                                    Some(k) => shared.on_stale(env.from, &k),
+                                    Some(k) => shared.on_stale(env.from, &k, None),
                                     None => warn!("decrypt from {} failed: {e}", env.from),
                                 }
                             }

@@ -34,6 +34,10 @@ pub struct Pairing {
 /// How long an invite/pending stays around without progress.
 pub const PAIR_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Presence entries older than this stop counting for the active-node
+/// election — 2.5× the 60s heartbeat, so one missed beat still counts.
+pub const PRESENCE_STALE: u64 = 150;
+
 pub struct InviteEntry {
     pub key: PairKey,
     pub created: std::time::Instant,
@@ -195,7 +199,7 @@ impl Shared {
 
     /// Serverless families have no relay consumer — outbound queues
     /// would grow forever.
-    fn has_relay(&self) -> bool {
+    pub(crate) fn has_relay(&self) -> bool {
         self.cfg.family_kind == murmur_proto::FamilyKind::Serverful
     }
 
@@ -216,6 +220,15 @@ impl Shared {
         // rendezvous — there is no relay connect to hang this on.
         self.announce_identity();
     }
+    /// Push a pre-built envelope down a live link — for frames that
+    /// must ride a specific key (a re-key sealed under the peer's old
+    /// key), not the current-key seal `send` always applies.
+    pub(crate) fn lan_send(&self, peer: &DeviceId, env: Envelope) {
+        if let Some(tx) = self.lan.lock().unwrap().get(peer) {
+            let _ = tx.send(env);
+        }
+    }
+
     /// Live peers — the ctl/island "on lan" truth.
     pub fn lan_peers(&self) -> Vec<DeviceId> {
         self.lan.lock().unwrap().keys().copied().collect()
@@ -318,12 +331,17 @@ impl Shared {
 
     /// Active-node election: newest `active` wins; ties → smaller DeviceId.
     /// Deterministic across nodes given the same presence table.
+    /// Entries older than PRESENCE_STALE are ignored: delivery is
+    /// live-only, so a peer silent that long is dead — without the
+    /// cutoff a crashed "active" laptop wins the election forever and
+    /// explicit pushes/commands route to a ghost.
     pub fn active_node(&self) -> Option<DeviceId> {
+        let cutoff = now_ts().saturating_sub(PRESENCE_STALE);
         self.presence
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, (s, _))| *s == PresenceState::Active)
+            .filter(|(_, (s, ts))| *s == PresenceState::Active && *ts >= cutoff)
             .max_by(|(a_id, (_, a_ts)), (b_id, (_, b_ts))| {
                 a_ts.cmp(b_ts).then(b_id.cmp(a_id)) // later ts wins; smaller id wins ties
             })
@@ -347,27 +365,26 @@ impl Shared {
         self.broadcast_presence();
     }
 
-    /// Re-announce current presence state to everyone.
+    /// Re-announce current presence state to everyone. The wire ts is
+    /// fresh; refresh our own table row too or it ages past the stale
+    /// cutoff and our election drifts from what the peers compute.
     pub fn broadcast_presence(&self) {
-        let state = self
-            .presence
-            .lock()
-            .unwrap()
-            .get(&self.id)
-            .map(|(s, _)| *s)
-            .unwrap_or(PresenceState::Active);
-        let _ = self.send(
-            Route::All,
-            &Message::Presence {
-                state,
-                ts: now_ts(),
-            },
-        );
+        let ts = now_ts();
+        let state = {
+            let mut m = self.presence.lock().unwrap();
+            let s = m
+                .get(&self.id)
+                .map(|(s, _)| *s)
+                .unwrap_or(PresenceState::Active);
+            m.insert(self.id, (s, ts));
+            s
+        };
+        let _ = self.send(Route::All, &Message::Presence { state, ts });
     }
 
-    /// Called on disconnect. Presence of remote peers is retained; they age
-    /// out implicitly because our election only considers `active` states —
-    /// a disconnected peer simply stops updating. TODO: mark peers stale.
+    /// Called on disconnect. Peer rows are kept — a LAN peer is still
+    /// legitimately alive while the relay is gone. `active_node`'s
+    /// stale cutoff ages out whatever stops broadcasting.
     pub fn note_presence_offline(&self) {}
 
     pub fn note_presence(&self, id: DeviceId, state: PresenceState, ts: u64) {

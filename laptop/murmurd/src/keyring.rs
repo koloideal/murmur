@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// How many superseded keys we keep to recognise stale members.
@@ -278,7 +279,12 @@ impl Shared {
     /// conn found a frame from `from` that only an old key opens: it
     /// missed a rotation. Re-seal the current key to it, wrapped in the
     /// old key it can still read. Nothing else from that frame is used.
-    pub fn on_stale(&self, from: DeviceId, old: &FamilyKey) {
+    pub fn on_stale(
+        &self,
+        from: DeviceId,
+        old: &FamilyKey,
+        lan_tx: Option<&mpsc::UnboundedSender<Envelope>>,
+    ) {
         let Some(member) = self.roster.lock().unwrap().get(&from).cloned() else {
             return;
         };
@@ -298,7 +304,16 @@ impl Shared {
         match Envelope::seal(self.id, Route::Device(from), self.next_seq(), old, &msg) {
             Ok(env) => {
                 info!("{from} is on an old key — re-keyed it to epoch {epoch}");
-                let _ = self.out.send(env);
+                // The link that surfaced the stale frame carries the
+                // re-key back — for an unvalidated link this is the
+                // only route that exists; in serverless, any route.
+                if let Some(tx) = lan_tx {
+                    let _ = tx.send(env.clone());
+                }
+                self.lan_send(&from, env.clone());
+                if self.has_relay() {
+                    let _ = self.out.send(env);
+                }
             }
             Err(e) => warn!("re-key {from}: {e:#}"),
         }
