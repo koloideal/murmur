@@ -67,11 +67,11 @@ impl NotifyBus {
     ) -> anyhow::Result<u32> {
         let icon_path = icon_b64.and_then(|b64| write_icon(pkg, b64));
         let mut hints: HashMap<String, zvariant::Value> = HashMap::new();
-        hints.insert("desktop-entry".into(), pkg.into());
-        // Low urgency marks mirrors — the daemon's .notification.low
-        // class carries the "from murmur" tag in styling. It also keeps
-        // phone noise out of critical/native visual tiers.
-        hints.insert("urgency".into(), 0u8.into());
+        // "dev.murmur/<pkg>": murmurd is the real sender, the prefix is
+        // a unique marker daemons can match on (swaync visibility rules
+        // pin urgency=low on it → .low class → the tag) — while the pkg
+        // tail keeps per-app rules (e.g. ignored apps) working.
+        hints.insert("desktop-entry".into(), format!("dev.murmur/{pkg}").into());
         let id: u32 = self
             .proxy
             .call(
