@@ -22,6 +22,19 @@
     padding: 0;
 }
 
+/* murmur mirrors carry urgency=low → the "from murmur" tag rides in as
+   a third background layer at the bottom-right corner. */
+.notification.low {
+    background-image:
+        url("murmur-tag.png"),
+        linear-gradient(rgba(29, 32, 33, 0.48), rgba(29, 32, 33, 0.48)),
+        linear-gradient(45deg, #D65D0E, #458588);
+    background-position: right bottom, 0 0, 0 0;
+    background-repeat: no-repeat;
+    background-clip: padding-box, padding-box, border-box;
+    padding-bottom: 24px;
+}
+
 /* The phone app icon — fills the left edge, minimal breathing room. */
 .notification .icon,
 .notification .notification-icon {
