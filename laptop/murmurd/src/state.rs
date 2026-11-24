@@ -352,6 +352,21 @@ impl Shared {
         self.active_node() == Some(self.id)
     }
 
+    /// The mirror path is alive: a direct LAN link, or another device
+    /// whose presence broadcast is still fresh. Used by the notify
+    /// feature to hide desktop twins' own popups.
+    pub fn peer_online(&self) -> bool {
+        if !self.lan_peers().is_empty() {
+            return true;
+        }
+        let cutoff = now_ts().saturating_sub(PRESENCE_STALE);
+        self.presence
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, (_, ts))| *id != self.id && *ts >= cutoff)
+    }
+
     pub fn token_hex(&self) -> String {
         self.token_hex.clone()
     }

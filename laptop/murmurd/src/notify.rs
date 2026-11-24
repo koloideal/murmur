@@ -13,9 +13,11 @@
 //! [`NotifyBus`] — call surface: `notify`, `close`, one event channel.
 
 use crate::feature::{Feature, FeatureCtx};
+use crate::state::Shared;
 use futures_util::StreamExt;
 use murmur_proto::{Message, Route};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use zbus::zvariant;
@@ -181,6 +183,23 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let mut ids: HashMap<String, u32> = HashMap::new();
     let mut keys: HashMap<u32, String> = HashMap::new();
 
+    // While a peer is reachable, desktop twins' own popups are closed —
+    // the phone mirror covers them. Fail-open: if the watcher dies the
+    // native popups simply reappear, nothing stays silenced.
+    let (twin_tx, mut twin_rx) = mpsc::unbounded_channel::<u32>();
+    let twins = shared.cfg.notify_hide_twins_if_online.clone();
+    if !twins.is_empty() {
+        let (shared2, tx) = (shared.clone(), twin_tx.clone());
+        tokio::spawn(async move {
+            if let Err(e) = monitor_twins(shared2, twins, tx).await {
+                warn!("twin monitor died: {e:#}");
+            }
+        });
+    }
+    // Sender stays alive either way → twin_rx.recv() parks forever
+    // when no monitor is running or it has died (fail-open).
+    let _twin_tx = twin_tx;
+
     loop {
         tokio::select! {
             m = inbox.recv() => {
@@ -219,6 +238,12 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
+            id = twin_rx.recv() => {
+                let Some(id) = id else { continue };
+                if let Err(e) = bus.close(id).await {
+                    debug!("twin close {id}: {e:#}");
+                }
+            }
             ev = bus.closed_rx.recv() => {
                 let Some((id, reason)) = ev else { return Ok(()) };
                 // Only echo user-initiated dismissals; expiry and our own
@@ -233,4 +258,80 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// org.freedesktop.Notifications.Notify args — only app_name is read.
+type NotifyArgs = (
+    String,
+    u32,
+    String,
+    String,
+    String,
+    Vec<String>,
+    HashMap<String, zvariant::OwnedValue>,
+    i32,
+);
+
+/// Eavesdrops the session bus for `Notify` calls from configured twin
+/// app names; while any peer is reachable, forwards the daemon-assigned
+/// notification id for closing so only the phone mirror shows.
+async fn monitor_twins(
+    shared: Arc<Shared>,
+    apps: Vec<String>,
+    close: mpsc::UnboundedSender<u32>,
+) -> anyhow::Result<()> {
+    use zbus::message::Type;
+    let conn = zbus::Connection::session().await?;
+    conn.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus.Monitoring"),
+        "BecomeMonitor",
+        &(
+            &[
+                "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
+                "type='method_return',sender='org.freedesktop.Notifications'",
+                "type='error',sender='org.freedesktop.Notifications'",
+            ] as &[&str],
+            0u32,
+        ),
+    )
+    .await?;
+    debug!("twin monitor up: {:?}", apps);
+    let mut stream = zbus::MessageStream::from(conn);
+    // Pending Notify calls: (caller, serial) → close the reply id?
+    // Serials are per-connection — the caller name disambiguates.
+    let mut pending: HashMap<(String, u32), bool> = HashMap::new();
+    while let Some(msg) = stream.next().await {
+        let Ok(msg) = msg else { break };
+        let hdr = msg.header();
+        match hdr.message_type() {
+            Type::MethodCall => {
+                let app = msg.body().deserialize::<NotifyArgs>().ok().map(|a| a.0);
+                let hide = app
+                    .as_ref()
+                    .is_some_and(|a| apps.iter().any(|t| t == a))
+                    && shared.peer_online();
+                debug!("twin monitor Notify from {app:?} → hide={hide}");
+                if let Some(from) = hdr.sender().map(|s| s.as_str().to_string()) {
+                    pending.insert((from, hdr.primary().serial_num().get()), hide);
+                }
+            }
+            Type::MethodReturn | Type::Error => {
+                let (Some(rs), Some(to)) = (hdr.reply_serial(), hdr.destination()) else {
+                    continue;
+                };
+                let Some(hide) = pending.remove(&(to.as_str().to_string(), rs.get())) else {
+                    continue;
+                };
+                if hide && hdr.message_type() == Type::MethodReturn {
+                    if let Ok(id) = msg.body().deserialize::<u32>() {
+                        let _ = close.send(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
