@@ -9,12 +9,13 @@
     border: 2px solid transparent;
     border-radius: 18px;
     background-image:
-        linear-gradient(rgba(29, 32, 33, 0.72), rgba(29, 32, 33, 0.72)),
+        linear-gradient(rgba(29, 32, 33, 0.48), rgba(29, 32, 33, 0.48)),
         linear-gradient(45deg, #D65D0E, #458588);
     background-origin: border-box;
     background-clip: padding-box, border-box;
-    padding: 10px 14px;
+    padding: 12px 16px;
     margin: 8px 12px;
+    min-height: 96px;
 }
 
 .notification-content {
@@ -24,10 +25,10 @@
 /* The phone app icon — fills the left edge, minimal breathing room. */
 .notification .icon,
 .notification .notification-icon {
-    min-width: 64px;
-    min-height: 64px;
-    border-radius: 14px;
-    margin: 0 12px 0 0;
+    min-width: 84px;
+    min-height: 84px;
+    border-radius: 18px;
+    margin: 0 14px 0 0;
 }
 
 .notification .image {
