@@ -260,6 +260,9 @@ class MurmurService : Service() {
             running = false,
         )
         if (::relay.isInitialized) relay.stop()
+        // Frees :17894 — without it a same-process service restart
+        // leaves a zombie listener that swallows laptop dials.
+        if (::lan.isInitialized) lan.stop()
         runCatching {
             getSystemService(ConnectivityManager::class.java)
                 .unregisterNetworkCallback(networkCallback)

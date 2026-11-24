@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -40,6 +41,13 @@ class LanLink(
 
     private val links = ConcurrentHashMap<String, Link>()
 
+    /** The accept socket — held on the class so [stop] can actually
+     *  release :17894. Without this a service restart in the same
+     *  process leaves a zombie listener that accepts links nobody
+     *  serves, and every later instance fails the bind forever. */
+    @Volatile private var srv: ServerSocket? = null
+    @Volatile private var started = false
+
     /** peer id → measured LAN round-trip in ms (missing entry = not
      *  linked, null rtt = not yet measured) — drives the per-device
      *  "on lan" badge and the real ping in the UI. */
@@ -67,6 +75,10 @@ class LanLink(
     )
 
     fun start() {
+        synchronized(this) {
+            if (started) return
+            started = true
+        }
         scope.launch(Dispatchers.IO) { beaconLoop() }
         scope.launch(Dispatchers.IO) { acceptLoop() }
         scope.launch(Dispatchers.IO) { pingLoop() }
@@ -74,6 +86,12 @@ class LanLink(
     }
 
     fun stop() {
+        started = false
+        // Closing the listen socket unblocks accept() — otherwise the
+        // coroutine sits on it forever (blocking calls ignore cancel)
+        // and the port stays bound across service restarts.
+        runCatching { srv?.close() }
+        srv = null
         links.values.forEach { runCatching { it.sock.close() } }
         links.clear()
         publishPeers()
@@ -252,15 +270,21 @@ class LanLink(
     private suspend fun acceptLoop() {
         // Same retry story as the beacon socket — a busy :17894 or a
         // transient bind failure must not disable inbound links forever.
-        var srv: ServerSocket? = null
-        while (srv == null) {
+        while (srv == null && started) {
             srv = runCatching { ServerSocket(LINK_PORT) }
                 .onFailure { Log.w(TAG, "listen :$LINK_PORT: $it") }.getOrNull()
             if (srv == null) delay(SOCKET_RETRY_MS)
         }
-        while (true) {
-            val s = runCatching { srv.accept() }.getOrNull() ?: continue
+        val server = srv ?: return
+        while (started) {
+            val s = runCatching { server.accept() }.getOrNull() ?: break
             s.tcpNoDelay = true
+            // A dead scope would swallow the socket silently — close it
+            // instead of leaving a connected-but-unserved link.
+            if (!scope.isActive) {
+                runCatching { s.close() }
+                break
+            }
             scope.launch(Dispatchers.IO) { serveLink(s) }
         }
     }
