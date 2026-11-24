@@ -319,9 +319,16 @@ class MurmurService : Service() {
 
     /** Push the locally edited name to the registry. */
     fun pushName() {
-        if (!::relay.isInitialized || !::secrets.isInitialized) return
+        if (!::secrets.isInitialized) return
         val id = secrets.deviceId ?: return
-        relay.sendControl(Control.RenameDevice(id, secrets.deviceName), id)
+        if (::relay.isInitialized) {
+            relay.sendControl(Control.RenameDevice(id, secrets.deviceName), id)
+        } else {
+            // Serverless has no device registry — the name rides
+            // Identity gossip, so re-announce or peers show the old
+            // one until a re-link.
+            announceIdentity()
+        }
     }
 
     /** Ask the server to kick us out of the family — best effort before
