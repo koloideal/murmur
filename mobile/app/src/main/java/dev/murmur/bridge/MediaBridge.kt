@@ -40,8 +40,26 @@ class MediaBridge(
 
     private val sessionListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-            bind(controllers?.firstOrNull())
+            bind(pick(controllers))
         }
+
+    /** firstOrNull grabs whatever the system lists first — often a
+     *  stale STOPPED video session while the music app sits PAUSED.
+     *  Rank by liveliness, freshest update wins ties. */
+    private fun pick(controllers: List<MediaController>?): MediaController? =
+        controllers?.maxWithOrNull(
+            compareBy<MediaController> {
+                when (it.playbackState?.state) {
+                    PlaybackState.STATE_PLAYING -> 4
+                    PlaybackState.STATE_BUFFERING,
+                    PlaybackState.STATE_FAST_FORWARDING,
+                    PlaybackState.STATE_REWINDING -> 3
+                    PlaybackState.STATE_PAUSED -> 2
+                    PlaybackState.STATE_STOPPED -> 1
+                    else -> 0
+                }
+            }.thenBy { it.playbackState?.lastPositionUpdateTime ?: 0L },
+        )
 
     private val callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) = publishNow()
@@ -51,14 +69,18 @@ class MediaBridge(
         }
         override fun onSessionDestroyed() {
             controller = null
-            publishNow()
+            // A dying session isn't the end of media — the next-best
+            // one may still be alive.
+            bind(pick(runCatching {
+                manager.getActiveSessions(listenerName)
+            }.getOrNull()))
         }
     }
 
     init {
         runCatching {
             manager.addOnActiveSessionsChangedListener(sessionListener, listenerName)
-            bind(manager.getActiveSessions(listenerName).firstOrNull())
+            bind(pick(manager.getActiveSessions(listenerName)))
         }
         // throws SecurityError until notification access is granted — fine,
         // media just stays dark until then.
