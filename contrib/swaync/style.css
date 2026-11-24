@@ -1,0 +1,68 @@
+/* murmur popups: tunnex.dev typography (Unbounded titles, Onest body),
+   hyprland's active-window gradient border, translucent gruvbox bg,
+   big app icon hugging the left edge. */
+
+.notification {
+    /* 2px gradient border like hyprland's col.active_border —
+       D65D0E (orange) → 458588 (blue) at 45deg. GTK has no border
+       gradients, so it's two background layers clipped apart. */
+    border: 2px solid transparent;
+    border-radius: 18px;
+    background-image:
+        linear-gradient(rgba(29, 32, 33, 0.72), rgba(29, 32, 33, 0.72)),
+        linear-gradient(45deg, #D65D0E, #458588);
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+    padding: 10px 14px;
+    margin: 8px 12px;
+}
+
+.notification-content {
+    padding: 0;
+}
+
+/* The phone app icon — fills the left edge, minimal breathing room. */
+.notification .icon,
+.notification .notification-icon {
+    min-width: 64px;
+    min-height: 64px;
+    border-radius: 14px;
+    margin: 0 12px 0 0;
+}
+
+.notification .image {
+    border-radius: 12px;
+    margin-right: 10px;
+}
+
+.notification .summary {
+    font-family: "Unbounded", sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.notification .body {
+    font-family: "Onest", sans-serif;
+    font-size: 13px;
+}
+
+.notification .time,
+.notification .app-name {
+    font-family: "Onest", sans-serif;
+    font-size: 11px;
+}
+
+.notification .close-button {
+    border-radius: 10px;
+}
+
+/* Control center keeps the murmur site fonts. */
+.widget-title,
+.notification-group-header {
+    font-family: "Unbounded";
+}
+
+.widget-label,
+.control-center .notification .time {
+    font-family: "Onest";
+}
