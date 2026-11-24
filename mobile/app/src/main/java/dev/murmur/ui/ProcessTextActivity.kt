@@ -20,8 +20,11 @@ class ProcessTextActivity : Activity() {
             MurmurService.start(this)
             toast("murmur is starting — try again in a second")
         } else {
-            if (MurmurService.status.value.relay != dev.murmur.core.Relay.State.ONLINE) {
-                toast("relay offline — not sent")
+            val st = MurmurService.status.value
+            // Serverless families have no relay at all — a live LAN peer
+            // is enough to deliver the push.
+            if (st.relay != dev.murmur.core.Relay.State.ONLINE && st.lanPeers.isEmpty()) {
+                toast("offline — not sent")
             } else {
                 MurmurService.instance!!.pushClipboard(text)
                 toast("sent to laptop")

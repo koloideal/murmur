@@ -437,6 +437,7 @@ class MurmurService : Service() {
             is Msg.MediaCommand -> media.execute(msg)
             is Msg.Clipboard -> {
                 // Phone-side rule: apply only clips from the active laptop.
+                android.util.Log.d("ClipboardBridge", "clip from ${msg.origin} active=${activeDevice()}")
                 if (msg.origin == activeDevice()) ClipboardBridge.apply(this, msg)
             }
             is Msg.NotificationDismiss -> NotificationBridge.requestCancel(msg.key)

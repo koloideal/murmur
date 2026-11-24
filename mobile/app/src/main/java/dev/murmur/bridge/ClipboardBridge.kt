@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import dev.murmur.core.Msg
 
 /**
@@ -15,7 +16,9 @@ object ClipboardBridge {
 
     fun apply(ctx: Context, msg: Msg.Clipboard) {
         val data = Base64.decode(msg.data_b64, Base64.NO_WRAP)
-        val clip = when (msg.mime) {
+        // Senders annotate text mimes ("text/plain;charset=utf-8") —
+        // match on the base type.
+        val clip = when (msg.mime.substringBefore(';').trim()) {
             "text/plain", "text/uri-list" ->
                 ClipData.newPlainText("murmur", data.decodeToString()).apply {
                     // Passive sync lands while the phone may be face-up on
@@ -29,8 +32,12 @@ object ClipboardBridge {
                 // TODO: write to cache, hand out a content Uri via FileProvider
                 return
             }
-            else -> return
+            else -> {
+                Log.d("ClipboardBridge", "dropped mime ${msg.mime}")
+                return
+            }
         }
         ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+        Log.d("ClipboardBridge", "applied ${data.size}B ${msg.mime}")
     }
 }

@@ -4,8 +4,8 @@ use murmur_proto::{
     Control, DeviceId, Envelope, Message, PairKey, PresenceState, PublicKey, Route,
 };
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 
 pub fn now_ts() -> u64 {
@@ -165,7 +165,13 @@ impl Shared {
     /// Outbound: commands via the hi-priority channel, replaceable
     /// state via the coalesced lo channel.
     pub fn send(&self, to: Route, msg: &Message) -> anyhow::Result<()> {
-        let env = Envelope::seal(self.id, to.clone(), self.next_seq(), &self.keys.read().unwrap().current, msg)?;
+        let env = Envelope::seal(
+            self.id,
+            to.clone(),
+            self.next_seq(),
+            &self.keys.read().unwrap().current,
+            msg,
+        )?;
         {
             let lan = self.lan.lock().unwrap();
             match &to {
@@ -216,9 +222,12 @@ impl Shared {
             self.lan_rtt.lock().unwrap().insert(peer, 0);
         }
         // The link-up is a rendezvous: announce so the peer pins our
-        // identity + name. In a serverless family it's the *only*
-        // rendezvous — there is no relay connect to hang this on.
+        // identity + name, and re-announce presence — the heartbeat's
+        // 60s window would otherwise leave the peer rejecting clips
+        // from an "inactive" origin. In a serverless family it's the
+        // *only* rendezvous — there is no relay connect to hang this on.
         self.announce_identity();
+        self.broadcast_presence();
     }
     /// Push a pre-built envelope down a live link — for frames that
     /// must ride a specific key (a re-key sealed under the peer's old
@@ -395,6 +404,7 @@ impl Shared {
             s
         };
         let _ = self.send(Route::All, &Message::Presence { state, ts });
+        tracing::debug!("presence → broadcast {state:?} ts={ts}");
     }
 
     /// Called on disconnect. Peer rows are kept — a LAN peer is still

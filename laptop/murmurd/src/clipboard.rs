@@ -81,6 +81,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                     info!("clipboard: offer tagged {bad} not synced");
                     continue;
                 }
+                tracing::debug!("clip → broadcast hash={hash:x} mime={mime}");
                 use base64::Engine;
                 let msg = Message::Clipboard {
                     origin: shared.id,
@@ -112,6 +113,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 // Hash from the wire is the *sender's* — we suppress by
                 // the local hash the watcher will actually see.
                 suppress = Some(hash_clip(&data));
+                tracing::debug!("clip ← apply hash={hash:x} mime={mime} explicit={explicit}");
                 let _ = from;
                 if cmds.send(wlclip::ClipCmd::Set { mime, data }).is_err() {
                     return Ok(()); // adapter died

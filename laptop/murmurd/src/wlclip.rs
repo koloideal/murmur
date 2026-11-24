@@ -224,14 +224,17 @@ fn read_offer(
     tokio::task::spawn_blocking(move || {
         let mut data = Vec::new();
         match rd.read_to_end(&mut data) {
-            Ok(_) if !data.is_empty() => {
-                let _ = events.send(ClipEvent::Data {
-                    mime,
-                    offered,
-                    data,
-                });
+            Ok(n) => {
+                tracing::debug!("clip: read {n}B as {mime}");
+                if !data.is_empty() {
+                    let _ = events.send(ClipEvent::Data {
+                        mime,
+                        offered,
+                        data,
+                    });
+                }
             }
-            _ => {}
+            Err(e) => tracing::debug!("clip: offer read failed: {e}"),
         }
     });
 }
