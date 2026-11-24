@@ -66,9 +66,6 @@ impl NotifyBus {
         let icon_path = icon_b64.and_then(|b64| write_icon(pkg, b64));
         let mut hints: HashMap<String, zvariant::Value> = HashMap::new();
         hints.insert("desktop-entry".into(), pkg.into());
-        if let Some(p) = &icon_path {
-            hints.insert("image-path".into(), p.clone().into());
-        }
         let id: u32 = self
             .proxy
             .call(
@@ -81,7 +78,9 @@ impl NotifyBus {
                     body,
                     Vec::<String>::new(),
                     hints,
-                    -1i32, // never expire — dismissal is synced, not timed
+                    // 0 = never expire (-1 is the daemon's ~3s default,
+                    // not "forever"). Dismissal is synced, not timed.
+                    0i32,
                 ),
             )
             .await?;
@@ -127,6 +126,30 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
+/// Is any of `names` a live process? argv0's basename must match —
+/// comm is truncated to 15 chars, cmdline keeps the full name.
+fn proc_running(names: &[String]) -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for e in dir.flatten() {
+        let fname = e.file_name();
+        if fname.to_str().is_none_or(|s| s.parse::<u32>().is_err()) {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else {
+            continue;
+        };
+        let arg0 = cmd.split(|b| *b == 0).next().unwrap_or_default();
+        let base = arg0.rsplit(|b| *b == b'/').next().unwrap_or_default();
+        let base = String::from_utf8_lossy(base);
+        if names.iter().any(|n| base == n.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn feature() -> Feature {
     Feature::new(
         "notify",
@@ -164,6 +187,17 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 let Some((_from, msg)) = m else { return Ok(()) };
                 match msg {
                     Message::Notification { key, pkg, app, title, body, icon_b64, .. } => {
+                        // A live desktop twin already shows its own
+                        // notifications — the phone copy is a duplicate.
+                        let suppressed = shared
+                            .cfg
+                            .notify_suppress_if_running
+                            .get(&pkg)
+                            .is_some_and(|procs| !procs.is_empty() && proc_running(procs));
+                        if suppressed {
+                            debug!("notif from {pkg} suppressed — local client running");
+                            continue;
+                        }
                         let replaces = ids.get(&key).copied().unwrap_or(0);
                         let app = app.as_deref().unwrap_or(APP);
                         match bus.notify(replaces, app, &pkg, &title, &body, icon_b64.as_deref()).await {

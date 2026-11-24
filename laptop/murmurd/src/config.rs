@@ -54,6 +54,11 @@ pub struct Config {
     /// observers — presence watches for the process itself.
     #[serde(default = "default_lock_procs")]
     pub lock_procs: Vec<String>,
+    /// Phone app → local twin processes. When a listed process is alive
+    /// the phone's notification from that app is a duplicate of what
+    /// the desktop client already shows — drop it.
+    #[serde(default = "default_notify_suppress")]
+    pub notify_suppress_if_running: std::collections::HashMap<String, Vec<String>>,
 }
 
 fn default_idle() -> u64 {
@@ -73,6 +78,27 @@ fn default_lock_procs() -> Vec<String> {
     .collect()
 }
 
+fn default_notify_suppress() -> std::collections::HashMap<String, Vec<String>> {
+    // Telegram: phone mirroring doubles Telegram Desktop's own popups.
+    let tg = || {
+        vec![
+            "telegram-desktop".to_string(),
+            "Telegram".to_string(),
+            "kotatogram-desktop".to_string(),
+        ]
+    };
+    [
+        "org.telegram.messenger",
+        "org.telegram.messenger.web",
+        "org.telegram.plus",
+        "tw.nekomimi.nekogram",
+        "org.thunderdog.challegram",
+    ]
+    .iter()
+    .map(|pkg| (pkg.to_string(), tg()))
+    .collect()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -82,6 +108,7 @@ impl Default for Config {
             idle_timeout_secs: default_idle(),
             clipboard_mime_deny: default_mime_deny(),
             lock_procs: default_lock_procs(),
+            notify_suppress_if_running: default_notify_suppress(),
         }
     }
 }
