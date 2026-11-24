@@ -1,6 +1,7 @@
 package dev.murmur.bridge
 
 import android.app.Notification
+import android.app.Notification.MessagingStyle
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Icon
@@ -59,7 +60,7 @@ class NotificationBridge : NotificationListenerService() {
                 app = apps.value[sbn.packageName]?.label,
                 title = title,
                 body = body,
-                icon_b64 = iconB64(n.getLargeIcon()),
+                icon_b64 = iconB64(avatarIcon(n)),
                 ts = sbn.postTime / 1000,
             ),
         )
@@ -86,6 +87,26 @@ class NotificationBridge : NotificationListenerService() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
         }.getOrNull() ?: pkg.substringAfterLast('.')
         apps.value = apps.value + (pkg to App(pkg, label, System.currentTimeMillis()))
+    }
+
+    /** The writer's avatar: MessagingStyle notifications (Telegram &
+     *  co) carry it as the person icon of the newest message — a photo
+     *  when the contact has one, a letter tile otherwise. Conversation
+     *  and large icons are the fallbacks. */
+    private fun avatarIcon(n: Notification): Icon? {
+        val person = runCatching {
+            // extractMessagingStyleFromNotification is @hide on modern
+            // stubs — the public path is the messages extra itself.
+            n.extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+                ?.let(MessagingStyle.Message::getMessagesFromBundleArray)
+                ?.lastOrNull()?.senderPerson?.icon
+        }.getOrNull()
+        if (person != null) return person
+        // "android.conversationIcon" — EXTRA_CONVERSATION_ICON is
+        // @SystemApi on some SDK stubs; the literal is stable.
+        return runCatching {
+            n.extras.getParcelable<Icon>("android.conversationIcon")
+        }.getOrNull() ?: n.getLargeIcon()
     }
 
     /** largeIcon → downscaled PNG → b64 (bounded to ICON_PX). */
