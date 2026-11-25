@@ -11,6 +11,20 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,10 +39,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +51,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
@@ -60,13 +73,15 @@ fun StatusCard() {
     val settled by Secrets.settledFlow.collectAsState()
     val removed by Secrets.removedFlow.collectAsState()
 
-    var editingName by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var deviceName by remember { mutableStateOf(secrets.deviceName) }
+    // The family kind is a pairing fact — a paused service publishes a
+    // bare Status, and the dashboard must not flip to relay mode then.
+    val serverless = secrets.familyKind == "serverless"
 
     // In a serverless family there is no relay — "online" means a
     // peer is actually linked over LAN.
-    val online = if (status.familyKind == "serverless") {
+    val online = if (serverless) {
         status.lanPeers.isNotEmpty()
     } else {
         status.relay == Relay.State.ONLINE
@@ -108,13 +123,20 @@ fun StatusCard() {
                 // column's 20dp inner padding negated); every other
                 // state keeps the shared content padding.
                 val waveBleed by animateDpAsState(
-                    if (online) (-20).dp else 0.dp,
+                    if (online) 20.dp else 0.dp,
                     label = "waveBleed",
                 )
                 Canvas(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = waveBleed)
+                        // Padding can't go negative — widen the measured
+                        // box past the parent and re-center it instead.
+                        .layout { m, c ->
+                            val extra = waveBleed.roundToPx()
+                            val w = c.maxWidth + 2 * extra
+                            val p = m.measure(c.copy(minWidth = w, maxWidth = w))
+                            layout(c.maxWidth, p.height) { p.place(-extra, 0) }
+                        }
                         .height(56.dp),
                 ) {
                     drawPath(
@@ -145,7 +167,7 @@ fun StatusCard() {
                     return@Column
                 }
                 if (status.running && status.relay == Relay.State.OFFLINE &&
-                    status.familyKind != "serverless"
+                    !serverless
                 ) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -157,48 +179,45 @@ fun StatusCard() {
                 Spacer(Modifier.height(16.dp))
                 StatusRow(
                     "family",
-                    status.familyName ?: "—",
-                    dim = status.familyName == null,
+                    status.familyName ?: secrets.familyName ?: "—",
+                    dim = (status.familyName ?: secrets.familyName) == null,
                 )
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        StatusRow("name", deviceName)
-                    }
-                    IconButton(onClick = { editingName = true }) {
-                        Icon(
-                            Icons.Outlined.Edit,
-                            contentDescription = "rename this device",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                NameRow(deviceName) { n ->
+                    secrets.deviceName = n
+                    deviceName = secrets.deviceName
+                    MurmurService.instance?.pushName()
                 }
-                StatusRow("device", secrets.deviceId ?: "—", dim = secrets.deviceId == null)
-                StatusRow(
-                    "server",
-                    if (status.familyKind == "serverless") "none — lan only"
-                    else secrets.serverUrl.ifEmpty { "—" },
-                )
-                StatusRow(
-                    "lan addr",
-                    status.lanAddr ?: "—",
-                    dim = status.lanAddr == null,
-                )
-                if (status.running && status.familyKind == "serverless" &&
+                if (!serverless) {
+                    StatusRow("server", secrets.serverUrl.ifEmpty { "—" })
+                }
+                if (status.running) {
+                    StatusRow(
+                        "lan addr",
+                        status.lanAddr ?: "—",
+                        dim = status.lanAddr == null,
+                    )
+                }
+                if (status.running && serverless &&
                     status.lanPeers.isEmpty() && status.lanAddr != null
                 ) {
+                    Spacer(Modifier.height(14.dp))
                     Text(
-                        "no peers found — on filtered Wi-Fi discovery can't " +
-                            "pass. Dial this phone from the laptop:",
+                        "no peers — filtered Wi-Fi blocks discovery. " +
+                            "Dial this phone from the laptop:",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(6.dp))
-                    CommandLine("murmurctl dial ${status.lanAddr}")
-                    Spacer(Modifier.height(4.dp))
+                    CommandLine(
+                        "murmurctl dial ${status.lanAddr}",
+                        Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(14.dp))
                 }
-                if (status.familyKind != "serverless" && secrets.serverUrl.startsWith("ws://")) {
+                if (!serverless && secrets.serverUrl.startsWith("ws://")) {
                     Text(
                         "plain ws — messages stay end-to-end sealed, but the " +
                             "relay login travels unencrypted. Prefer wss://.",
@@ -207,18 +226,13 @@ fun StatusCard() {
                         modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
                     )
                 }
-                StatusRow(
-                    "ping",
-                    if (status.familyKind == "serverless") {
-                        status.lanPeers.values.filter { it > 0 }.maxOrNull()
-                            ?.let { "$it ms" } ?: "—"
-                    } else {
-                        status.serverRttMs?.let { "$it ms" } ?: "—"
-                    },
-                    dim = if (status.familyKind == "serverless")
-                        status.lanPeers.values.all { it <= 0 }
-                    else status.serverRttMs == null,
-                )
+                if (!serverless) {
+                    StatusRow(
+                        "ping",
+                        status.serverRttMs?.let { "$it ms" } ?: "—",
+                        dim = status.serverRttMs == null,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Row {
                     OutlinedButton(
@@ -248,32 +262,6 @@ fun StatusCard() {
                 }
             }
         }
-    }
-
-    if (editingName) {
-        var name by remember { mutableStateOf(deviceName) }
-        AlertDialog(
-            onDismissRequest = { editingName = false },
-            title = { Text("device name") },
-            text = {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    singleLine = true,
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    deviceName = name.trim().ifEmpty { deviceName }
-                    secrets.deviceName = deviceName
-                    MurmurService.instance?.pushName()
-                    editingName = false
-                }) { Text("save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { editingName = false }) { Text("cancel") }
-            },
-        )
     }
 
     if (confirmLeave) {
@@ -318,5 +306,70 @@ fun StatusCard() {
                 TextButton(onClick = { confirmLeave = false }) { Text("stay") }
             },
         )
+    }
+}
+
+/** The "name" row, edited in place: tap the value → it becomes a field
+ *  of the same text style and height; Done or focus loss saves, an
+ *  empty entry keeps the old name. */
+@Composable
+private fun NameRow(name: String, onSave: (String) -> Unit) {
+    var editing by remember { mutableStateOf(false) }
+    var draft by remember(name) { mutableStateOf(name) }
+    val focus = remember { FocusRequester() }
+    // onFocusChanged fires once unfocused on attach — only a real
+    // focus → blur transition may commit.
+    var focused by remember { mutableStateOf(false) }
+    val style = MaterialTheme.typography.bodyMedium
+    fun commit() {
+        if (!editing) return
+        editing = false
+        focused = false
+        draft.trim().takeIf { it.isNotEmpty() && it != name }?.let(onSave) ?: run { draft = name }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("name", style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(16.dp))
+        if (editing) {
+            BasicTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                singleLine = true,
+                textStyle = style.copy(
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.End,
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { commit() }),
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(focus)
+                    .onFocusChanged {
+                        if (it.isFocused) focused = true
+                        else if (focused) commit()
+                    },
+            )
+            LaunchedEffect(Unit) { focus.requestFocus() }
+        } else {
+            Row(
+                Modifier.weight(1f).clickable { editing = true },
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(name, style = style, color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    Icons.Outlined.Edit,
+                    contentDescription = "rename this device",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
     }
 }

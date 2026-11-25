@@ -263,15 +263,10 @@ async fn dial_loop(
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 match hint.peer {
-                    Some(peer) => {
-                        info!("lan: dialed {addr} ({peer})");
-                        // Reachable once → worth remembering for the
-                        // redial loop, beacon or no beacon.
-                        shared.lan_addr_set(peer, addr);
-                    }
+                    Some(peer) => info!("lan: dialed {addr} ({peer})"),
                     None => info!("lan: dialed {addr} (manual)"),
                 }
-                spawn_link(&shared, &hub, s, hint.peer);
+                spawn_link(&shared, &hub, s);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }
@@ -317,7 +312,7 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
             Ok((s, addr)) => {
                 let _ = s.set_nodelay(true);
                 info!("lan: accepted {addr}");
-                spawn_link(shared, hub, s, None);
+                spawn_link(shared, hub, s);
             }
             Err(e) => {
                 warn!("lan: accept: {e}");
@@ -336,20 +331,21 @@ const VERIFY_AFTER: std::time::Duration = std::time::Duration::from_secs(25);
 /// Split the socket: writer drains the per-link envelope queue; reader
 /// opens + dispatches. Either ending tears the link down.
 ///
-/// A dialed link is adopted immediately — the beacon that led us to
-/// the address was already authenticated, so waiting for the peer's
-/// first frame would deadlock (each side waits for the other to send).
-/// An accepted link waits for an openable frame like before.
+/// Dialed or accepted, a link is adopted only once a frame from the far
+/// end opens with the family key. A TCP handshake proves nothing — a
+/// VPN TUN (sing-box & co.) completes it locally for any address and
+/// resets a moment later — and adopting early flashed the peer
+/// "online" with its stale cached state.
 ///
 /// Every link starts by sending a sealed beacon — the peer gets proof
-/// of family instantly instead of waiting for the next broadcast —
+/// of family instantly instead of waiting for the next broadcast, and
+/// answers it (plus the immediate first ping), so nobody deadlocks —
 /// and gets a verify timer: no openable frame within [VERIFY_AFTER]
 /// means the far end is not family, and the socket is a dead end.
 fn spawn_link(
     shared: &Arc<Shared>,
     hub: &Arc<Hub>,
     s: TcpStream,
-    adopt_as: Option<murmur_proto::DeviceId>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
     // tokio::TcpStream has no try_clone — bounce through std to grab a
@@ -364,12 +360,6 @@ fn spawn_link(
     };
     let remote_ip = s.peer_addr().ok().map(|a| a.ip());
     let (r, w) = s.into_split();
-    if let Some(peer) = adopt_as {
-        if !shared.lan_peers().contains(&peer) {
-            info!("lan: link up with {peer}");
-        }
-        shared.lan_adopt(peer, tx.clone());
-    }
     if let Ok(env) = Envelope::seal(
         shared.id,
         Route::All,
@@ -539,9 +529,8 @@ async fn link_reader(
                 // links alongside, never evicts.
                 if !shared.lan_peers().contains(&env.from) {
                     info!("lan: link up with {}", env.from);
-                    // Reachable once → worth remembering for the
-                    // beacon-free redial path. Dialed links were
-                    // recorded by dial_loop already.
+                    // Proven reachable → worth remembering for the
+                    // beacon-free redial path.
                     if let Some(ip) = remote_ip {
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, LINK_PORT));
                     }

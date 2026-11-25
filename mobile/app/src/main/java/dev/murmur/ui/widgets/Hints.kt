@@ -22,14 +22,17 @@ import androidx.compose.ui.unit.dp
 
 /** A terminal command as a chip: dim `$`, monospace body. */
 @Composable
-fun CommandLine(cmd: String, modifier: Modifier = Modifier) {
+fun CommandLine(cmd: String, modifier: Modifier = Modifier, singleLine: Boolean = false) {
     Text(
         buildAnnotatedString {
             withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)) { append("$ ") }
             append(cmd)
         },
-        style = MaterialTheme.typography.bodyMedium,
+        // One-liners shrink to fit instead of wrapping an address.
+        style = if (singleLine) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
         fontFamily = FontFamily.Monospace,
+        maxLines = if (singleLine) 1 else Int.MAX_VALUE,
+        softWrap = !singleLine,
         color = MaterialTheme.colorScheme.onSurface,
         modifier = modifier
             .background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.small)

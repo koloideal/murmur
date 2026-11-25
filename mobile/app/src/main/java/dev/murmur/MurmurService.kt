@@ -29,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 
@@ -163,11 +164,13 @@ class MurmurService : Service() {
         var seenPeers = emptySet<String>()
         scope.launch {
             lan.peersFlow.collect { p ->
-                val st = status.value.copy(lanPeers = p)
                 // Serverless has no ListDevices — the family card is
                 // synthesised locally from the roster + live links
                 // until roster gossip lands.
-                status.value = if (serverless) st.copy(devices = localDevices(p)) else st
+                status.update {
+                    val st = it.copy(lanPeers = p)
+                    if (serverless) st.copy(devices = localDevices(p)) else st
+                }
                 if (serverless) {
                     // No relay connect event exists — a link-up IS the
                     // rendezvous. Announce so the peer pins our identity
@@ -184,14 +187,14 @@ class MurmurService : Service() {
         }
         scope.launch {
             lan.lanAddrFlow.collect { a ->
-                status.value = status.value.copy(lanAddr = a)
+                status.update { it.copy(lanAddr = a) }
             }
         }
         if (!serverless) {
             scope.launch { relay.incoming.collect { onEnvelope(it) } }
             scope.launch {
                 relay.state.collect { st ->
-                    status.value = status.value.copy(relay = st)
+                    status.update { it.copy(relay = st) }
                     if (st == Relay.State.ONLINE) {
                         // Cheap self-heal: the family list always shows the
                         // current name — debug installs suffix it with ·dev.
@@ -318,7 +321,7 @@ class MurmurService : Service() {
         secrets.rotateFamilyKey(newKey, r.epoch, from, r.revoked)
         key = FamilyKey.fromBytes(newKey)
         r.revoked.forEach { presence.remove(it) }
-        status.value = status.value.copy(keyEpoch = r.epoch)
+        status.update { it.copy(keyEpoch = r.epoch) }
         announceIdentity()
     }
 
@@ -402,13 +405,13 @@ class MurmurService : Service() {
         env.controlPayload()?.let { ctl ->
             if (ctl is Control.Devices) {
                 val sent = listSentAt.getAndSet(0)
-                status.value = status.value.copy(
+                status.update { it.copy(
                     devices = ctl.devices,
                     familyName = ctl.family_name,
                     serverRttMs = if (sent != 0L)
                         (android.os.SystemClock.elapsedRealtimeNanos() - sent) / 1_000_000
                     else null,
-                )
+                ) }
             }
             return
         }

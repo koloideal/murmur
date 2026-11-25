@@ -23,8 +23,10 @@ class ShareActivity : Activity() {
                 toast("murmur is starting — share again in a second")
             }
             else -> {
-                if (MurmurService.status.value.relay != dev.murmur.core.Relay.State.ONLINE) {
-                    toast("relay offline — not sent")
+                val st = MurmurService.status.value
+                // Serverless has no relay — a live LAN peer delivers.
+                if (st.relay != dev.murmur.core.Relay.State.ONLINE && st.lanPeers.isEmpty()) {
+                    toast("offline — not sent")
                 } else {
                     MurmurService.instance!!.pushClipboard(text)
                     toast("sent to laptop")
