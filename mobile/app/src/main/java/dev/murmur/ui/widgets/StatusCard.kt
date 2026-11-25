@@ -87,11 +87,16 @@ fun StatusCard() {
         status.relay == Relay.State.ONLINE
     }
 
+    // Starting a link takes seconds (discovery → dial → first frame) —
+    // "offline" right after resume would be a lie, so there's a grace.
+    val connectingGrace = status.running && !online &&
+        android.os.SystemClock.elapsedRealtime() - status.startedAtMs < 12_000
+
     val (color, label) = when {
         removed -> MaterialTheme.colorScheme.error to "removed"
         !status.running -> MaterialTheme.colorScheme.onSurfaceVariant to "paused"
         online -> MaterialTheme.colorScheme.secondary to "online"
-        status.relay == Relay.State.CONNECTING ->
+        connectingGrace || status.relay == Relay.State.CONNECTING ->
             MaterialTheme.colorScheme.primary to "connecting"
         else -> MaterialTheme.colorScheme.error to "offline"
     }

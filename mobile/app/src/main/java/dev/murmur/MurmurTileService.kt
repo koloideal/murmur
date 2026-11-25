@@ -11,8 +11,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
- * Quick Settings tile — the VPN-style switch: one tap starts the relay
- * agent, another stops it. State mirrors [MurmurService.status].
+ * Quick Settings tile — the VPN-style switch: one tap starts the agent,
+ * another exits it outright (no paused notification left behind).
+ * State mirrors [MurmurService.status].
  */
 class MurmurTileService : TileService() {
 
@@ -24,17 +25,26 @@ class MurmurTileService : TileService() {
             MurmurService.status.collectLatest { st ->
                 qsTile?.let { tile ->
                     tile.state = if (st.running) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-                    tile.subtitle = when (st.relay) {
-                        dev.murmur.core.Relay.State.ONLINE -> "online"
-                        dev.murmur.core.Relay.State.CONNECTING -> "connecting"
-                        dev.murmur.core.Relay.State.OFFLINE -> "offline"
-                        dev.murmur.core.Relay.State.REVOKED -> "removed"
+                    tile.subtitle = when {
+                        !st.running -> "off"
+                        // Serverless has no relay — a live link is online.
+                        st.familyKind == "serverless" ->
+                            if (st.lanPeers.isEmpty()) "offline" else "online"
+                        else -> relayLabel(st.relay)
                     }
                     tile.updateTile()
                 }
             }
         }
     }
+
+    private fun relayLabel(r: dev.murmur.core.Relay.State) =
+        when (r) {
+            dev.murmur.core.Relay.State.ONLINE -> "online"
+            dev.murmur.core.Relay.State.CONNECTING -> "connecting"
+            dev.murmur.core.Relay.State.OFFLINE -> "offline"
+            dev.murmur.core.Relay.State.REVOKED -> "removed"
+        }
 
     override fun onStopListening() {
         job?.cancel()

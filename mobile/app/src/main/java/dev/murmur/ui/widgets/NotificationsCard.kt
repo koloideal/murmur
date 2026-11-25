@@ -4,7 +4,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
-import androidx.compose.foundation.background
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,9 +31,8 @@ import androidx.compose.ui.unit.dp
 import dev.murmur.core.Secrets
 
 /**
- * What leaves the phone: a single "hide message text" switch on a tonal
- * row — off-state tracks blend into the card, so the row needs its own
- * surface to read as a control.
+ * What leaves the phone: a master mirror switch, and — only while it's
+ * on — "hide message text".
  */
 @Composable
 fun NotificationsCard() {
@@ -39,41 +41,69 @@ fun NotificationsCard() {
     val settled by Secrets.settledFlow.collectAsState()
     val removed by Secrets.removedFlow.collectAsState()
     val hide by Secrets.hideTextFlow.collectAsState()
+    val mirror by Secrets.mirrorFlow.collectAsState()
 
     AnimatedVisibility(
         visible = settled && !removed,
         enter = fadeIn(tween(600)) + expandVertically(tween(600)),
     ) {
         FeatureCard("notifications", Icons.Outlined.Notifications) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(
-                        MaterialTheme.colorScheme.surfaceContainerHigh,
-                        MaterialTheme.shapes.small,
-                    )
-                    .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("hide message text", style = MaterialTheme.typography.bodyLarge)
-                    Text(
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ToggleRow(
+                    "mirror notifications",
+                    "show this phone's notifications on laptops",
+                    checked = mirror,
+                    onChange = { secrets.mirrorNotifications = it },
+                )
+                AnimatedVisibility(
+                    visible = mirror,
+                    enter = fadeIn(tween(250)) + expandVertically(tween(250)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(200)),
+                ) {
+                    ToggleRow(
+                        "hide message text",
                         "laptops show only the app and the title",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        checked = hide,
+                        onChange = { secrets.hideNotificationText = it },
                     )
                 }
-                Spacer(Modifier.width(12.dp))
-                Switch(
-                    checked = hide,
-                    onCheckedChange = { secrets.hideNotificationText = it },
-                    colors = SwitchDefaults.colors(
-                        uncheckedThumbColor = MaterialTheme.colorScheme.outline,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-                        uncheckedBorderColor = MaterialTheme.colorScheme.outline,
-                    ),
-                )
             }
         }
+    }
+}
+
+/** One switch on a tonal row — off-state tracks blend into the card,
+ *  so the row needs its own surface to read as a control. */
+@Composable
+private fun ToggleRow(title: String, hint: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant,
+                MaterialTheme.shapes.small,
+            )
+            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+            ),
+        )
     }
 }

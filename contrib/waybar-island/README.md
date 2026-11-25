@@ -60,6 +60,12 @@ drop `Onest[wght].ttf` / `Unbounded[wght].ttf` into
 - Keys while the popup is focused: `Esc` close, `space` play/pause,
   `←`/`→` seek ±5s, `n`/`p` next/prev, `s` shuffle, `r` repeat —
   plus the standard media keys.
+- The same keys work without opening the popup: `murmur-island-hover.py`
+  watches the cursor and puts hyprland into a `murmur` submap (see
+  `hyprland.lua`) while it hovers the island's track label, so `space`,
+  arrows, `n`/`p`, `s`, `r` control playback right off the bar. The
+  label geometry comes from waybar's AT-SPI tree (needs
+  `python-atspi`/ATK); autostart the script alongside waybar.
 - `murmur-player.py --daemon` holds a headless GApplication
   (`app.hold()`); each Activate rebuilds or destroys the window.
 - Popup closes itself when murmur goes offline and refuses to fight

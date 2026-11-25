@@ -30,6 +30,7 @@ class Secrets(private val ctx: Context) {
         mutedFlow.value = mutedApps
         removedFlow.value = removed
         hideTextFlow.value = hideNotificationText
+        mirrorFlow.value = mirrorNotifications
     }
 
     val provisioned: Boolean
@@ -120,6 +121,14 @@ class Secrets(private val ctx: Context) {
             mutedFlow.value = v
         }
 
+    /** Master switch — off, and no notification leaves the phone. */
+    var mirrorNotifications: Boolean
+        get() = prefs.getBoolean(KEY_MIRROR, true)
+        set(v) {
+            prefs.edit { putBoolean(KEY_MIRROR, v) }
+            mirrorFlow.value = v
+        }
+
     /** Laptops get the app + title only, never the message text. */
     var hideNotificationText: Boolean
         get() = prefs.getBoolean(KEY_HIDE_TEXT, false)
@@ -193,6 +202,7 @@ class Secrets(private val ctx: Context) {
 
         val removedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
         val hideTextFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val mirrorFlow = kotlinx.coroutines.flow.MutableStateFlow(true)
 
         /** Muted-apps set, observable by the notifications card. */
         val mutedFlow = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
@@ -206,6 +216,7 @@ class Secrets(private val ctx: Context) {
         private const val KEY_NAME = "device_name"
         private const val KEY_MUTED = "notif_muted"
         private const val KEY_HIDE_TEXT = "notif_hide_text"
+        private const val KEY_MIRROR = "notif_mirror"
         private const val KEY_IDENTITY = "identity_enc"
         private const val KEY_EPOCH = "key_epoch"
         private const val KEY_ROTATOR = "key_rotator"

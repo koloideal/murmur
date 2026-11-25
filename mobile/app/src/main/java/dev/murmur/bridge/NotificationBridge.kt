@@ -43,6 +43,7 @@ class NotificationBridge : NotificationListenerService() {
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return // repeats its children
         noteApp(sbn)
         val svc = MurmurService.instance ?: return
+        if (!Secrets.mirrorFlow.value) return
         if (sbn.packageName in Secrets.mutedFlow.value) return
         if (n.visibility == Notification.VISIBILITY_SECRET) return
 

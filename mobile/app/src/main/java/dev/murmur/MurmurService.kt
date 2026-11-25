@@ -72,6 +72,11 @@ class MurmurService : Service() {
     private var serverless = false
 
     /** Envelope seq for a family with no relay counter. */
+    private val notifLock = Any()
+    @Volatile private var destroyed = false
+    /** Stopped by the shade's "pause" (not exit / tile / dashboard). */
+    @Volatile private var pausedFromShade = false
+
     private val localSeq = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
     /** The family card in a serverless world: roster members + self,
@@ -117,6 +122,7 @@ class MurmurService : Service() {
         // startForegroundService() owes a call within 5s even on the
         // early-return path — promote first, decide later.
         startForeground(NOTIF_ID, statusNotification("starting…"))
+        getSystemService(NotificationManager::class.java).cancel(PAUSED_ID)
         secrets = Secrets(this)
         key = secrets.familyKey()?.takeIf { !secrets.removed } ?: run {
             // Not provisioned — sit idle; the service is (re)started after
@@ -161,6 +167,7 @@ class MurmurService : Service() {
             // Serverless never gets a Devices reply — the name stored
             // at pairing is the only source until gossip lands.
             familyName = secrets.familyName,
+            startedAtMs = android.os.SystemClock.elapsedRealtime(),
         )
         if (!serverless) relay.start()
         lan.start()
@@ -234,8 +241,14 @@ class MurmurService : Service() {
                     Relay.State.OFFLINE -> "offline — retrying"
                     Relay.State.REVOKED -> "removed from the family"
                 }
-                getSystemService(NotificationManager::class.java)
-                    .notify(NOTIF_ID, statusNotification(text))
+                synchronized(notifLock) {
+                    // A post racing onDestroy would orphan a stale
+                    // notification once the service is gone.
+                    if (!destroyed) {
+                        getSystemService(NotificationManager::class.java)
+                            .notify(NOTIF_ID, statusNotification(text))
+                    }
+                }
             }
         }
 
@@ -265,6 +278,16 @@ class MurmurService : Service() {
     }
 
     override fun onDestroy() {
+        synchronized(notifLock) { destroyed = true }
+        scope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).run {
+            cancel(NOTIF_ID)
+            // Paused from the shade: leave a way back there too.
+            // Its own id: the system takes the service's id down after
+            // onDestroy and would swallow a repost under it.
+            if (pausedFromShade) notify(PAUSED_ID, pausedNotification())
+        }
         // Unprovisioned starts stopSelf() before relay/secrets exist.
         status.value = Status(
             provisioned = ::secrets.isInitialized && secrets.provisioned,
@@ -278,13 +301,18 @@ class MurmurService : Service() {
             getSystemService(ConnectivityManager::class.java)
                 .unregisterNetworkCallback(networkCallback)
         }
-        scope.cancel()
         instance = null
         super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_PAUSE) stopSelf()
+        when (intent?.action) {
+            ACTION_PAUSE -> {
+                pausedFromShade = true
+                stopSelf()
+            }
+            ACTION_EXIT -> stopSelf()
+        }
         return START_STICKY
     }
 
@@ -473,13 +501,47 @@ class MurmurService : Service() {
             Intent(this, MurmurService::class.java).setAction(ACTION_PAUSE),
             android.app.PendingIntent.FLAG_IMMUTABLE,
         )
+        val exit = android.app.PendingIntent.getService(
+            this, 3,
+            Intent(this, MurmurService::class.java).setAction(ACTION_EXIT),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("murmur")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "pause", pause).build())
+            .addAction(Notification.Action.Builder(null, "exit", exit).build())
             .setOngoing(true)
+            .build()
+    }
+
+    /** Left behind by the shade's "pause": resume or exit from the same
+     *  place. Not a service notification — swiping it away is exit. */
+    private fun pausedNotification(): Notification {
+        val open = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, dev.murmur.ui.MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val resume = android.app.PendingIntent.getForegroundService(
+            this, 2,
+            Intent(this, MurmurService::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val exit = android.app.PendingIntent.getBroadcast(
+            this, 4,
+            Intent(this, ExitReceiver::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("murmur")
+            .setContentText("paused")
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentIntent(open)
+            .addAction(Notification.Action.Builder(null, "resume", resume).build())
+            .addAction(Notification.Action.Builder(null, "exit", exit).build())
             .build()
     }
 
@@ -497,6 +559,8 @@ class MurmurService : Service() {
         /** This phone's LAN address — what a laptop `murmurctl dial`s
          *  when broadcast discovery can't pass. */
         val lanAddr: String? = null,
+        /** When the service came up — the UI's "connecting" grace. */
+        val startedAtMs: Long = 0L,
         /** Family kind from secrets — "serverful" | "serverless". */
         val familyKind: String = "serverful",
         val devices: List<DeviceInfo> = emptyList(),
@@ -507,8 +571,10 @@ class MurmurService : Service() {
     companion object {
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
+        internal const val PAUSED_ID = 2
         private const val DEVICES_POLL_MS = 5_000L
         private const val ACTION_PAUSE = "dev.murmur.PAUSE"
+        private const val ACTION_EXIT = "dev.murmur.EXIT"
         private const val SEEN_MAX = 4096
         /** This far below the sender's high-water seq can't be an
          *  in-flight duplicate — the LAN early copy is never that late;
