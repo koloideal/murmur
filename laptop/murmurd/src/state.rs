@@ -88,6 +88,9 @@ pub struct Shared {
     /// This node's last measured round-trip per peer in ms
     /// (0 = unknown); each peer measures its own on its side.
     lan_rtt: Mutex<HashMap<DeviceId, u64>>,
+    /// Last clipboard sync event — ("in" origin id | "out", unix ts) —
+    /// the island's clip widget shows direction instead of content.
+    pub last_clip: Mutex<Option<(String, String, u64)>>,
     /// Peers whose link just died — one-shot redial markers for the
     /// dialer (bounded by peer count, entries expire after a minute).
     lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
@@ -155,6 +158,7 @@ impl Shared {
             out_lo,
             lan: Mutex::new(HashMap::new()),
             lan_rtt: Mutex::new(HashMap::new()),
+            last_clip: Mutex::new(None),
             lan_dropped: Mutex::new(HashMap::new()),
             lan_addrs: Mutex::new(load_lan_addrs()),
             lan_dial,

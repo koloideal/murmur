@@ -207,7 +207,7 @@ def status() -> dict:
     }
 
 
-TITLE_LEN = 30
+TITLE_LEN = 24
 
 # The island's on-screen center is written here so the player popup
 # can center itself under the group. Refreshed every GEO_INTERVAL.
@@ -415,93 +415,68 @@ def media_live():
 
 
 # --- clipboard ---------------------------------------------------------------
-# The shared clipboard *is* the local one — syncing merges them — so
-# the island can show what the family would paste right now. Password-
-# manager offers are masked by their hint mime, same idea as murmurd's
-# denylist. The glyph shimmers accent for a few seconds after a change
-# — that's the "your phone clip just landed" feedback — then settles.
+# No content in the bar — only which way the family's clipboard last
+# flowed: «← name» when a clip arrived from that device, «→ family»
+# when a local copy was broadcast. The daemon knows both directions
+# and ctl reports them; reading wl-paste content is pointless now.
+# Fresh events shimmer accent for a few seconds — the "phone clip just
+# landed" feedback — then the text settles into the dim separator tone.
 
-CLIP_TITLE_LEN = 14
 CLIP_FRESH_SEC = 4.0
 CLIP_POLL = 1.0
-# Substring match against wl-paste --list-types: password managers tag
-# their offers so sync/preview tooling can bow out.
-CLIP_SENSITIVE = ("password", "x-keepass", "secret")
+CLIP_NAME_LEN = 10
 
 
-def clip_fetch() -> dict | None:
-    """Current clipboard as {kind, text, hash} — text clips only are read."""
+def clip_status_fetch() -> dict | None:
     try:
-        types = subprocess.run(
-            ["wl-paste", "--list-types"],
-            capture_output=True, text=True, timeout=1,
-        )
-        if types.returncode != 0:
+        res = ctl({"cmd": "status"})
+        if not res.get("ok"):
             return None
-        mimes = types.stdout.lower().split()
-        if not mimes:
-            return None
-        if any(any(t in m for t in CLIP_SENSITIVE) for m in mimes):
-            return {"kind": "sensitive", "text": "", "hash": -1}
-        if not any(m.startswith("text/") or m in ("STRING", "UTF8_STRING")
-                   for m in mimes):
-            kind = "image" if any(m.startswith("image/") for m in mimes) else "data"
-            return {"kind": kind, "text": "", "hash": hash(tuple(mimes))}
-        out = subprocess.run(
-            ["wl-paste", "--no-newline", "--type", "text"],
-            capture_output=True, timeout=1,
-        )
-        if out.returncode != 0:
-            return None
-        text = out.stdout.decode("utf-8", "replace")
-        return {"kind": "text", "text": text, "hash": hash(text)}
+        clip = (res["data"] or {}).get("last_clip")
+        return clip
     except Exception:
         return None
 
 
-def clip_frame(clip: dict | None, changed_at: float, now: float) -> dict:
-    if clip is None:
+def clip_frame(clip: dict | None, names: dict, now: float) -> dict:
+    if not clip or not clip.get("dir"):
         return {"text": "", "class": "hidden", "tooltip": ""}
     bg, fg, accent = theme_colors()
     dim = _hex(_mix(bg, fg, 0.55))
-    # ⧉ — two overlapping pages. Fresh clips pulse dim→accent, then the
-    # glyph settles into the same dim as the status separators.
-    age = now - changed_at
+    ts = clip.get("ts") or 0
+    age = now - ts
     if age < CLIP_FRESH_SEC:
         k = (math.sin(now * 3.0) + 1) / 2 * max(0.0, 1 - age / CLIP_FRESH_SEC)
     else:
         k = 0.0
     col = _hex(_mix(_mix(bg, fg, 0.55), accent, k))
-    glyph = f'<span foreground="{col}">󰅌</span>'
 
-    if clip["kind"] == "sensitive":
-        body, tip = '<span foreground="{}">•••</span>'.format(dim), "password manager clip — masked"
-    elif clip["kind"] in ("image", "data"):
-        body, tip = f'<span foreground="{dim}">{clip["kind"]}</span>', f"clipboard holds {clip['kind']} data"
+    if clip["dir"] == "in":
+        name = names.get(clip.get("origin") or "", "family")
+        name = name.split()[0][:CLIP_NAME_LEN] if name else "family"
+        text = f"← {name}"
+        tip = f"last clipboard came from {names.get(clip.get('origin') or '', 'the family')}"
     else:
-        flat = " ".join(clip["text"].split())
-        if not flat:
-            return {"text": "", "class": "hidden", "tooltip": ""}
-        shown = flat[:CLIP_TITLE_LEN] + ("…" if len(flat) > CLIP_TITLE_LEN else "")
-        body = f'<span foreground="{_hex(fg)}">{html.escape(shown)}</span>'
-        full = flat[:160] + ("…" if len(flat) > 160 else "")
-        tip = full + "\n\nright-click clears the clipboard"
-
-    return {"text": f"{glyph} {body}", "class": "clip",
-            "tooltip": tip, "sensitive": clip["kind"] == "sensitive"}
+        text = "→ family"
+        tip = "your copy was shared with the family"
+    # k already fades to zero with age — col IS the settled dim then.
+    label = f'<span foreground="{col}">{text}</span>'
+    return {"text": label, "class": "clip", "tooltip": tip}
 
 
 def clip_live():
-    clip = {"at": 0.0, "v": None, "hash": None, "changed": 0.0}
+    clip = {"at": 0.0, "v": None}
     while True:
         now = time.time()
         if now - clip["at"] >= CLIP_POLL:
             clip["at"] = now
-            v = clip_fetch()
-            h = v["hash"] if v else None
-            if h != clip["hash"]:
-                clip.update(v=v, hash=h, changed=now)
-        print(json.dumps(clip_frame(clip["v"], clip["changed"], now),
+            clip["v"] = clip_status_fetch()
+        st = murmur_state()
+        names = {}
+        if st:
+            names = {p.get("device_id"): p.get("name", "?") for p in st["peers"]}
+            names[st["self"]] = st["name"]
+        print(json.dumps(clip_frame(clip["v"], names, now),
                          ensure_ascii=False), flush=True)
         time.sleep(0.2)
 

@@ -93,6 +93,8 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 };
                 if shared.send(Route::All, &msg).is_ok() {
                     last_sent = Some(hash);
+                    *shared.last_clip.lock().unwrap() =
+                        Some(("out".to_string(), String::new(), crate::state::now_ts()));
                 }
             }
             m = inbox.recv() => {
@@ -113,6 +115,8 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 // Hash from the wire is the *sender's* — we suppress by
                 // the local hash the watcher will actually see.
                 suppress = Some(hash_clip(&data));
+                *shared.last_clip.lock().unwrap() =
+                    Some(("in".to_string(), from.to_string(), crate::state::now_ts()));
                 tracing::debug!("clip ← apply hash={hash:x} mime={mime} explicit={explicit}");
                 let _ = from;
                 if cmds.send(wlclip::ClipCmd::Set { mime, data }).is_err() {

@@ -11,10 +11,11 @@ murmur online ●  <track title> ∿
 - status: `murmur online`/`offline` — daemon reachable + a family peer
   online; the dot breathes while up, solid red when down. Click →
   `murmurctl status` in a terminal.
-- clipboard: `󰅌` + a peek at the clipboard (shared with the family —
-  sync makes them the same). Shimmers accent for a few seconds when the
-  content changes — that's the "phone clip just landed" feedback.
-  Password-manager offers stay masked (`•••`), images read `image`.
+- clipboard: which way the family's clipboard last flowed — `← name`
+  when a clip arrived from that device, `→ family` when a local copy
+  was broadcast. Never shows content. Flashes accent for a few seconds
+  on a fresh event — the "phone clip just landed" feedback — then
+  settles. Needs the daemon's `last_clip` ctl field (murmurd ≥ 0.4.0).
   Right-click clears the clipboard.
 - media: first 30 chars of the track title + a `∿` wave (the murmur
   logo) that shimmers while playing. Hidden when murmur is offline or
