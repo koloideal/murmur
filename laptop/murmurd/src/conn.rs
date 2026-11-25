@@ -153,7 +153,7 @@ async fn connect_once(
                                 {
                                     if let Ok(ip) = ip.parse() {
                                         let _ = shared.lan_dial.send(crate::lan::DialHint {
-                                            peer: env.from,
+                                            peer: Some(env.from),
                                             addr: ip,
                                             port: *tcp_port,
                                             kind: *kind,

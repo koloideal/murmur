@@ -32,6 +32,12 @@ enum Req {
     Send {
         msg_json: serde_json::Value,
     },
+    /// Manual LAN dial: `<ip>` or `<ip:port>` — the rendezvous for
+    /// networks where broadcast discovery can't pass (guest Wi-Fi
+    /// client isolation, cross-subnet unicast).
+    Dial {
+        addr: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -284,5 +290,26 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
             },
             Err(e) => Res::err(format!("not a Message: {e}")),
         },
+        Req::Dial { addr } => {
+            let target = addr
+                .parse::<std::net::SocketAddr>()
+                .map(|s| (s.ip(), s.port()))
+                .or_else(|_| {
+                    addr.parse::<std::net::IpAddr>()
+                        .map(|ip| (ip, crate::lan::LINK_PORT))
+                });
+            match target {
+                Ok((ip, port)) => {
+                    let _ = shared.lan_dial.send(crate::lan::DialHint {
+                        peer: None,
+                        addr: ip,
+                        port,
+                        kind: murmur_proto::DeviceKind::Phone,
+                    });
+                    Res::ok(serde_json::json!({"dialing": format!("{ip}:{port}")}))
+                }
+                Err(_) => Res::err("dial expects <ip> or <ip:port>"),
+            }
+        }
     }
 }

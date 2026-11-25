@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub(crate) const BEACON_PORT: u16 = 17893;
-const LINK_PORT: u16 = 17894;
+pub(crate) const LINK_PORT: u16 = 17894;
 /// Serverless pairing listener — fixed like the link port so a host
 /// firewall has something stable to allow.
 pub(crate) const PAIR_PORT: u16 = 17895;
@@ -37,9 +37,13 @@ const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A peer someone discovered for us — UDP beacon or a relay-delivered
 /// `LanBeacon` both land here; `dial_loop` does the connecting.
+/// `peer: None` is a manual dial (`murmurctl dial`) — the id is
+/// learned from the first openable frame instead, and the guards that
+/// keep *discovered* hints LAN-scoped don't apply: the user naming an
+/// address is the scoping.
 #[derive(Clone, Copy, Debug)]
 pub struct DialHint {
-    pub peer: murmur_proto::DeviceId,
+    pub peer: Option<murmur_proto::DeviceId>,
     pub addr: std::net::IpAddr,
     pub port: u16,
     pub kind: DeviceKind,
@@ -205,7 +209,7 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
             continue;
         };
         let _ = shared.lan_dial.send(DialHint {
-            peer: env.from,
+            peer: Some(env.from),
             addr: src.ip(),
             port: tcp_port,
             kind,
@@ -229,28 +233,33 @@ async fn dial_loop(
 ) {
     let mut last_dial = std::collections::HashMap::new();
     while let Some(hint) = rx.recv().await {
-        if hint.kind != DeviceKind::Phone && shared.id > hint.peer {
-            continue; // the lower-id side initiates
+        if let Some(peer) = hint.peer {
+            if hint.kind != DeviceKind::Phone && shared.id > peer {
+                continue; // the lower-id side initiates
+            }
+            if shared.lan_peers().contains(&peer) || !in_local_subnet(hint.addr) {
+                continue;
+            }
+            let now = std::time::Instant::now();
+            // A link that just died gets one immediate redial — the fast
+            // path should come back on the next beacon, not a rate-limit
+            // window later.
+            if !shared.lan_redial_pending(&peer)
+                && last_dial.get(&peer).is_some_and(|t| now - *t < DIAL_EVERY)
+            {
+                continue;
+            }
+            last_dial.insert(peer, now);
         }
-        if shared.lan_peers().contains(&hint.peer) || !in_local_subnet(hint.addr) {
-            continue;
-        }
-        let now = std::time::Instant::now();
-        // A link that just died gets one immediate redial — the fast
-        // path should come back on the next beacon, not a rate-limit
-        // window later.
-        if !shared.lan_redial_pending(&hint.peer)
-            && last_dial.get(&hint.peer).is_some_and(|t| now - *t < DIAL_EVERY)
-        {
-            continue;
-        }
-        last_dial.insert(hint.peer, now);
         let addr = SocketAddr::new(hint.addr, hint.port);
         match TcpStream::connect(addr).await {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
-                info!("lan: dialed {addr} ({})", hint.peer);
-                spawn_link(&shared, &hub, s, Some(hint.peer));
+                match hint.peer {
+                    Some(peer) => info!("lan: dialed {addr} ({peer})"),
+                    None => info!("lan: dialed {addr} (manual)"),
+                }
+                spawn_link(&shared, &hub, s, hint.peer);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }

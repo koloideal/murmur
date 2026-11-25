@@ -40,6 +40,9 @@ enum Cmd {
     },
     /// Broadcast a Message (JSON from stdin) to all devices (debug).
     Send,
+    /// Dial a LAN peer directly by ip[:port] — for networks where
+    /// broadcast discovery can't pass (guest Wi-Fi, client isolation).
+    Dial { addr: String },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +144,7 @@ fn print_help(p: &Paint) {
             format!("  {} pending pairing requests", c("pair")),
             format!("  {} rotate the family key", c("rotate")),
             format!("  {} self-revoke a device", c("revoke")),
+            format!("  {} dial a LAN peer by ip[:port]", c("dial")),
         ],
         vec![
             String::new(),
@@ -558,6 +562,11 @@ fn main() -> anyhow::Result<()> {
             let msg: serde_json::Value = serde_json::from_str(buf.trim())
                 .context("send expects a Message JSON on stdin")?;
             ask(serde_json::json!({"cmd": "send", "msg_json": msg}))?;
+            Ok(())
+        }
+        Cmd::Dial { addr } => {
+            ask(serde_json::json!({"cmd": "dial", "addr": addr}))?;
+            println!("dialing {addr} — `murmurctl status` shows the link");
             Ok(())
         }
     }
