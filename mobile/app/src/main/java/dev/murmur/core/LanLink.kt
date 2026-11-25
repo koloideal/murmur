@@ -237,11 +237,11 @@ class LanLink(
             lanAddrFlow.value = addr
             val msg = Msg.LanBeacon(LINK_PORT, "phone", addr)
             val bytes = sealedEnv(msg).toJson().encodeToByteArray()
-            runCatching {
-                sock.send(DatagramPacket(bytes, bytes.size, LIMITED_BCAST))
-                for (dst in directedBroadcasts()) {
-                    sock.send(DatagramPacket(bytes, bytes.size, dst))
-                }
+            // Each target on its own: with only a hotspot up the default
+            // network is cellular, the limited broadcast fails there,
+            // and it must not take the swlan0 directed send down too.
+            for (dst in listOf(LIMITED_BCAST) + directedBroadcasts()) {
+                runCatching { sock.send(DatagramPacket(bytes, bytes.size, dst)) }
             }
             sendRelay(msg)
             delay(BEACON_MS)
