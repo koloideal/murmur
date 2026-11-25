@@ -249,6 +249,21 @@ def _measure(markup: str) -> int:
     return _pango.get_pixel_size()[0]
 
 
+def _geo_atspi() -> tuple[int, int, int] | None:
+    """(center-x, popup-y, 0) from `murmurt geometry` — exact AT-SPI
+    extents, no screenshots, no magic constants."""
+    try:
+        out = subprocess.run(
+            ["murmurt", "geometry"], capture_output=True, text=True, timeout=3
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        g = json.loads(out.stdout)
+        return (int(g["cx"]), int(g["bar_bottom"]) + 8, 0)
+    except Exception:
+        return None
+
+
 def _geo_pill_rect() -> tuple[int, int, int, int] | None:
     """(center-x, bottom, gap) of the island pill, measured on screen.
 
@@ -327,7 +342,7 @@ def _geo_pill_rect() -> tuple[int, int, int, int] | None:
 
 
 def _write_geo(media_markup: str, up: bool) -> None:
-    rect = _geo_pill_rect()
+    rect = _geo_atspi() or _geo_pill_rect()
     cx, pop_y = 0, 46
     if rect is not None:
         cx, bottom, gap = rect

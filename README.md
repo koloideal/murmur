@@ -30,13 +30,14 @@ The phone is a thin background agent — it only reports events and obeys comman
 -   **Revocable devices**: every device has its own auth token — a lost one is kicked out instantly and the family key rotates.
 -   **Active-node election**: laptops agree on which one you're using via lock/idle state — no central coordinator, no clipboard echo storms.
 -   **Serverless LAN families**: no server at all — devices discover each other with UDP beacons, pair over the LAN, and keep reconnecting across DHCP changes and phone-hotspot networks.
+-   **Waybar island** (hyprland): media player popup, clipboard direction and sync status right in the bar — `murmurt install` sets it up from one self-contained binary (scripts, fonts, config merges), `murmurt doctor` checks the dependencies, `murmurt uninstall` removes it cleanly.
 
 ## 📦 Packages
 
 | Package | Stack | Role |
 |---|---|---|
 | `server/` | Rust | `murmurs` — the dumb authenticated relay. Live-only, zero stored content. |
-| `laptop/` | Rust | `murmurd` daemon (feature-per-module) + `murmurctl` CLI. All configuration is terminal-only. |
+| `laptop/` | Rust | `murmurd` daemon (feature-per-module) + `murmurctl` CLI + `murmurt` installer for the waybar island. All configuration is terminal-only. |
 | `mobile/` | Kotlin | Foreground agent: notification/media listeners, share & selection targets. |
 | `shared/` | Rust | `murmur-proto` — envelope, crypto, message types shared by server and laptops. |
 

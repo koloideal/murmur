@@ -40,10 +40,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-      - name: build murmurd + murmurctl (glibc — Arch machines)
+      - name: build murmurd + murmurctl + murmurt (glibc — Arch machines)
         run: |
           cargo build --release --manifest-path laptop/Cargo.toml
-          for b in murmurd murmurctl; do
+          for b in murmurd murmurctl murmurt; do
             cp "laptop/target/release/$b" "$b-${{ matrix.target }}"
           done
       - uses: softprops/action-gh-release@v2

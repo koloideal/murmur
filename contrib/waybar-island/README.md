@@ -1,5 +1,20 @@
 # waybar-island
 
+> **The easy path is `murmurt`** — the self-contained installer binary:
+> it embeds every asset in this directory (scripts, fonts, snippets),
+> marker-merges your waybar/hyprland configs and removes it all cleanly:
+>
+> ```
+> murmurt install     # scripts + fonts + config merges
+> murmurt doctor      # dependency check with per-distro hints
+> murmurt uninstall   # strip marker blocks, remove files
+> murmurt geometry    # island position probe used by the popup (AT-SPI)
+> ```
+>
+> This directory is the reference copy for manual/curious setups and
+> the source the binary embeds.
+
+
 A reference waybar "island" for murmurd: a status pill plus a media
 widget that opens a floating MPRIS popup — like the swaync player, but
 under the bar.
