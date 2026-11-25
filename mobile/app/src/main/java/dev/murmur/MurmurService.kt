@@ -72,7 +72,7 @@ class MurmurService : Service() {
     private var serverless = false
 
     /** Envelope seq for a family with no relay counter. */
-    private val localSeq = java.util.concurrent.atomic.AtomicLong(1)
+    private val localSeq = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
     /** The family card in a serverless world: roster members + self,
      *  online = currently holding a live LAN link. Names arrive with
@@ -150,7 +150,10 @@ class MurmurService : Service() {
         }
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
-        lan = LanLink(secrets.deviceId!!, key, scope, { onEnvelope(it) }) { send(it) }
+        lan = LanLink(
+            secrets.deviceId!!, key, scope, { onEnvelope(it) },
+            prefs = getSharedPreferences("lan", MODE_PRIVATE),
+        ) { send(it) }
         status.value = Status(
             provisioned = true,
             running = true,

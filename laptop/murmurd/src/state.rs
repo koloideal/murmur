@@ -142,7 +142,15 @@ impl Shared {
             token_hex: secrets.auth_token_hex.clone(),
             secrets: Mutex::new(secrets),
             cfg,
-            seq: AtomicU64::new(1),
+            // Seeded from the clock: a restart must not reuse numbers a
+            // peer's dedupe window still holds, or our first frames
+            // after the restart are dropped as duplicates.
+            seq: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(1),
+            ),
             out,
             out_lo,
             lan: Mutex::new(HashMap::new()),

@@ -52,7 +52,9 @@ class Relay(
         .build()
     @Volatile private var ws: WebSocket? = null
     private val running = AtomicBoolean(false)
-    private val seq = AtomicLong(1)
+    // Clock-seeded: after a restart a peer's dedupe window still holds
+    // our old low numbers — reusing them silently drops fresh frames.
+    private val seq = AtomicLong(System.currentTimeMillis())
 
     private val _incoming = MutableSharedFlow<Envelope>(extraBufferCapacity = 256)
     val incoming: SharedFlow<Envelope> = _incoming

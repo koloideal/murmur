@@ -20,7 +20,10 @@ import java.util.concurrent.ConcurrentHashMap
  * shape as the WS transport, zero extra auth (a frame that opens =
  * family member).
  *
- * The phone only LISTENS and beacons — laptops dial. Every peer gets
+ * Laptops dial the phone; the phone also dials back every laptop it
+ * has linked with before, at the address that laptop advertised — on
+ * broadcast-filtered Wi-Fi a DHCP change of either side would
+ * otherwise need a manual `murmurctl dial`. Every peer gets
  * its own entry in [links]: several laptops can hold a link at once
  * (a star with the phone as hub), [sendIfPeer] picks the right link.
  */
@@ -29,6 +32,9 @@ class LanLink(
     private val key: FamilyKey,
     private val scope: CoroutineScope,
     private val onMsg: (Envelope) -> Unit,
+    /** Persists [peerAddrs] — a service restart must not forget the
+     *  only rendezvous a filtered network leaves us. */
+    private val prefs: android.content.SharedPreferences? = null,
     /** Push a sealed message onto the relay — the beacon doubles as
      *  relay-borne discovery because many APs suppress client
      *  broadcast entirely. */
@@ -40,6 +46,27 @@ class LanLink(
     }
 
     private val links = ConcurrentHashMap<String, Link>()
+
+    /** peer id → where that laptop accepts links, as it advertised in
+     *  its in-link beacon. Stored as `id=host:port` lines. */
+    private val peerAddrs = ConcurrentHashMap<String, InetSocketAddress>().apply {
+        prefs?.getString(KEY_ADDRS, null)?.lineSequence()?.forEach { l ->
+            val (id, hp) = l.split('=', limit = 2).takeIf { it.size == 2 } ?: return@forEach
+            val host = hp.substringBeforeLast(':')
+            val port = hp.substringAfterLast(':').toIntOrNull() ?: return@forEach
+            put(id, InetSocketAddress.createUnresolved(host, port))
+        }
+    }
+
+    private fun rememberAddr(peer: String, host: String, port: Int) {
+        val cur = peerAddrs[peer]
+        if (cur != null && cur.hostString == host && cur.port == port) return
+        peerAddrs[peer] = InetSocketAddress.createUnresolved(host, port)
+        prefs?.edit()?.putString(
+            KEY_ADDRS,
+            peerAddrs.entries.joinToString("\n") { "${it.key}=${it.value.hostString}:${it.value.port}" },
+        )?.apply()
+    }
 
     /** The accept socket — held on the class so [stop] can actually
      *  release :17894. Without this a service restart in the same
@@ -83,6 +110,7 @@ class LanLink(
         scope.launch(Dispatchers.IO) { acceptLoop() }
         scope.launch(Dispatchers.IO) { pingLoop() }
         scope.launch(Dispatchers.IO) { writerLoop() }
+        scope.launch(Dispatchers.IO) { dialLoop() }
     }
 
     fun stop() {
@@ -295,6 +323,35 @@ class LanLink(
         }
     }
 
+    /** Dial remembered laptops that aren't linked. The laptop's accept
+     *  side waits for a frame that opens, so we say hello first; its
+     *  own beacon back is what adopts the socket here. Jittered so a
+     *  laptop redialing on the same cadence rarely collides. */
+    private suspend fun dialLoop() {
+        while (started) {
+            delay(DIAL_MS + (0L..DIAL_JITTER_MS).random())
+            for ((peer, addr) in peerAddrs) {
+                if (links.containsKey(peer) || !started) continue
+                val s = runCatching {
+                    Socket().apply {
+                        connect(InetSocketAddress(addr.hostString, addr.port), DIAL_TIMEOUT_MS)
+                        tcpNoDelay = true
+                    }
+                }.getOrNull() ?: continue
+                val hi = sealedEnv(Msg.LanBeacon(LINK_PORT, "phone", lanAddr()))
+                val ok = runCatching {
+                    s.getOutputStream().apply { write((hi.toJson() + "\n").toByteArray()); flush() }
+                }.isSuccess
+                if (!ok || links.containsKey(peer)) {
+                    runCatching { s.close() }
+                    continue
+                }
+                Log.i(TAG, "dialed ${addr.hostString}:${addr.port} ($peer)")
+                scope.launch(Dispatchers.IO) { serveLink(s) }
+            }
+        }
+    }
+
     private fun serveLink(s: Socket) {
         // The peer's own broadcasts reach the link every few seconds;
         // longer silence = dead transport (Wi-Fi off kills the route
@@ -327,6 +384,10 @@ class LanLink(
                 links.put(env.from, Link(s, s.getOutputStream()))
                     ?.let { runCatching { it.sock.close() } }
                 if (fresh) Log.i(TAG, "lan link up with ${env.from}")
+                // Fallback rendezvous until its beacon names the port.
+                if (!peerAddrs.containsKey(env.from)) {
+                    s.inetAddress?.hostAddress?.let { rememberAddr(env.from, it, LINK_PORT) }
+                }
                 publishPeers()
             }
             // Link-local keepalives stay in the transport — never reach
@@ -344,6 +405,12 @@ class LanLink(
                     }
                     continue
                 }
+                is Msg.LanBeacon -> {
+                    // A laptop's in-link beacon names where it accepts.
+                    if (msg.kind != "phone") {
+                        msg.lan_addr?.let { rememberAddr(env.from, it, msg.tcp_port) }
+                    }
+                }
                 else -> {}
             }
             onMsg(env)
@@ -360,6 +427,10 @@ class LanLink(
         const val PING_MS = 5000L
         const val LINK_IDLE_MS = 20_000
         const val SOCKET_RETRY_MS = 2_000L
+        const val DIAL_MS = 10_000L
+        const val DIAL_JITTER_MS = 3_000L
+        const val DIAL_TIMEOUT_MS = 3_000
+        const val KEY_ADDRS = "peer_addrs"
         val LIMITED_BCAST = InetSocketAddress("255.255.255.255", BEACON_PORT)
     }
 }
