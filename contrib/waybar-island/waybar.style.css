@@ -11,8 +11,8 @@
 #custom-murmur-clip,
 #custom-murmur-media {
     font-family: "Unbounded";  /* site-style display font — optional */
-    padding-left: 14px;
-    padding-right: 14px;
+    padding-left: 8px;
+    padding-right: 8px;
 }
 
 #custom-murmur-status {
