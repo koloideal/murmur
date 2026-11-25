@@ -89,8 +89,18 @@ fun StatusCard() {
 
     // Starting a link takes seconds (discovery → dial → first frame) —
     // "offline" right after resume would be a lie, so there's a grace.
+    // The clock ticks once a second — without it the grace check is
+    // frozen at whatever realtime the last recomposition saw, and
+    // "connecting" would stick long past its 12 seconds.
+    var nowMs by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(status.startedAtMs, online) {
+        while (!online) {
+            nowMs = android.os.SystemClock.elapsedRealtime()
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
     val connectingGrace = status.running && !online &&
-        android.os.SystemClock.elapsedRealtime() - status.startedAtMs < 12_000
+        nowMs - status.startedAtMs < 12_000
 
     val (color, label) = when {
         removed -> MaterialTheme.colorScheme.error to "removed"

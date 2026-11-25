@@ -392,7 +392,8 @@ class MurmurService : Service() {
         // the relay copy is authoritative and gets deduped on receipt —
         // a silently dead link can never eat a frame. A serverless
         // family has no relay at all — links are the whole transport.
-        lan.sendIfPeer(env.toJson(), to)
+        val lanHit = lan.sendIfPeer(env.toJson(), to)
+        android.util.Log.d("MurmurService", "send ${msg::class.simpleName} lanHit=$lanHit links up")
         if (::relay.isInitialized) relay.sendEnv(env)
     }
 
@@ -401,6 +402,7 @@ class MurmurService : Service() {
      * laptop sees it, only the active one applies.
      */
     fun pushClipboard(text: String) {
+        android.util.Log.d("MurmurService", "pushClipboard len=${text.length} enabled=${secrets.clipEnabled} send=${secrets.clipSend}")
         if (!secrets.clipEnabled || !secrets.clipSend) return
         send(
             Msg.Clipboard(

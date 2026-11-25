@@ -106,11 +106,26 @@ class LanLink(
             if (started) return
             started = true
         }
-        scope.launch(Dispatchers.IO) { beaconLoop() }
-        scope.launch(Dispatchers.IO) { acceptLoop() }
-        scope.launch(Dispatchers.IO) { pingLoop() }
-        scope.launch(Dispatchers.IO) { writerLoop() }
-        scope.launch(Dispatchers.IO) { dialLoop() }
+        supervise("beacon") { beaconLoop() }
+        supervise("accept") { acceptLoop() }
+        supervise("ping") { pingLoop() }
+        supervise("writer") { writerLoop() }
+        supervise("dial") { dialLoop() }
+    }
+
+    /** Loops are the whole transport — an exception or an accidental
+     *  break-out in one must never silence discovery for good, so each
+     *  restarts after a breath until [stop]. [stop] flips `started`
+     *  first, and both the loop bodies and this wrapper honor it. */
+    private fun supervise(name: String, body: suspend () -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            while (started) {
+                runCatching { body() }.onFailure {
+                    Log.w(TAG, "$name loop died: ${it.javaClass.simpleName}: ${it.message}")
+                }
+                if (started) delay(1_000)
+            }
+        }
     }
 
     fun stop() {
