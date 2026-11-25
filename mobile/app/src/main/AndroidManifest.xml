@@ -41,7 +41,7 @@
         <!-- share-sheet target: send text/links to the active laptop -->
         <activity
             android:name=".ui.ShareActivity"
-            android:label="send to laptop"
+            android:label="Send to laptop"
             android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
@@ -54,7 +54,7 @@
         <!-- custom item in the text-selection context menu -->
         <activity
             android:name=".ui.ProcessTextActivity"
-            android:label="send to laptop"
+            android:label="Send to laptop"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.PROCESS_TEXT" />

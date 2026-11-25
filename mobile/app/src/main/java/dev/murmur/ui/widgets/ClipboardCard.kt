@@ -82,8 +82,7 @@ fun ClipboardCard() {
                         if (sendOn) {
                             SendRow()
                             Text(
-                                "or select text anywhere → ⋮ → «send to laptop», " +
-                                    "or share → «send to laptop»",
+                                "select → ⋮ / share → Send to laptop",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 4.dp),
