@@ -217,20 +217,47 @@ fn cmd_status() -> anyhow::Result<()> {
     println!(
         "  family  {} {}",
         fam_name.unwrap_or("—"),
-        p.dim(format!("· {}", d["family_kind"].as_str().unwrap_or("serverful"))),
+        p.dim(format!(
+            "· {}",
+            d["family_kind"].as_str().unwrap_or("serverful")
+        )),
     );
     if let Some(peers) = d["lan_peers"].as_array().filter(|p| !p.is_empty()) {
         let rtt = d["lan_rtt_ms"].as_object();
+        let addrs = d["lan_addrs"].as_object();
         let list = peers
             .iter()
             .filter_map(|p| p.as_str())
             .map(|p| {
-                let ms = rtt.and_then(|m| m.get(p)).and_then(|v| v.as_u64()).unwrap_or(0);
-                if ms > 0 { format!("{p} {ms}ms") } else { p.to_string() }
+                let addr = addrs.and_then(|m| m.get(p)).and_then(|v| v.as_str());
+                let ms = rtt
+                    .and_then(|m| m.get(p))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                match (addr, ms) {
+                    (Some(a), ms) if ms > 0 => format!("{p} {a} {ms}ms"),
+                    (Some(a), _) => format!("{p} {a}"),
+                    _ if ms > 0 => format!("{p} {ms}ms"),
+                    _ => p.to_string(),
+                }
             })
             .collect::<Vec<_>>()
             .join("  ");
         println!("  lan     {}", p.green(format!("⇄ {list}")));
+    } else if let Some(addrs) = d["lan_addrs"].as_object().filter(|a| !a.is_empty()) {
+        // No live link, but remembered addresses are being redialed —
+        // say so instead of showing nothing.
+        let list = addrs
+            .iter()
+            .map(|(id, a)| format!("{id} {}", a.as_str().unwrap_or("?")))
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!("  lan     {}", p.dim(format!("↻ redialing {list}")));
+    } else if d["family_kind"].as_str() == Some("serverless") {
+        println!(
+            "  lan     {}",
+            p.dim("no peers — broadcast-filtered network? murmurctl dial <peer-ip>"),
+        );
     }
     if revoked {
         println!(
@@ -241,7 +268,10 @@ fn cmd_status() -> anyhow::Result<()> {
     println!(
         "  key     epoch {}  {}",
         d["key_epoch"].as_u64().unwrap_or(0),
-        p.dim(format!("· {} pinned member(s)", d["members"].as_u64().unwrap_or(0))),
+        p.dim(format!(
+            "· {} pinned member(s)",
+            d["members"].as_u64().unwrap_or(0)
+        )),
     );
 
     let selfid = d["self"].as_str().unwrap_or_default();
@@ -291,8 +321,7 @@ fn cmd_devices(all: bool) -> anyhow::Result<()> {
     let p = Paint::new();
     let d = ask(serde_json::json!({"cmd": "devices"}))?;
     let selfid = d["self"].as_str().unwrap_or_default();
-    let mut devs: Vec<serde_json::Value> =
-        d["devices"].as_array().cloned().unwrap_or_default();
+    let mut devs: Vec<serde_json::Value> = d["devices"].as_array().cloned().unwrap_or_default();
     if !all {
         devs.retain(|x| x["revoked"].as_bool() != Some(true));
     }
@@ -300,7 +329,10 @@ fn cmd_devices(all: bool) -> anyhow::Result<()> {
     devs.sort_by(|a, b| {
         let on = |x: &serde_json::Value| x["online"].as_bool() == Some(true);
         on(b).cmp(&on(a)).then_with(|| {
-            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
         })
     });
     if devs.is_empty() {
@@ -330,7 +362,11 @@ fn cmd_devices(all: bool) -> anyhow::Result<()> {
         } else {
             (p.dim("○"), p.dim("offline"))
         };
-        let me = if id == selfid { p.dim(" (me)") } else { String::new() };
+        let me = if id == selfid {
+            p.dim(" (me)")
+        } else {
+            String::new()
+        };
         println!("  {dot} {name:<w$}  {id}{me}  {tail}");
     }
     Ok(())
@@ -407,17 +443,16 @@ fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let mut i = 0;
-    println!(
-        "  {}",
-        p.dim("ctrl-c finishes later with `murmurctl pair`")
-    );
+    println!("  {}", p.dim("ctrl-c finishes later with `murmurctl pair`"));
     let req = loop {
         // Spinner ticks every 120ms; the daemon is asked every 6th tick.
         if i % 6 == 0 {
             let d = ask(serde_json::json!({"cmd": "pair"}))?;
-            let found = d["pending"].as_array().into_iter().flatten().find(|x| {
-                only.is_none_or(|s| x["session"].as_str() == Some(s))
-            });
+            let found = d["pending"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|x| only.is_none_or(|s| x["session"].as_str() == Some(s)));
             if let Some(x) = found {
                 print!("\r\x1b[2K");
                 break x.clone();
@@ -425,7 +460,10 @@ fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
         }
         if started.elapsed() > std::time::Duration::from_secs(600) {
             print!("\r\x1b[2K");
-            println!("  {}", p.dim("no request within 10 minutes — the invite expired"));
+            println!(
+                "  {}",
+                p.dim("no request within 10 minutes — the invite expired")
+            );
             return Ok(());
         }
         print!(
@@ -453,7 +491,12 @@ fn wait_and_walk(p: &Paint, only: Option<&str>) -> anyhow::Result<()> {
     println!("  │");
     println!("  │  verification code   {}", p.bold(p.yellow(pretty)));
     println!("  │");
-    println!("  │  {}", p.dim(format!("{name} shows six digits now — they must be the same")));
+    println!(
+        "  │  {}",
+        p.dim(format!(
+            "{name} shows six digits now — they must be the same"
+        ))
+    );
     println!("  │");
     if !tty_yes(p, "codes match?", false)? {
         println!(
@@ -551,16 +594,18 @@ fn main() -> anyhow::Result<()> {
         Cmd::Pair {
             op: Some(PairOp::Confirm { session }),
         } => {
-            let d =
-                ask(serde_json::json!({"cmd": "pair_confirm", "session": session}))?;
-            println!("paired — new device {}", d["device_id"].as_str().unwrap_or("?"));
+            let d = ask(serde_json::json!({"cmd": "pair_confirm", "session": session}))?;
+            println!(
+                "paired — new device {}",
+                d["device_id"].as_str().unwrap_or("?")
+            );
             Ok(())
         }
         Cmd::Send => {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf)?;
-            let msg: serde_json::Value = serde_json::from_str(buf.trim())
-                .context("send expects a Message JSON on stdin")?;
+            let msg: serde_json::Value =
+                serde_json::from_str(buf.trim()).context("send expects a Message JSON on stdin")?;
             ask(serde_json::json!({"cmd": "send", "msg_json": msg}))?;
             Ok(())
         }

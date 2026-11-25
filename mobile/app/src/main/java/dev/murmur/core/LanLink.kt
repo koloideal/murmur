@@ -100,6 +100,10 @@ class LanLink(
     /** Device ids behind live links. */
     fun linkedPeers(): Set<String> = links.keys.toSet()
 
+    /** Our own LAN address — what a laptop `murmurctl dial`s on
+     *  broadcast-filtered networks. Refreshed with the beacon cadence. */
+    val lanAddrFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
     /**
      * Queue a sealed envelope over the LAN link(s) it can reach:
      * unicast targets that peer's link, `*` gets an early copy on every
@@ -201,7 +205,9 @@ class LanLink(
         // also rides the relay — many APs drop client broadcast
         // outright, so L2-independent discovery is the reliable path.
         while (true) {
-            val msg = Msg.LanBeacon(LINK_PORT, "phone", lanAddr())
+            val addr = lanAddr()
+            lanAddrFlow.value = addr
+            val msg = Msg.LanBeacon(LINK_PORT, "phone", addr)
             val bytes = sealedEnv(msg).toJson().encodeToByteArray()
             runCatching {
                 sock.send(DatagramPacket(bytes, bytes.size, LIMITED_BCAST))

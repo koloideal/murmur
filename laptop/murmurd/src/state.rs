@@ -91,6 +91,12 @@ pub struct Shared {
     /// Peers whose link just died — one-shot redial markers for the
     /// dialer (bounded by peer count, entries expire after a minute).
     lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
+    /// Last-proven dial address per peer — learned when a link
+    /// validates (socket remote addr / the peer's advertised
+    /// `lan_addr`). On broadcast-filtered networks no fresh beacon
+    /// ever arrives, so `lan::redial_loop` uses this map to bring a
+    /// dead link back without discovery.
+    lan_addrs: Mutex<HashMap<DeviceId, std::net::SocketAddr>>,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
@@ -142,6 +148,7 @@ impl Shared {
             lan: Mutex::new(HashMap::new()),
             lan_rtt: Mutex::new(HashMap::new()),
             lan_dropped: Mutex::new(HashMap::new()),
+            lan_addrs: Mutex::new(load_lan_addrs()),
             lan_dial,
             seen: Mutex::new(Seen::default()),
             ctl_events,
@@ -284,6 +291,26 @@ impl Shared {
         self.lan_dropped.lock().unwrap().remove(peer).is_some()
     }
 
+    /// Remember where this peer was last reachable — refreshed on
+    /// every validated link and beacon-advertised `lan_addr`.
+    /// Persisted: a daemon restart on a broadcast-filtered network
+    /// would otherwise lose the only rendezvous it has.
+    pub fn lan_addr_set(&self, peer: DeviceId, addr: std::net::SocketAddr) {
+        {
+            let mut m = self.lan_addrs.lock().unwrap();
+            if m.get(&peer) == Some(&addr) {
+                return;
+            }
+            m.insert(peer, addr);
+        }
+        save_lan_addrs(&self.lan_addrs.lock().unwrap());
+    }
+
+    /// Snapshot for the redial loop and `murmurctl status`.
+    pub fn lan_addrs(&self) -> HashMap<DeviceId, std::net::SocketAddr> {
+        self.lan_addrs.lock().unwrap().clone()
+    }
+
     /// True on first sight of this envelope — call only *after* a
     /// successful `open()` so forged LAN frames can't poison the table.
     ///
@@ -417,6 +444,33 @@ impl Shared {
         if m.get(&id).is_none_or(|(_, old)| ts > *old) {
             m.insert(id, (state, ts));
         }
+    }
+}
+
+/// `lan_addrs.json` — remembered peer dial addresses, keyed by hex id.
+/// Both directions stay stringly: DeviceId/SocketAddr parse cleanly
+/// and a hand-editable file beats a schema for two fields.
+fn load_lan_addrs() -> HashMap<DeviceId, std::net::SocketAddr> {
+    std::fs::read_to_string(crate::config::data_path("lan_addrs.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(id, a)| {
+                    Some((id.parse::<DeviceId>().ok()?, a.parse::<std::net::SocketAddr>().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_lan_addrs(m: &HashMap<DeviceId, std::net::SocketAddr>) {
+    let flat: HashMap<String, String> = m
+        .iter()
+        .map(|(id, a)| (id.to_string(), a.to_string()))
+        .collect();
+    if let Ok(j) = serde_json::to_string(&flat) {
+        let _ = std::fs::write(crate::config::data_path("lan_addrs.json"), j);
     }
 }
 

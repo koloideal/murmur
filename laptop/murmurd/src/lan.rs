@@ -40,13 +40,16 @@ const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// `peer: None` is a manual dial (`murmurctl dial`) — the id is
 /// learned from the first openable frame instead, and the guards that
 /// keep *discovered* hints LAN-scoped don't apply: the user naming an
-/// address is the scoping.
+/// address is the scoping. `trusted` marks addresses proven reachable
+/// before (a remembered link, a manual dial): they skip the
+/// in-local-subnet guard that keeps relay gossip LAN-scoped.
 #[derive(Clone, Copy, Debug)]
 pub struct DialHint {
     pub peer: Option<murmur_proto::DeviceId>,
     pub addr: std::net::IpAddr,
     pub port: u16,
     pub kind: DeviceKind,
+    pub trusted: bool,
 }
 
 pub async fn run(
@@ -75,6 +78,7 @@ pub async fn run(
         Err(e) => warn!("lan: beacon off ({e}); inbound links still accepted"),
     }
     tokio::spawn(dial_loop(shared.clone(), hub.clone(), dial_rx));
+    tokio::spawn(redial_loop(shared.clone()));
     accept_loop(&shared, &hub, &listener).await
 }
 
@@ -213,6 +217,7 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
             addr: src.ip(),
             port: tcp_port,
             kind,
+            trusted: false,
         });
     }
 }
@@ -237,7 +242,9 @@ async fn dial_loop(
             if hint.kind != DeviceKind::Phone && shared.id > peer {
                 continue; // the lower-id side initiates
             }
-            if shared.lan_peers().contains(&peer) || !in_local_subnet(hint.addr) {
+            if shared.lan_peers().contains(&peer)
+                || (!hint.trusted && !in_local_subnet(hint.addr))
+            {
                 continue;
             }
             let now = std::time::Instant::now();
@@ -256,12 +263,48 @@ async fn dial_loop(
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 match hint.peer {
-                    Some(peer) => info!("lan: dialed {addr} ({peer})"),
+                    Some(peer) => {
+                        info!("lan: dialed {addr} ({peer})");
+                        // Reachable once → worth remembering for the
+                        // redial loop, beacon or no beacon.
+                        shared.lan_addr_set(peer, addr);
+                    }
                     None => info!("lan: dialed {addr} (manual)"),
                 }
                 spawn_link(&shared, &hub, s, hint.peer);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
+        }
+    }
+}
+
+/// Redial remembered peers without waiting for a beacon — the only
+/// way a link comes back on networks where broadcast can't pass
+/// (guest Wi-Fi, isolated VLANs). One gentle retry per peer per
+/// interval; `dial_loop`'s per-peer rate limit absorbs duplicates
+/// when beacons do arrive.
+async fn redial_loop(shared: Arc<Shared>) {
+    let mut tick = tokio::time::interval(DIAL_EVERY);
+    loop {
+        tick.tick().await;
+        let linked: std::collections::HashSet<_> =
+            shared.lan_peers().into_iter().collect();
+        let roster = shared.roster.lock().unwrap().clone();
+        for (peer, addr) in shared.lan_addrs() {
+            if linked.contains(&peer) {
+                continue;
+            }
+            let kind = roster
+                .get(&peer)
+                .map(|m| m.kind)
+                .unwrap_or(DeviceKind::Phone);
+            let _ = shared.lan_dial.send(DialHint {
+                peer: Some(peer),
+                addr: addr.ip(),
+                port: addr.port(),
+                kind,
+                trusted: true,
+            });
         }
     }
 }
@@ -319,6 +362,7 @@ fn spawn_link(
         Ok(v) => v,
         Err(_) => return,
     };
+    let remote_ip = s.peer_addr().ok().map(|a| a.ip());
     let (r, w) = s.into_split();
     if let Some(peer) = adopt_as {
         if !shared.lan_peers().contains(&peer) {
@@ -365,6 +409,7 @@ fn spawn_link(
         tx.clone(),
         tx_hi.clone(),
         validated,
+        remote_ip,
     ));
     tokio::spawn(ping_loop(shared.clone(), tx_hi));
 }
@@ -439,6 +484,7 @@ async fn link_reader(
     tx: mpsc::UnboundedSender<Envelope>,
     tx_hi: mpsc::UnboundedSender<Envelope>,
     validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    remote_ip: Option<std::net::IpAddr>,
 ) {
     let mut br = BufReader::new(r);
     let mut line = String::new();
@@ -493,8 +539,26 @@ async fn link_reader(
                 // links alongside, never evicts.
                 if !shared.lan_peers().contains(&env.from) {
                     info!("lan: link up with {}", env.from);
+                    // Reachable once → worth remembering for the
+                    // beacon-free redial path. Dialed links were
+                    // recorded by dial_loop already.
+                    if let Some(ip) = remote_ip {
+                        shared.lan_addr_set(env.from, SocketAddr::new(ip, LINK_PORT));
+                    }
                 }
                 shared.lan_adopt(env.from, tx.clone());
+                // The peer's advertised lan_addr:tcp_port is the
+                // better truth — it's where IT accepts dials.
+                if let Message::LanBeacon {
+                    lan_addr: Some(ip),
+                    tcp_port,
+                    ..
+                } = &msg
+                {
+                    if let Ok(ip) = ip.parse::<std::net::IpAddr>() {
+                        shared.lan_addr_set(env.from, SocketAddr::new(ip, *tcp_port));
+                    }
+                }
                 if shared.dedupe(env.from, env.seq) {
                     hub.dispatch(env.from, &msg);
                 }

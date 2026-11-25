@@ -182,6 +182,11 @@ class MurmurService : Service() {
                 seenPeers = p.keys
             }
         }
+        scope.launch {
+            lan.lanAddrFlow.collect { a ->
+                status.value = status.value.copy(lanAddr = a)
+            }
+        }
         if (!serverless) {
             scope.launch { relay.incoming.collect { onEnvelope(it) } }
             scope.launch {
@@ -483,6 +488,9 @@ class MurmurService : Service() {
          *  yet measured). Several laptops may each hold a link — the
          *  UI shows "on lan" per device row with the real ping. */
         val lanPeers: Map<String, Long> = emptyMap(),
+        /** This phone's LAN address — what a laptop `murmurctl dial`s
+         *  when broadcast discovery can't pass. */
+        val lanAddr: String? = null,
         /** Family kind from secrets — "serverful" | "serverless". */
         val familyKind: String = "serverful",
         val devices: List<DeviceInfo> = emptyList(),

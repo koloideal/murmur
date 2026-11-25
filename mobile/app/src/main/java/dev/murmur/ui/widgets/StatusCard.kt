@@ -3,6 +3,7 @@ package dev.murmur.ui.widgets
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -103,9 +104,17 @@ fun StatusCard() {
                 Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // Live link → the wave bleeds to the card's edges (the
+                // column's 20dp inner padding negated); every other
+                // state keeps the shared content padding.
+                val waveBleed by animateDpAsState(
+                    if (online) (-20).dp else 0.dp,
+                    label = "waveBleed",
+                )
                 Canvas(
                     Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = waveBleed)
                         .height(56.dp),
                 ) {
                     drawPath(
@@ -170,6 +179,25 @@ fun StatusCard() {
                     if (status.familyKind == "serverless") "none — lan only"
                     else secrets.serverUrl.ifEmpty { "—" },
                 )
+                StatusRow(
+                    "lan addr",
+                    status.lanAddr ?: "—",
+                    dim = status.lanAddr == null,
+                )
+                if (status.running && status.familyKind == "serverless" &&
+                    status.lanPeers.isEmpty() && status.lanAddr != null
+                ) {
+                    Text(
+                        "no peers found — on filtered Wi-Fi discovery can't " +
+                            "pass. Dial this phone from the laptop:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    CommandLine("murmurctl dial ${status.lanAddr}")
+                    Spacer(Modifier.height(4.dp))
+                }
                 if (status.familyKind != "serverless" && secrets.serverUrl.startsWith("ws://")) {
                     Text(
                         "plain ws — messages stay end-to-end sealed, but the " +

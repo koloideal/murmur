@@ -147,6 +147,9 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "online": online,
                 "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "lan_peers": shared.lan_peers().iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                "lan_addrs": shared.lan_addrs().iter()
+                    .map(|(i, a)| (i.to_string(), a.to_string()))
+                    .collect::<std::collections::HashMap<_, _>>(),
                 "lan_rtt_ms": shared.lan_peers().iter()
                     .map(|i| (i.to_string(), shared.lan_rtt(i)))
                     .collect::<std::collections::HashMap<_, _>>(),
@@ -305,6 +308,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                         addr: ip,
                         port,
                         kind: murmur_proto::DeviceKind::Phone,
+                        trusted: true,
                     });
                     Res::ok(serde_json::json!({"dialing": format!("{ip}:{port}")}))
                 }

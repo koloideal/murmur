@@ -157,6 +157,7 @@ async fn connect_once(
                                             addr: ip,
                                             port: *tcp_port,
                                             kind: *kind,
+                                            trusted: false,
                                         });
                                     }
                                 }
