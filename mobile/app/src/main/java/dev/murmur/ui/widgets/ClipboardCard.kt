@@ -107,7 +107,13 @@ private fun SendRow() {
             value = text,
             onValueChange = { text = it },
             modifier = Modifier.weight(1f),
-            placeholder = { Text("paste here → send to laptop") },
+            placeholder = {
+                Text(
+                    "paste → send to laptop",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                )
+            },
             singleLine = true,
             textStyle = MaterialTheme.typography.bodyMedium,
         )
