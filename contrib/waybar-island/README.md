@@ -26,6 +26,7 @@ murmur online ●  <track title> ∿
 | `murmur-island.py` | `~/.local/bin/` — waybar custom-module streams (`status-live`, `media-live`) |
 | `murmur-player.py` | `~/.local/bin/` — GTK4 popup, GApplication daemon |
 | `murmur-player-toggle.sh` | `~/.local/bin/` — one `gdbus` Activate call |
+| `murmur-island-hover.py` | `~/.local/bin/` — hover hotkeys: cursor over the track label → hyprland `murmur` submap |
 | `murmur.player.service` | `~/.local/share/dbus-1/services/` — D-Bus activation |
 | `waybar.modules.jsonc` | merge into waybar `config.jsonc` |
 | `waybar.style.css` | merge into waybar `style.css` |
@@ -34,7 +35,7 @@ murmur online ●  <track title> ∿
 
 ## Dependencies
 
-`python3`, `gtk4` + `pygobject`, `playerctl`, `hyprctl`, a
+`python3`, `gtk4` + `pygobject`, `playerctl`, `hyprctl`, `python-atspi` (hover hotkeys), a
 `JetBrainsMono Nerd Font` for the `∿` glyph. For popup centering the
 island prefers `grim` + `python-pillow` (it measures the real pill on
 screen); without them it falls back to Pango text-metrics estimates.

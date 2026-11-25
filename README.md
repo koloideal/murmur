@@ -1,6 +1,6 @@
 # murmur
 
-**murmur** is a lightweight personal continuity layer between an Android phone and Wayland laptops — phone notifications on your desktops, your phone as a regular system media player, and one shared clipboard. No LAN, no VPN, no third-party coordinators: just a dumb relay on a server you own, with everything end-to-end encrypted.
+**murmur** is a lightweight personal continuity layer between an Android phone and Wayland laptops — phone notifications on your desktops, your phone as a regular system media player, and one shared clipboard. Works two ways: through a dumb relay on a server you own (no LAN, no VPN, no third-party coordinators), or — relayless — as a pure LAN family that finds itself over broadcast beacons. Everything end-to-end encrypted either way.
 
 murmur is the **"quietest"**, **"most private"**, and **"most modular"** way to make your devices feel like one machine.
 
@@ -29,6 +29,7 @@ The phone is a thin background agent — it only reports events and obeys comman
 -   **End-to-end encryption**: one family key, XChaCha20-Poly1305. The relay sees only ciphertext, device ids and timing.
 -   **Revocable devices**: every device has its own auth token — a lost one is kicked out instantly and the family key rotates.
 -   **Active-node election**: laptops agree on which one you're using via lock/idle state — no central coordinator, no clipboard echo storms.
+-   **Serverless LAN families**: no server at all — devices discover each other with UDP beacons, pair over the LAN, and keep reconnecting across DHCP changes and phone-hotspot networks.
 
 ## 📦 Packages
 
@@ -67,6 +68,8 @@ The first device to use the bootstrap code becomes the founder and mints the fam
 
 **4. More laptops:** `murmurctl invite` on any member, then `murmurd pair --code …` on the new one.
 
+**Serverless instead?** Skip the relay entirely — on the first laptop: `murmurd init --kind serverless --name my-laptop` (or answer the installer's prompt), then `murmurctl invite` and scan with the phone. LAN-only, nothing ever leaves your network.
+
 Prefer building yourself? `cargo build --release` in `server/` or `laptop/`, `./gradlew assembleDebug` in `mobile/`.
 
 ## 📌 Design
@@ -77,7 +80,7 @@ Adding a feature to `murmurd` is: one new file with a `feature()` constructor, o
 
 ## 📄 Why?
 
-KDE Connect needs a shared LAN. Apple Continuity needs Apple. Tailscale needs their coordinator. murmur needs none of that — only a server you already own, and it can't read a single byte of what passes through it.
+KDE Connect needs a shared LAN. Apple Continuity needs Apple. Tailscale needs their coordinator. murmur needs none of that — a server you already own (which can't read a single byte of what passes through it), or not even that, if a LAN family is enough.
 
 ---
 

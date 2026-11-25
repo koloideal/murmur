@@ -219,6 +219,46 @@ if [ -n "$FW" ]; then
     fi
 fi
 
+# ---- waybar island + player popup (optional, hyprland desktops)
+# Reference integration lives in contrib/waybar-island — the heavy part
+# is the scripts; merging waybar/hyprland config stays manual because
+# everyone's bar is different.
+if command -v waybar >/dev/null 2>&1 || [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+    if askyn n "install the waybar island + player popup scripts? (hyprland integration)"; then
+        step "island scripts"
+        RAW="https://raw.githubusercontent.com/$REPO/main/contrib/waybar-island"
+        for f in murmur-island.py murmur-player.py murmur-player-toggle.sh murmur-island-hover.py; do
+            if [ -n "$SRC" ] && [ -f "$SRC/contrib/waybar-island/$f" ]; then
+                install -m 755 "$SRC/contrib/waybar-island/$f" "$BIN/$f"
+                ok "$BIN/$f"
+            else
+                dl_cached "$RAW/$f" "$BIN/$f"
+                chmod 755 "$BIN/$f"
+            fi
+        done
+        SVCDIR="$HOME/.local/share/dbus-1/services"
+        mkdir -p "$SVCDIR"
+        if [ -n "$SRC" ] && [ -f "$SRC/contrib/waybar-island/murmur.player.service" ]; then
+            install -m 644 "$SRC/contrib/waybar-island/murmur.player.service" "$SVCDIR/murmur.player.service"
+        else
+            dl_cached "$RAW/murmur.player.service" "$SVCDIR/murmur.player.service"
+        fi
+        ok "$SVCDIR/murmur.player.service"
+        box "${B}island installed — wire it up${R0}" \
+            "" \
+            "merge into your waybar config + css:" \
+            "  ${D2}contrib/waybar-island/waybar.modules.jsonc${R0}" \
+            "  ${D2}contrib/waybar-island/waybar.style.css${R0}" \
+            "hyprland — autostart + window rule + hover submap:" \
+            "  ${D2}contrib/waybar-island/hyprland.lua${R0}  (or hyprland.conf)" \
+            "deps: gtk4 pygobject playerctl python-atspi" \
+            "      ${D2}grim + python-pillow for exact popup placement${R0}" \
+            "" \
+            "browse the snippets:" \
+            "  ${B}https://github.com/$REPO/tree/main/contrib/waybar-island${R0}"
+    fi
+fi
+
 # ---- after a successful pair/init: daemon up + framed success + phone hint
 # $1 = box title (default "you're in the family")
 post_pair() {
