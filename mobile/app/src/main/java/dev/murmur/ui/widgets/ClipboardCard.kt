@@ -121,10 +121,21 @@ private fun SendRow() {
             onClick = {
                 val t = text.trim()
                 if (t.isNotEmpty()) {
-                    MurmurService.instance?.pushClipboard(t)
-                    text = ""
+                    val svc = MurmurService.instance
+                    val st = svc?.let { MurmurService.status.value }
+                    val linked = st != null &&
+                        (st.relay == dev.murmur.core.Relay.State.ONLINE || st.lanPeers.isNotEmpty())
+                    val msg = when {
+                        svc == null -> "murmur isn't running"
+                        !linked -> "offline — not sent"
+                        else -> {
+                            svc.pushClipboard(t)
+                            text = ""
+                            "sent to laptop"
+                        }
+                    }
                     android.widget.Toast.makeText(
-                        ctx, "sent to laptop", android.widget.Toast.LENGTH_SHORT,
+                        ctx, msg, android.widget.Toast.LENGTH_SHORT,
                     ).show()
                 }
             },

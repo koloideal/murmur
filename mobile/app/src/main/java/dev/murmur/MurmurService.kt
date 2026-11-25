@@ -392,8 +392,7 @@ class MurmurService : Service() {
         // the relay copy is authoritative and gets deduped on receipt —
         // a silently dead link can never eat a frame. A serverless
         // family has no relay at all — links are the whole transport.
-        val lanHit = lan.sendIfPeer(env.toJson(), to)
-        android.util.Log.d("MurmurService", "send ${msg::class.simpleName} lanHit=$lanHit links up")
+        lan.sendIfPeer(env.toJson(), to)
         if (::relay.isInitialized) relay.sendEnv(env)
     }
 
