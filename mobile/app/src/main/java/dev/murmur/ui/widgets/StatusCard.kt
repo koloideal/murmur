@@ -101,13 +101,17 @@ fun StatusCard() {
         else -> MaterialTheme.colorScheme.error to "offline"
     }
 
-    // The wave breathes while the link is alive.
-    val phase by if (status.running && online) {
+    // The wave breathes while the link is alive; while connecting it
+    // still moves — searching is motion too — just three times slower.
+    val connecting = status.running && !online &&
+        (connectingGrace || status.relay == Relay.State.CONNECTING)
+    val phase by if (online || connecting) {
         rememberInfiniteTransition(label = "wave").animateFloat(
             initialValue = 0f,
             targetValue = 6.2832f,
             animationSpec = infiniteRepeatable(
-                tween(2600, easing = LinearEasing), RepeatMode.Restart,
+                tween(if (online) 2600 else 8000, easing = LinearEasing),
+                RepeatMode.Restart,
             ),
             label = "phase",
         )
