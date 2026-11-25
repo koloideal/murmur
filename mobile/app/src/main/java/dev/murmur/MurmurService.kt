@@ -401,6 +401,7 @@ class MurmurService : Service() {
      * laptop sees it, only the active one applies.
      */
     fun pushClipboard(text: String) {
+        if (!secrets.clipEnabled || !secrets.clipSend) return
         send(
             Msg.Clipboard(
                 origin = secrets.deviceId!!,
@@ -477,7 +478,9 @@ class MurmurService : Service() {
             is Msg.Clipboard -> {
                 // Phone-side rule: apply only clips from the active laptop.
                 android.util.Log.d("ClipboardBridge", "clip from ${msg.origin} active=${activeDevice()}")
-                if (msg.origin == activeDevice()) ClipboardBridge.apply(this, msg)
+                if (msg.origin == activeDevice() &&
+                    secrets.clipEnabled && secrets.clipRecv
+                ) ClipboardBridge.apply(this, msg)
             }
             is Msg.NotificationDismiss -> NotificationBridge.requestCancel(msg.key)
             is Msg.Identity -> pin(env.from, msg)

@@ -75,7 +75,7 @@ fun NotificationsCard() {
 /** One switch on a tonal row — off-state tracks blend into the card,
  *  so the row needs its own surface to read as a control. */
 @Composable
-private fun ToggleRow(title: String, hint: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+fun ToggleRow(title: String, hint: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()

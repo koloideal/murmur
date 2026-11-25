@@ -26,8 +26,13 @@ class ProcessTextActivity : Activity() {
             if (st.relay != dev.murmur.core.Relay.State.ONLINE && st.lanPeers.isEmpty()) {
                 toast("offline — not sent")
             } else {
-                MurmurService.instance!!.pushClipboard(text)
-                toast("sent to laptop")
+                val sec = dev.murmur.core.Secrets(this)
+                if (!sec.clipEnabled || !sec.clipSend) {
+                    toast("clipboard sharing is off in murmur settings")
+                } else {
+                    MurmurService.instance!!.pushClipboard(text)
+                    toast("sent to laptop")
+                }
             }
         }
         setResult(RESULT_OK, Intent().putExtra(Intent.EXTRA_PROCESS_TEXT, text))

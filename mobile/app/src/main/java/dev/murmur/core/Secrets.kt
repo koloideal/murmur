@@ -31,6 +31,9 @@ class Secrets(private val ctx: Context) {
         removedFlow.value = removed
         hideTextFlow.value = hideNotificationText
         mirrorFlow.value = mirrorNotifications
+        clipFlow.value = clipEnabled
+        clipRecvFlow.value = clipRecv
+        clipSendFlow.value = clipSend
     }
 
     val provisioned: Boolean
@@ -129,6 +132,31 @@ class Secrets(private val ctx: Context) {
             mirrorFlow.value = v
         }
 
+    /** Master clipboard switch — off, and nothing clipboard-related
+     *  moves in either direction. */
+    var clipEnabled: Boolean
+        get() = prefs.getBoolean(KEY_CLIP, true)
+        set(v) {
+            prefs.edit { putBoolean(KEY_CLIP, v) }
+            clipFlow.value = v
+        }
+
+    /** laptop → phone: passive incoming clips are applied. */
+    var clipRecv: Boolean
+        get() = prefs.getBoolean(KEY_CLIP_RECV, true)
+        set(v) {
+            prefs.edit { putBoolean(KEY_CLIP_RECV, v) }
+            clipRecvFlow.value = v
+        }
+
+    /** phone → laptop: share/process-text/in-app pushes are sent. */
+    var clipSend: Boolean
+        get() = prefs.getBoolean(KEY_CLIP_SEND, true)
+        set(v) {
+            prefs.edit { putBoolean(KEY_CLIP_SEND, v) }
+            clipSendFlow.value = v
+        }
+
     /** Laptops get the app + title only, never the message text. */
     var hideNotificationText: Boolean
         get() = prefs.getBoolean(KEY_HIDE_TEXT, false)
@@ -203,6 +231,9 @@ class Secrets(private val ctx: Context) {
         val removedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
         val hideTextFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
         val mirrorFlow = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val clipFlow = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val clipRecvFlow = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val clipSendFlow = kotlinx.coroutines.flow.MutableStateFlow(true)
 
         /** Muted-apps set, observable by the notifications card. */
         val mutedFlow = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
@@ -217,6 +248,9 @@ class Secrets(private val ctx: Context) {
         private const val KEY_MUTED = "notif_muted"
         private const val KEY_HIDE_TEXT = "notif_hide_text"
         private const val KEY_MIRROR = "notif_mirror"
+        private const val KEY_CLIP = "clip_enabled"
+        private const val KEY_CLIP_RECV = "clip_recv"
+        private const val KEY_CLIP_SEND = "clip_send"
         private const val KEY_IDENTITY = "identity_enc"
         private const val KEY_EPOCH = "key_epoch"
         private const val KEY_ROTATOR = "key_rotator"
