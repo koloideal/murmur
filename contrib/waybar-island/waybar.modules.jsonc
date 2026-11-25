@@ -4,12 +4,17 @@
 
 "group/murmur": {
     "orientation": "horizontal",
-    "modules": ["custom/murmur-status", "custom/murmur-media"]
+    "modules": ["custom/murmur-status", "custom/murmur-clip", "custom/murmur-media"]
 },
 "custom/murmur-status": {
     "exec": "$HOME/.local/bin/murmur-island.py status-live",
     "return-type": "json",
     "on-click": "kitty --hold $HOME/.local/bin/murmurctl status"
+},
+"custom/murmur-clip": {
+    "exec": "$HOME/.local/bin/murmur-island.py clip-live",
+    "return-type": "json",
+    "on-click-right": "wl-copy --clear"
 },
 "custom/murmur-media": {
     "exec": "$HOME/.local/bin/murmur-island.py media-live",
