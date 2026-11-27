@@ -317,9 +317,11 @@ fn print_help() {
     let bd = |s: &str| if tty { format!("\x1b[1m{s}\x1b[0m") } else { s.into() };
     let cc = |s: &str| if tty { format!("\x1b[38;5;141m{s}\x1b[0m") } else { s.into() };
     let art = " _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n| \x27_ ` _ \\| | | | \x27__| \x27_ ` _ \\| | | | \x27__|\n| | | | | | |_| | |  | | | | | | |_| | |\n|_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
+    let tag = "   __| |\n  / _` |\n | (_| |\n  \\__,_|";
+    let tg = |s: &str| if tty { format!("\x1b[38;5;215m{s}\x1b[0m") } else { s.into() };
     println!();
-    for l in art.lines() {
-        println!("  {}", ac(l));
+    for (l, t) in art.lines().zip(tag.lines()) {
+        println!("  {}{}", ac(l), tg(t));
     }
     println!("  {}", dm("the murmur client daemon"));
     println!();

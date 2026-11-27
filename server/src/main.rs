@@ -350,9 +350,10 @@ const ART: &str = " _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
 
 /// Installer-style banner: the logo bold in accent, a dim subtitle.
 fn banner(p: &Paint, sub: &str) {
+    const TAG: &str = "   ___ \n  / __|\n  \\__ \\\n  |___/";
     println!();
-    for l in ART.lines() {
-        println!("  {}", p.wrap("1;38;5;141", l));
+    for (l, t) in ART.lines().zip(TAG.lines()) {
+        println!("  {}{}", p.wrap("1;38;5;141", l), p.wrap("38;5;215", t));
     }
     if !sub.is_empty() {
         println!("  {}", p.dim(sub));

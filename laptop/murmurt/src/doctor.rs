@@ -121,12 +121,36 @@ pub fn doctor() -> Result<()> {
     check("murmurd socket", std::path::Path::new(&sock).exists(), true);
     check("hover daemon running", have("pgrep") && Command::new("pgrep").args(["-f", "murmur-island-hover"]).output().map(|o| o.status.success()).unwrap_or(false), false);
 
+    let all_missing: Vec<&str> = missing.clone();
     let missing: Vec<&str> = missing.iter().filter(|m| !m.starts_with("file:") && !m.starts_with("murmurd") && !m.starts_with("hover") && !m.starts_with("font:")).copied().collect();
     println!();
-    if missing.is_empty() {
+    if all_missing.is_empty() {
         println!("everything essential is present.");
-    } else if let Some(hint) = install_hint(&distro, &missing) {
-        println!("missing pieces, try:\n  {hint}");
+    } else {
+        if !missing.is_empty() {
+            if let Some(hint) = install_hint(&distro, &missing) {
+                println!("missing packages, try:\n  {hint}");
+            }
+        }
+        // every failure class gets a fix hint — no dead ends
+        for m in &all_missing {
+            if m.starts_with("file:") {
+                println!("files missing — reinstall the island:\n  murmurt install");
+                break;
+            }
+        }
+        if all_missing.iter().any(|m| m.starts_with("font: Unbounded") || m.starts_with("font: Onest")) {
+            println!("island fonts missing — they are embedded, reinstall:\n  murmurt install");
+        }
+        if all_missing.iter().any(|m| m.starts_with("font: JetBrainsMono")) {
+            println!("JetBrainsMono Nerd Font missing — install it with your package manager (e.g. ttf-jetbrains-mono-nerd)");
+        }
+        if all_missing.iter().any(|m| m.starts_with("murmurd")) {
+            println!("murmurd not running — start it:\n  systemctl --user start murmurd   # or: murmurd run");
+        }
+        if all_missing.iter().any(|m| m.starts_with("hover")) {
+            println!("hover daemon not running — it autostarts via hyprland exec-once; re-login or run murmur-island-hover.py manually");
+        }
     }
     Ok(())
 }

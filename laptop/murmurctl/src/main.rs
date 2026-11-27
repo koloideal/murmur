@@ -122,11 +122,14 @@ const ART: &str = " _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
 | | | | | | |_| | |  | | | | | | |_| | |\n\
 |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
 
+/// Binary tag appended to the logo in a contrasting color.
+const TAG: &str = "   ___  | |_  | |\n  / __| | __| | |\n | (__  | |_  | |\n  \\___|  \\__| |_|";
+
 /// Installer-style banner: the logo bold in accent, a dim subtitle.
 fn banner(p: &Paint, sub: &str) {
     println!();
-    for l in ART.lines() {
-        println!("  {}", p.wrap("1;38;5;141", l));
+    for (a, t) in ART.lines().zip(TAG.lines()) {
+        println!("  {}{}", p.wrap("1;38;5;141", a), p.wrap("38;5;215", t));
     }
     if !sub.is_empty() {
         println!("  {}", p.dim(sub));
@@ -612,6 +615,29 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Dial { addr } => {
+            // Probe the peer before accepting the dial: a typo'd or
+            // unreachable address must fail loudly here, not vanish
+            // into the daemon's redial loop.
+            let probe_target = if addr.contains(':') {
+                addr.clone()
+            } else {
+                format!("{addr}:17894")
+            };
+            use std::net::{TcpStream, ToSocketAddrs};
+            let resolved = probe_target
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.next());
+            let reachable = resolved
+                .map(|sa| {
+                    TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(1500)).is_ok()
+                })
+                .unwrap_or(false);
+            if !reachable {
+                anyhow::bail!(
+                    "cannot reach {probe_target} — host unreachable or murmur not listening there; dial rejected"
+                );
+            }
             ask(serde_json::json!({"cmd": "dial", "addr": addr}))?;
             println!("dialing {addr} — `murmurctl status` shows the link");
             Ok(())

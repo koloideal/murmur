@@ -62,9 +62,10 @@ fn print_help() {
     let ac = |s: &str| paint("38;5;141", format!("{s:<21}"));
     let dm = |s: &str| paint("2", s);
     let bd = |s: &str| paint("1", s);
+    const TAG: &str = "  | |_ \n  | __|\n  | |_ \n   \\__|";
     println!();
-    for l in ART.lines() {
-        println!("  {}", paint("1;38;5;141", l));
+    for (l, t) in ART.lines().zip(TAG.lines()) {
+        println!("  {}{}", paint("1;38;5;141", l), paint("38;5;215", t));
     }
     println!("  {}", dm("waybar island tooling"));
     println!();
