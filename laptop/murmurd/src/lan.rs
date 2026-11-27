@@ -78,6 +78,7 @@ pub async fn run(
         Err(e) => warn!("lan: beacon off ({e}); inbound links still accepted"),
     }
     tokio::spawn(dial_loop(shared.clone(), hub.clone(), dial_rx));
+    tokio::spawn(crate::usbwatch::run(shared.clone()));
     tokio::spawn(redial_loop(shared.clone()));
     accept_loop(&shared, &hub, &listener).await
 }

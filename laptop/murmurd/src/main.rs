@@ -18,6 +18,7 @@ mod notify;
 mod pair;
 mod presence;
 mod state;
+mod usbwatch;
 mod wlclip;
 mod wlidle;
 

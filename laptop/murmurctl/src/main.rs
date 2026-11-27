@@ -232,6 +232,10 @@ fn cmd_status() -> anyhow::Result<()> {
     if let Some(peers) = d["lan_peers"].as_array().filter(|p| !p.is_empty()) {
         let rtt = d["lan_rtt_ms"].as_object();
         let addrs = d["lan_addrs"].as_object();
+        let usb: Vec<&str> = d["lan_usb"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
         let list = peers
             .iter()
             .filter_map(|p| p.as_str())
@@ -241,9 +245,10 @@ fn cmd_status() -> anyhow::Result<()> {
                     .and_then(|m| m.get(p))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let transport = if usb.contains(&p) { " usb" } else { "" };
                 match (addr, ms) {
-                    (Some(a), ms) if ms > 0 => format!("{p} {a} {ms}ms"),
-                    (Some(a), _) => format!("{p} {a}"),
+                    (Some(a), ms) if ms > 0 => format!("{p} {a}{transport} {ms}ms"),
+                    (Some(a), _) => format!("{p} {a}{transport}"),
                     _ if ms > 0 => format!("{p} {ms}ms"),
                     _ => p.to_string(),
                 }

@@ -153,6 +153,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "lan_rtt_ms": shared.lan_peers().iter()
                     .map(|i| (i.to_string(), shared.lan_rtt(i)))
                     .collect::<std::collections::HashMap<_, _>>(),
+                "lan_usb": shared.lan_addrs().iter()
+                    .filter(|(_, a)| crate::usbwatch::is_usb_gateway(&a.ip()))
+                    .map(|(i, _)| i.to_string())
+                    .collect::<Vec<_>>(),
                 "active_node": shared.active_node().map(|i| i.to_string()),
                 "last_clip": shared.last_clip.lock().unwrap().clone()
                     .map(|(d, o, ts)| serde_json::json!({"dir": d, "origin": o, "ts": ts})),
