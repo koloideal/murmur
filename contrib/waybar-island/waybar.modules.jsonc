@@ -22,5 +22,7 @@
     "on-click": "$HOME/.local/bin/murmur-player-toggle.sh",
     "on-click-right": "playerctl -p murmur play-pause",
         "on-scroll-up": "playerctl -p murmur position 5+",
-        "on-scroll-down": "playerctl -p murmur position 5-"
+        "on-scroll-down": "playerctl -p murmur position 5-",
+        "on-scroll-right": "playerctl -p murmur position 5+",
+        "on-scroll-left": "playerctl -p murmur position 5-"
 },
