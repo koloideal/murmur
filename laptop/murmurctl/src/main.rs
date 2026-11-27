@@ -141,7 +141,7 @@ fn banner(p: &Paint, sub: &str) {
 
 fn print_help(p: &Paint) {
     let d = |s: &str| p.dim(s);
-    let c = |s: &str| p.accent(format!("{s:<12}"));
+    let c = |s: &str| p.accent(format!("murmurctl {s:<22}"));
     let lines: Vec<String> = [
         vec![String::new()],
         vec![
