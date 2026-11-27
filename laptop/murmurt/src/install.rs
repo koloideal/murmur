@@ -12,12 +12,16 @@ const BIN_SCRIPTS: &[(&str, &[u8])] = &[
     ("murmur-player.py", include_bytes!("../assets/murmur-player.py")),
     ("murmur-player-toggle.sh", include_bytes!("../assets/murmur-player-toggle.sh")),
     ("murmur-island-hover.py", include_bytes!("../assets/murmur-island-hover.py")),
+    ("murmur-player-swipe.sh", include_bytes!("../assets/murmur-player-swipe.sh")),
 ];
 const DBUS_SERVICE: &[u8] = include_bytes!("../assets/murmur.player.service");
 const WAYBAR_MODULES: &str = include_str!("../assets/waybar.modules.jsonc");
 const WAYBAR_STYLE: &str = include_str!("../assets/waybar.style.css");
 const HYPR_LUA: &str = include_str!("../assets/hyprland.lua");
 const HYPR_CONF: &str = include_str!("../assets/hyprland.conf");
+const SWAYNC_STYLE: &str = include_str!("../assets/swaync/style.css");
+const SWAYNC_TAG: &[u8] = include_bytes!("../assets/swaync/murmur-tag.png");
+const SWAYNC_CONFIG: &str = include_str!("../assets/swaync/config.reference.json");
 const FONTS: &[(&str, &[u8])] = &[
     ("Unbounded.ttf", include_bytes!("../assets/fonts/Unbounded.ttf")),
     ("Onest.ttf", include_bytes!("../assets/fonts/Onest.ttf")),
@@ -332,6 +336,58 @@ fn merge_hyprland() -> Result<()> {
     Ok(())
 }
 
+/// The murmur notification mirror needs three things in swaync: the
+/// tag image, the stylesheet (murmur typography + low-urgency tag
+/// layer), and visibility rules routing dev.murmur/* to urgency=low.
+/// config.json is strict JSON with deeply personal geometry — a fresh
+/// machine gets the reference config whole; an existing one is left
+/// alone with a printed note, not a half-right automated merge.
+fn merge_swaync() -> Result<()> {
+    // The config dir in use: an existing one wins (hyprland users keep
+    // it under hypr/), fresh machines get the standard location.
+    let candidates = [
+        home().join(".config/swaync"),
+        home().join(".config/hypr/swaync"),
+    ];
+    let dir = candidates
+        .iter()
+        .find(|d| d.join("config.json").exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+    fs::create_dir_all(&dir)?;
+
+    write_file(&dir.join("murmur-tag.png"), SWAYNC_TAG, false)?;
+
+    let style = dir.join("style.css");
+    if style.exists() {
+        backup_once(&style)?;
+        let content = fs::read_to_string(&style)?;
+        let merged = merge_block(&content, SWAYNC_STYLE, "css");
+        if merged != content {
+            fs::write(&style, merged)?;
+            println!("  merged murmur block into {}", style.display());
+        }
+    } else {
+        write_file(&style, SWAYNC_STYLE.as_bytes(), false)?;
+    }
+
+    let config = dir.join("config.json");
+    if !config.exists() {
+        write_file(&config, SWAYNC_CONFIG.as_bytes(), false)?;
+    } else {
+        let content = fs::read_to_string(&config)?;
+        if !content.contains("murmur-mirror") {
+            println!(
+                "  note: {} exists — add the visibility rules manually:",
+                config.display()
+            );
+            println!("    \"murmur-mirror\": {{ \"state\": \"enabled\", \"desktop-entry\": \"^dev\\\\.murmur/\", \"override-urgency\": \"low\" }}");
+            println!("    inside \"notification-visibility\" (see assets/swaync/config.reference.json)");
+        }
+    }
+    Ok(())
+}
+
 pub fn install(no_merge: bool, waybar_config: Option<String>) -> Result<()> {
     println!("installing murmur island:");
     let bin = home().join(".local/bin");
@@ -365,6 +421,7 @@ pub fn install(no_merge: bool, waybar_config: Option<String>) -> Result<()> {
     } else {
         merge_waybar(&waybar_config)?;
         merge_hyprland()?;
+        merge_swaync()?;
     }
     println!("\ndone. restart waybar / reload hyprland to pick everything up.");
     println!("run `murmurt doctor` to check runtime dependencies.");

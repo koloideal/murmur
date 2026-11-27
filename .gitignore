@@ -11,3 +11,7 @@ mobile/**/build/
 *.apk
 *.keystore
 __pycache__/
+
+# python
+__pycache__/
+*.pyc

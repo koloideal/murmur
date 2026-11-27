@@ -110,7 +110,9 @@ pub fn doctor() -> Result<()> {
     for f in [
         format!("{home}/.local/bin/murmur-island.py"),
         format!("{home}/.local/bin/murmur-player.py"),
+        format!("{home}/.local/bin/murmur-player-toggle.sh"),
         format!("{home}/.local/bin/murmur-island-hover.py"),
+        format!("{home}/.local/bin/murmur-player-swipe.sh"),
         format!("{home}/.local/share/dbus-1/services/murmur.player.service"),
     ] {
         check(&format!("file: {f}"), std::path::Path::new(&f).exists(), true);

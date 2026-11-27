@@ -20,5 +20,9 @@
     "exec": "$HOME/.local/bin/murmur-island.py media-live",
     "return-type": "json",
     "on-click": "$HOME/.local/bin/murmur-player-toggle.sh",
-    "on-click-right": "playerctl -p murmur play-pause"
+    "on-click-right": "playerctl -p murmur play-pause",
+    "on-scroll-up": "$HOME/.local/bin/murmur-player-swipe.sh seek+",
+    "on-scroll-down": "$HOME/.local/bin/murmur-player-swipe.sh seek-",
+    "on-scroll-right": "$HOME/.local/bin/murmur-player-swipe.sh next",
+    "on-scroll-left": "$HOME/.local/bin/murmur-player-swipe.sh previous"
 },

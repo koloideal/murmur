@@ -39,6 +39,10 @@ murmur online ●  <track title> ∿
 - popup: artwork + blurred-cover background, transport buttons, seek
   bar — a plain `org.mpris.MediaPlayer2.murmur` client, so it stays in
   sync with swaync/playerctl.
+- gestures: scrolling over the media widget — up/down seeks ±5s,
+  left/right skips tracks. `murmur-player-swipe.sh` throttles waybar's
+  scroll bursts to one action per gesture (~500ms lock, log at
+  /tmp/murmur-swipe.log).
 
 ## Files
 
@@ -53,6 +57,8 @@ murmur online ●  <track title> ∿
 | `waybar.style.css` | merge into waybar `style.css` |
 | `hyprland.conf` | `exec-once` line — keeps the daemon warm |
 | `hyprland.lua` | window rule — float, no border/shadow |
+| `murmur-player-swipe.sh` | `~/.local/bin/` — throttle dispatcher for waybar scroll gestures: up/down seek ±5s, left/right track skip (waybar ≥ 0.16) |
+| `swaync.config.reference.json` | reference swaync config — the `notification-visibility` rules matter: `dev.murmur/*` mirrors ride at urgency low |
 
 ## Dependencies
 

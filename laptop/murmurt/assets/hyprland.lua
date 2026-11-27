@@ -26,5 +26,13 @@ hl.define_submap("murmur", function()
     hl.bind("escape", hl.dsp.submap("reset"))
 end)
 
--- Autostart (inside hl.on("hyprland.start", ...) or however you autostart):
+-- Autostart — these three lines must run at session start, inside your
+-- hl.on("hyprland.start", ...) block (multiple hl.on registrations
+-- don't stack reliably, so merge them into your existing one):
 --   hl.exec_cmd(home .. "/.local/bin/murmur-island-hover.py")
+--   hl.exec_cmd(home .. "/.local/bin/murmur-player.py --daemon")
+--   hl.exec_cmd("dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")
+-- The player daemon keeps the popup warm (~10ms open instead of ~1s).
+-- The plain dbus-update (no --systemd) reaches the dbus-daemon
+-- activation environment — without it the .service-spawned player
+-- never sees wayland.
