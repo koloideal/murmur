@@ -120,11 +120,21 @@ class MediaBridge(
         }
     }
 
+    /** Last pulsed track — position/state republishes of the same song
+     *  are not events; the boundary is the title+artist pair changing. */
+    private var lastTrackKey: String? = null
+
     /** Snapshot → Msg.MediaState → all laptops. */
     private fun publish() {
         val c = controller
         val md = c?.metadata
         val ps = c?.playbackState
+        val trackKey = (md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "") +
+            " " + (md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: "")
+        if (trackKey != " " && trackKey != lastTrackKey) {
+            dev.murmur.core.EventPulses.emit(dev.murmur.core.PulseKind.MEDIA)
+        }
+        lastTrackKey = trackKey
         send(
             Msg.MediaState(
                 player = c?.packageName ?: "",

@@ -45,6 +45,7 @@ object ClipboardBridge {
             }
         }
         ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+        dev.murmur.core.EventPulses.emit(dev.murmur.core.PulseKind.CLIP)
         Log.d("ClipboardBridge", "applied ${data.size}B ${msg.mime}")
     }
 

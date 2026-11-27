@@ -434,6 +434,7 @@ class MurmurService : Service() {
     fun pushClipboard(text: String) {
         android.util.Log.d("MurmurService", "pushClipboard len=${text.length} enabled=${secrets.clipEnabled} send=${secrets.clipSend}")
         if (!secrets.clipEnabled || !secrets.clipSend) return
+        dev.murmur.core.EventPulses.emit(dev.murmur.core.PulseKind.CLIP)
         send(
             Msg.Clipboard(
                 origin = secrets.deviceId!!,

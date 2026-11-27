@@ -44,26 +44,30 @@ class NotificationBridge : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         noteApp(sbn)
-        forward(sbn)
+        // Pulse only when the mirror truly carries it — a muted or
+        // ongoing post the family never sees is not an event — and only
+        // for fresh posts: the reconnect repost rides the same pipeline
+        // but is convergence, not news.
+        if (forward(sbn)) dev.murmur.core.EventPulses.emit(dev.murmur.core.PulseKind.NOTIFY)
     }
 
     /** The post pipeline, shared by fresh posts and the reconnect
      *  convergence repost — every gate lives exactly once. */
-    private fun forward(sbn: StatusBarNotification) {
-        if (sbn.packageName == packageName) return // our own foreground notif
-        if (sbn.isOngoing) return // players, downloads — noise, not events
+    private fun forward(sbn: StatusBarNotification): Boolean {
+        if (sbn.packageName == packageName) return false // our own foreground notif
+        if (sbn.isOngoing) return false // players, downloads — noise, not events
         val n = sbn.notification
-        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return // repeats its children
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false // repeats its children
         // MediaStyle posts (track changed, album art refresh) are noise
         // here — the laptop already mirrors playback through its own
         // media widget with real controls. The token extra is the
         // reliable marker; ongoing-ness isn't (paused players drop it).
         if (n.extras.getParcelable<android.media.session.MediaSession.Token>(
-                Notification.EXTRA_MEDIA_SESSION) != null) return
-        val svc = MurmurService.instance ?: return
-        if (!Secrets.mirrorFlow.value) return
-        if (sbn.packageName in Secrets.mutedFlow.value) return
-        if (n.visibility == Notification.VISIBILITY_SECRET) return
+                Notification.EXTRA_MEDIA_SESSION) != null) return false
+        val svc = MurmurService.instance ?: return false
+        if (!Secrets.mirrorFlow.value) return false
+        if (sbn.packageName in Secrets.mutedFlow.value) return false
+        if (n.visibility == Notification.VISIBILITY_SECRET) return false
 
         val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val body = if (Secrets.hideTextFlow.value) "" else
@@ -71,7 +75,7 @@ class NotificationBridge : NotificationListenerService() {
         // Progress bars and "typing…" re-post the same key every second —
         // forward only real content changes.
         val sig = (title + "\u0000" + body).hashCode()
-        if (forwarded.put(sbn.key, sig) == sig) return
+        if (forwarded.put(sbn.key, sig) == sig) return false
         svc.send(
             Msg.Notification(
                 key = sbn.key,
@@ -84,6 +88,7 @@ class NotificationBridge : NotificationListenerService() {
                 ts = sbn.postTime / 1000,
             ),
         )
+        return true
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {

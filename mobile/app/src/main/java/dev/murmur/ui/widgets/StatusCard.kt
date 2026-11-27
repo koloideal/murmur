@@ -47,6 +47,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,9 +56,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.layout
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import kotlin.math.PI
+import kotlin.math.sin
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.murmur.MurmurService
+import dev.murmur.core.EventPulses
+import dev.murmur.core.PulseKind
 import dev.murmur.core.Relay
 import dev.murmur.core.Secrets
 
@@ -138,6 +146,19 @@ fun StatusCard() {
                 Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // Event pulses — one real occurrence (clip applied,
+                // notification mirrored, track boundary) = exactly one
+                // amplitude swell: the wave inhales once and settles.
+                // Emission happens only at feature truth-points, so
+                // heartbeats/reposts can't fake liveliness here.
+                val pulses = remember { mutableStateListOf<Pair<Long, PulseKind>>() }
+                LaunchedEffect(Unit) {
+                    EventPulses.flow.collect { kind ->
+                        val now = System.currentTimeMillis()
+                        pulses.add(now to kind)
+                        pulses.removeAll { now - it.first > PULSE_MS }
+                    }
+                }
                 // Live link → the wave bleeds to the card's edges (the
                 // column's 20dp inner padding negated); every other
                 // state keeps the shared content padding.
@@ -158,13 +179,39 @@ fun StatusCard() {
                         }
                         .height(56.dp),
                 ) {
+                    // sin(pi·p) is exactly one smooth inhale per event:
+                    // zero at birth, crest mid-life, zero at death.
+                    // Overlapping events superpose; the hue follows the
+                    // dominant kind (clipboard orange, notify blue,
+                    // media green — gruvbox accents).
+                    val nowMs = System.currentTimeMillis()
+                    var boost = 0f
+                    var rw = 0f; var gw = 0f; var bw = 0f
+                    for ((t0, kind) in pulses) {
+                        val p = (nowMs - t0) / PULSE_MS.toFloat()
+                        if (p !in 0f..1f) continue
+                        val env = sin(PI.toFloat() * p)
+                        boost += env
+                        val kc = when (kind) {
+                            PulseKind.CLIP -> PULSE_CLIP
+                            PulseKind.NOTIFY -> PULSE_NOTIFY
+                            PulseKind.MEDIA -> PULSE_MEDIA
+                        }
+                        rw += kc.red * env; gw += kc.green * env; bw += kc.blue * env
+                    }
+                    boost = boost.coerceAtMost(1.8f)
+                    val base = color.copy(alpha = 0.85f)
+                    val waveColor = if (boost > 0.01f) {
+                        val mix = Color(rw / boost, gw / boost, bw / boost)
+                        lerp(base, mix, (boost / 1.8f).coerceAtMost(1f) * 0.85f)
+                    } else base
                     drawPath(
                         wavePath(size.width, size.height / 2f,
-                            amplitude = 13.dp.toPx(),
+                            amplitude = 13.dp.toPx() * (1f + boost),
                             wavelength = size.width / 3.2f,
                             phase = phase),
-                        color.copy(alpha = 0.85f),
-                        style = Stroke(width = 4.dp.toPx()),
+                        waveColor,
+                        style = Stroke(width = 4.dp.toPx() * (1f + boost * 0.4f)),
                     )
                 }
                 Text(
@@ -429,3 +476,10 @@ private fun NameRow(name: String, onSave: (String) -> Unit) {
         }
     }
 }
+
+
+/** One pulse's full inhale-exhale, milliseconds. */
+private const val PULSE_MS = 1400L
+private val PULSE_CLIP = Color(0xFFD65D0E)
+private val PULSE_NOTIFY = Color(0xFF458588)
+private val PULSE_MEDIA = Color(0xFFB8BB26)
