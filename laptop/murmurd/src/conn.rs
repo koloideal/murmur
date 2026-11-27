@@ -134,11 +134,6 @@ async fn connect_once(
                         let opened = env.open(&shared.keys.read().unwrap().current);
                         match opened {
                             Ok(msg) => {
-                                // The same frame can arrive over the
-                                // LAN link as an early copy — collapse.
-                                if !shared.dedupe(env.from, env.seq) {
-                                    continue;
-                                }
                                 debug!("{} → {msg:?}", env.from);
                                 // A beacon that arrived via the relay
                                 // is still a dial hint — it carries the
@@ -158,11 +153,13 @@ async fn connect_once(
                                             port: *tcp_port,
                                             kind: *kind,
                                             trusted: false,
-                transport: crate::lan::Transport::Lan,
+                                            transport: crate::lan::Transport::Lan,
                                         });
                                     }
                                 }
-                                hub.dispatch(env.from, &msg);
+                                // Dedupe before dispatch — one shared
+                                // invariant for every transport.
+                                shared.ingest(&hub, env.from, env.seq, &msg);
                             }
                             // An old key opening it = the sender missed a
                             // rotation. Never dispatch it — just re-key.
