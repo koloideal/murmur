@@ -316,14 +316,32 @@ if command -v waybar >/dev/null 2>&1 || [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" 
             else
                 warn "murmurt install hit errors — check the output above"
             fi
+            # Pick everything up without a re-login. `hyprctl reload`
+            # merges the window rules and binds, but exec-once never
+            # re-fires — so the daemons are started right here; waybar
+            # reloads modules+css on SIGUSR2; swaync restarts to pick
+            # up the murmur mirror rules and the island styling.
+            if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
+                hyprctl reload >/dev/null 2>&1 || true
+            fi
+            if ! pgrep -f murmur-island-hover.py >/dev/null 2>&1; then
+                setsid nohup "$BIN/murmur-island-hover.py" >/dev/null 2>&1 &
+            fi
+            if ! pgrep -f "murmur-player.py" >/dev/null 2>&1; then
+                setsid nohup "$BIN/murmur-player.py" --daemon >/dev/null 2>&1 &
+            fi
+            pkill -SIGUSR2 -x waybar 2>/dev/null || true
+            if pgrep -x swaync >/dev/null 2>&1; then
+                pkill -x swaync
+                sleep 1
+                setsid nohup swaync >/dev/null 2>&1 &
+            fi
             box "${B}island installed${R0}" \
                 "" \
                 "verify the runtime deps:" \
                 "  ${D2}murmurt doctor${R0}" \
                 "remove it cleanly:" \
-                "  ${D2}murmurt uninstall${R0}" \
-                "" \
-                "restart waybar / reload hyprland to pick everything up"
+                "  ${D2}murmurt uninstall${R0}"
         fi
     fi
 fi
