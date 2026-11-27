@@ -1084,7 +1084,7 @@ fn cmd_uninstall(yes: bool) -> anyhow::Result<()> {
     }
 
     println!(
-        "\n  {} murmur is gone — open a new shell (PATH/completions) and restart waybar if it had the island",
+        "\n  {} murmur is gone — open a new shell (PATH/completions drop)",
         p.green("✓")
     );
     Ok(())

@@ -488,6 +488,21 @@ pub fn uninstall(waybar_config: Option<String>) -> Result<()> {
             }
         }
     }
+    // The running waybar caches the config in memory — SIGUSR2 is its
+    // documented "re-read config+css" signal, same thing a systemd
+    // ExecReload would send. Island drops on the spot, no restart.
+    if std::process::Command::new("pkill")
+        .args(["-USR2", "-x", "waybar"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        println!("  asked waybar to reload — the island is gone");
+    }
+    // Same for hyprland's own config (submap/windowrule markers).
+    let _ = std::process::Command::new("hyprctl")
+        .arg("reload")
+        .status();
     println!("\ndone. murmurt itself is still in ~/.local/bin — delete it manually if you want it gone.");
     Ok(())
 }
