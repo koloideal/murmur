@@ -21,7 +21,7 @@ fn samples() -> Vec<Message> {
             key: "n1".into(), pkg: "org.telegram".into(),
             app: Some("Telegram".into()),
             title: "hi".into(), body: "there".into(),
-            icon_b64: Some("aGk=".into()), ts: 1_700_000_002,
+            icon_b64: Some("aGk=".into()), actions: vec![], ts: 1_700_000_002,
         },
         Message::NotificationDismiss { key: "n1".into() },
         Message::MediaState {

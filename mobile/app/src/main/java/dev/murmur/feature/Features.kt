@@ -113,10 +113,23 @@ class MediaFeature(private val media: MediaBridge) : Feature {
 }
 
 /** Laptop dismissed a notification mirror — drop the original. */
-class NotifyFeature : Feature {
-    override val consumes = setOf("notification_dismiss")
-    override fun onMessage(from: String, msg: Msg) =
-        NotificationBridge.requestCancel((msg as Msg.NotificationDismiss).key)
+class NotifyFeature(private val secrets: Secrets) : Feature {
+    override val consumes = setOf(
+        "notification_dismiss", "notification_invoke",
+        "notification_action", "notification_reply",
+    )
+
+    override fun onMessage(from: String, msg: Msg) = when (msg) {
+        // The dismiss toggle is the user's: some want the laptop close
+        // to clean the phone too, some use the laptop as a read-only
+        // triage surface. Default on — one mental inbox is the point.
+        is Msg.NotificationDismiss ->
+            if (secrets.dismissRemote) NotificationBridge.requestCancel(msg.key) else Unit
+        is Msg.NotificationInvoke -> NotificationBridge.performOpen(msg.key)
+        is Msg.NotificationAction -> NotificationBridge.performAction(msg.key, msg.index)
+        is Msg.NotificationReply -> NotificationBridge.performReply(msg.key, msg.text)
+        else -> Unit
+    }
 }
 
 /** Presence frames feed the election table — nothing more. */

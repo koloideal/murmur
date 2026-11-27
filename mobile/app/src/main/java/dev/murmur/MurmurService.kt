@@ -201,7 +201,14 @@ class MurmurService : Service() {
         ))
         hub.wire(ClipboardFeature(this, secrets) { activeDevice() })
         hub.wire(MediaFeature(media))
-        hub.wire(NotifyFeature())
+        hub.wire(NotifyFeature(secrets))
+        // The notification listener often binds before this service
+        // finishes starting (and its connect-time repost then no-ops on
+        // the null instance). Once wired, convergence is our job too.
+        scope.launch {
+            kotlinx.coroutines.delay(1500)
+            dev.murmur.bridge.NotificationBridge.repostActive()
+        }
         if (!serverless) relay.start()
         lan.start()
         // Shares queued while the service was down go out on first

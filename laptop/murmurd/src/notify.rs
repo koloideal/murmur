@@ -29,30 +29,73 @@ const APP: &str = "murmur";
 /// Dismissal was initiated by the user (not expiry, not our own close).
 const REASON_DISMISSED: u32 = 2;
 
+/// Everything the daemon can tell us about a posted notification.
+enum BusEvent {
+    /// (id, close reason) — reason 2 means the user dismissed it.
+    Closed(u32, u32),
+    /// (id, action key) — body click arrives as the "default" key;
+    /// anything else is one of our `murmur-action-N` buttons.
+    Invoked(u32, String),
+    /// (id, reply text) — the non-standard KDE/swaync inline-reply
+    /// contract: the daemon drew a text field inside the notification
+    /// because we advertised an "inline-reply" action.
+    Replied(u32, String),
+}
+
 /// Thin seam over the notification daemon.
 struct NotifyBus {
     proxy: zbus::Proxy<'static>,
-    /// (notification id, close reason)
-    closed_rx: mpsc::UnboundedReceiver<(u32, u32)>,
+    events_rx: mpsc::UnboundedReceiver<BusEvent>,
 }
 
 impl NotifyBus {
     async fn connect() -> anyhow::Result<Self> {
         let conn = zbus::Connection::session().await?;
         let proxy = zbus::Proxy::new(&conn, BUS, PATH, BUS).await?;
-        let mut stream = proxy.receive_signal("NotificationClosed").await?;
-        let (tx, closed_rx) = mpsc::unbounded_channel();
+        let (tx, events_rx) = mpsc::unbounded_channel();
+
+        let mut closed = proxy.receive_signal("NotificationClosed").await?;
+        let mut invoked = proxy.receive_signal("ActionInvoked").await?;
+        // NotificationReplied is non-standard (KDE pioneered, swaync
+        // implements) — subscribing is harmless on daemons that never
+        // emit it; the stream just stays quiet.
+        let mut replied = proxy.receive_signal("NotificationReplied").await?;
+
+        tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                let _conn = conn; // keep the bus alive
+                while let Some(sig) = closed.next().await {
+                    if let Ok((id, reason)) = sig.body().deserialize::<(u32, u32)>() {
+                        if tx.send(BusEvent::Closed(id, reason)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                while let Some(sig) = invoked.next().await {
+                    if let Ok((id, key)) = sig.body().deserialize::<(u32, String)>() {
+                        if tx.send(BusEvent::Invoked(id, key)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
         tokio::spawn(async move {
-            let _conn = conn; // keep the bus alive
-            while let Some(sig) = stream.next().await {
-                if let Ok(args) = sig.body().deserialize::<(u32, u32)>() {
-                    if tx.send(args).is_err() {
+            while let Some(sig) = replied.next().await {
+                if let Ok((id, text)) = sig.body().deserialize::<(u32, String)>() {
+                    if tx.send(BusEvent::Replied(id, text)).is_err() {
                         return;
                     }
                 }
             }
         });
-        Ok(Self { proxy, closed_rx })
+        Ok(Self { proxy, events_rx })
     }
 
     /// Post/update a notification; returns the daemon-assigned id.
@@ -64,6 +107,7 @@ impl NotifyBus {
         title: &str,
         body: &str,
         icon_b64: Option<&str>,
+        actions: &[murmur_proto::NotifAction],
     ) -> anyhow::Result<u32> {
         let icon_path = icon_b64.and_then(|b64| write_icon(pkg, b64));
         let mut hints: HashMap<String, zvariant::Value> = HashMap::new();
@@ -72,6 +116,26 @@ impl NotifyBus {
         // pin urgency=low on it → .low class → the tag) — while the pkg
         // tail keeps per-app rules (e.g. ignored apps) working.
         hints.insert("desktop-entry".into(), format!("dev.murmur/{pkg}").into());
+        // freedesktop action pairs: key/label alternating.
+        // "default" — body click opens the notification on the phone.
+        // "inline-reply" — the KDE/swaync contract: daemons that know it
+        // draw a text field inside the notification and answer with a
+        // NotificationReplied signal; daemons that don't just render an
+        // inert button, so merge it into one Reply entry only when the
+        // phone says this notification actually takes text.
+        let mut pairs: Vec<String> = vec!["default".into(), "Open".into()];
+        if actions.iter().any(|a| a.kind == "reply") {
+            pairs.push("inline-reply".into());
+            pairs.push("Reply".into());
+            hints.insert(
+                "x-kde-reply-placeholder-text".into(),
+                "reply — sent to the phone".into(),
+            );
+        }
+        for a in actions.iter().filter(|a| a.kind != "reply") {
+            pairs.push(format!("murmur-action-{}", a.index));
+            pairs.push(a.title.clone());
+        }
         let id: u32 = self
             .proxy
             .call(
@@ -82,7 +146,7 @@ impl NotifyBus {
                     icon_path.unwrap_or_default(),
                     title,
                     body,
-                    Vec::<String>::new(),
+                    pairs,
                     hints,
                     // 0 = never expire (-1 is the daemon's ~3s default,
                     // not "forever"). Dismissal is synced, not timed.
@@ -204,7 +268,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             m = inbox.recv() => {
                 let Some((_from, msg)) = m else { return Ok(()) };
                 match (*msg).clone() {
-                    Message::Notification { key, pkg, app, title, body, icon_b64, .. } => {
+                    Message::Notification { key, pkg, app, title, body, icon_b64, actions, .. } => {
                         // A live desktop twin already shows its own
                         // notifications — the phone copy is a duplicate.
                         let suppressed = shared
@@ -218,7 +282,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                         }
                         let replaces = ids.get(&key).copied().unwrap_or(0);
                         let app = app.as_deref().unwrap_or(APP);
-                        match bus.notify(replaces, app, &pkg, &title, &body, icon_b64.as_deref()).await {
+                        match bus.notify(replaces, app, &pkg, &title, &body, icon_b64.as_deref(), &actions).await {
                             Ok(id) => {
                                 ids.insert(key.clone(), id);
                                 keys.insert(id, key);
@@ -243,16 +307,50 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                     debug!("twin close {id}: {e:#}");
                 }
             }
-            ev = bus.closed_rx.recv() => {
-                let Some((id, reason)) = ev else { return Ok(()) };
-                // Only echo user-initiated dismissals; expiry and our own
-                // CloseNotification calls stay local.
-                if reason != REASON_DISMISSED {
-                    continue;
-                }
-                if let Some(key) = keys.remove(&id) {
-                    ids.remove(&key);
-                    let _ = shared.send(Route::All, &Message::NotificationDismiss { key });
+            ev = bus.events_rx.recv() => {
+                let Some(ev) = ev else { return Ok(()) };
+                match ev {
+                    BusEvent::Closed(id, reason) => {
+                        // Only echo user-initiated dismissals; expiry and
+                        // our own CloseNotification calls stay local.
+                        if reason != REASON_DISMISSED {
+                            continue;
+                        }
+                        if let Some(key) = keys.remove(&id) {
+                            ids.remove(&key);
+                            let _ = shared.send(Route::All, &Message::NotificationDismiss { key });
+                        }
+                    }
+                    BusEvent::Invoked(id, action) => {
+                        let Some(key) = keys.get(&id).cloned() else { continue };
+                        match action.as_str() {
+                            // body click — the notification opens on the
+                            // phone exactly as a tap there would do it
+                            "default" => {
+                                let _ = shared.send(Route::All, &Message::NotificationInvoke { key });
+                            }
+                            // the inline-reply action itself carries no
+                            // text — NotificationReplied delivers that
+                            "inline-reply" => {}
+                            other => {
+                                if let Some(idx) = other
+                                    .strip_prefix("murmur-action-")
+                                    .and_then(|s| s.parse::<u32>().ok())
+                                {
+                                    let _ = shared.send(
+                                        Route::All,
+                                        &Message::NotificationAction { key, index: idx },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    BusEvent::Replied(id, text) => {
+                        let Some(key) = keys.get(&id).cloned() else { continue };
+                        if !text.trim().is_empty() {
+                            let _ = shared.send(Route::All, &Message::NotificationReply { key, text });
+                        }
+                    }
                 }
             }
         }

@@ -71,6 +71,17 @@ data class Envelope(
     }
 }
 
+/** One thing a phone notification offers to do — mirror of murmur-proto's
+ *  NotifAction. `index` round-trips back in action/reply frames so the
+ *  right PendingIntent fires without re-scanning titles. */
+@Serializable
+data class NotifAction(
+    val index: Int,
+    val title: String,
+    /** "reply" — carries a RemoteInput, takes text; "action" — plain button. */
+    val kind: String,
+)
+
 /** E2E messages — decrypted payload. Rust serde `tag = "t"`. */
 @Serializable
 @JsonClassDiscriminator("t")
@@ -88,12 +99,25 @@ sealed class Msg {
         val title: String,
         val body: String,
         val icon_b64: String? = null,
+        val actions: List<NotifAction> = emptyList(),
         val ts: Long,
     ) : Msg()
 
     @Serializable
     @SerialName("notification_dismiss")
     data class NotificationDismiss(val key: String) : Msg()
+
+    @Serializable
+    @SerialName("notification_invoke")
+    data class NotificationInvoke(val key: String) : Msg()
+
+    @Serializable
+    @SerialName("notification_action")
+    data class NotificationAction(val key: String, val index: Int) : Msg()
+
+    @Serializable
+    @SerialName("notification_reply")
+    data class NotificationReply(val key: String, val text: String) : Msg()
 
     @Serializable
     @SerialName("media_state")

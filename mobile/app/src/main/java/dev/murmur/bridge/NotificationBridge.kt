@@ -8,6 +8,7 @@ import android.graphics.drawable.Icon
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Base64
+import android.util.Log
 import dev.murmur.MurmurService
 import dev.murmur.core.Msg
 import dev.murmur.core.Secrets
@@ -30,7 +31,11 @@ class NotificationBridge : NotificationListenerService() {
 
     override fun onListenerConnected() {
         instance = this
-        runCatching { activeNotifications }.getOrNull()?.forEach { noteApp(it) }
+        // The mirror must reflect reality after a rebind (service
+        // restart, permission regrant): laptops replace-in-place on the
+        // same key, so reposting everything active is convergence, not
+        // spam. Goes through the same privacy gates as fresh posts.
+        repostActive()
     }
 
     override fun onListenerDisconnected() {
@@ -38,11 +43,17 @@ class NotificationBridge : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        noteApp(sbn)
+        forward(sbn)
+    }
+
+    /** The post pipeline, shared by fresh posts and the reconnect
+     *  convergence repost — every gate lives exactly once. */
+    private fun forward(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return // our own foreground notif
         if (sbn.isOngoing) return // players, downloads — noise, not events
         val n = sbn.notification
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return // repeats its children
-        noteApp(sbn)
         // MediaStyle posts (track changed, album art refresh) are noise
         // here — the laptop already mirrors playback through its own
         // media widget with real controls. The token extra is the
@@ -69,6 +80,7 @@ class NotificationBridge : NotificationListenerService() {
                 title = title,
                 body = body,
                 icon_b64 = iconB64(avatarIcon(n)),
+                actions = extractActions(n),
                 ts = sbn.postTime / 1000,
             ),
         )
@@ -117,6 +129,29 @@ class NotificationBridge : NotificationListenerService() {
         }.getOrNull() ?: n.getLargeIcon()
     }
 
+    /** What the notification offers, in the laptop-facing shape. An
+     *  action is a reply iff it carries a RemoteInput — the exact
+     *  marker Wear OS / Android Auto use; the semantic label is the
+     *  backup witness. Plain buttons are forwarded too: "mark as read"
+     *  is worth clicking from a laptop. */
+    private fun extractActions(n: Notification): List<dev.murmur.core.NotifAction> {
+        val arr = n.actions ?: return emptyList()
+        return arr.mapIndexedNotNull { i, a ->
+            if (a?.actionIntent == null) return@mapIndexedNotNull null
+            val reply = !a.remoteInputs.isNullOrEmpty() ||
+                a.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY
+            dev.murmur.core.NotifAction(
+                index = i,
+                title = a.title?.toString() ?: "",
+                kind = if (reply) "reply" else "action",
+            )
+        }
+    }
+
+    /** The posted notification behind a key, or null if it's gone. */
+    private fun findSbn(key: String): StatusBarNotification? =
+        runCatching { activeNotifications.firstOrNull { it.key == key } }.getOrNull()
+
     /** largeIcon → downscaled PNG → b64 (bounded to ICON_PX). */
     private fun iconB64(icon: Icon?): String? {
         val d = runCatching { icon?.loadDrawable(this) }.getOrNull() ?: return null
@@ -150,6 +185,70 @@ class NotificationBridge : NotificationListenerService() {
 
         /** Keys cancelled because a laptop asked — don't echo the removal. */
         private val remoteCancels = ConcurrentHashMap.newKeySet<String>()
+
+/** Android 14+ blocks background activity launches even for listeners
+     *  unless the send carries this explicit opt-in. Older APIs ignore the
+     *  bundle entirely. */
+    private fun balOptions(): android.os.Bundle? =
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            android.app.ActivityOptions.makeBasic()
+                .setPendingIntentBackgroundActivityStartMode(
+                    android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                ).toBundle()
+        } else null
+
+    /** Fire contentIntent — the exact same PendingIntent a tap on the
+     *  phone would fire. Listeners are exempt from background-launch
+     *  restrictions; if the screen is off the app simply surfaces at
+     *  unlock, which is what "open it on the phone" means anyway. */
+        fun performOpen(key: String) {
+        val sbn = instance?.findSbn(key) ?: return
+        runCatching { sbn.notification.contentIntent?.send(instance, 0, null, null, null, null, balOptions()) }
+            .onFailure { Log.w("NotificationBridge", "open failed: $it") }
+    }
+
+    /** Fire a plain action button by its original positional index. */
+        fun performAction(key: String, index: Int) {
+        val sbn = instance?.findSbn(key) ?: return
+        val a = sbn.notification.actions?.getOrNull(index) ?: return
+        runCatching { a.actionIntent?.send(instance, 0, null, null, null, null, balOptions()) }
+            .onFailure { Log.w("NotificationBridge", "action failed: $it") }
+    }
+
+    /** Fill the reply action's RemoteInput with [text] and fire it —
+     *  byte-identical to what the shade's inline field does, so the
+     *  app can't tell the difference (and neither can the chat peer). */
+        fun performReply(key: String, text: String) {
+        val sbn = instance?.findSbn(key) ?: return
+        val actions = sbn.notification.actions ?: return
+        val reply = actions.firstOrNull {
+            !it.remoteInputs.isNullOrEmpty() ||
+                it.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY
+        } ?: return
+        val inputs = reply.remoteInputs ?: return
+        val intent = android.content.Intent()
+        val results = android.os.Bundle()
+        for (input in inputs) {
+            results.putCharSequence(input.resultKey, text)
+        }
+        android.app.RemoteInput.addResultsToIntent(inputs, intent, results)
+        runCatching { reply.actionIntent.send(instance, 0, intent, null, null, null, balOptions()) }
+            .onFailure { Log.w("NotificationBridge", "reply failed: $it") }
+    }
+
+
+        /** The mirror must reflect reality after any restart — laptops
+         *  replace-in-place on the same key, so reposting everything
+         *  active is convergence, not spam. Safe to call from either side
+         *  of the startup race: gates no-op until both the listener and
+         *  MurmurService exist. */
+        fun repostActive() {
+            val self = instance ?: return
+            runCatching { self.activeNotifications }.getOrNull()?.forEach { sbn ->
+                self.noteApp(sbn)
+                self.forward(sbn)
+            }
+        }
 
         fun requestCancel(key: String) {
             val listener = instance ?: return

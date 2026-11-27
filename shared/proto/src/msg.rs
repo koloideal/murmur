@@ -22,8 +22,29 @@ pub enum Message {
         title: String,
         body: String,
         icon_b64: Option<String>,
+        /// What the notification lets the user do, mirrored from the
+        /// phone's action list: tapping the body fires `contentIntent`
+        /// (always true — hence implicit), reply actions are the ones
+        /// carrying a RemoteInput. Laptops render these as freedesktop
+        /// actions; old phones send nothing and the features degrade
+        /// to read-only mirroring.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<NotifAction>,
         ts: u64,
     },
+
+    /// Laptop → phone: the user clicked the notification body —
+    /// fire its contentIntent exactly as a tap on the phone would.
+    NotificationInvoke { key: String },
+
+    /// Laptop → phone: fire a non-reply action button by its index
+    /// in the original `actions` list.
+    NotificationAction { key: String, index: u32 },
+
+    /// Laptop → phone: inline reply text for the action that carries
+    /// the RemoteInput. The phone fills the input and fires the same
+    /// PendingIntent the shade's inline field would have.
+    NotificationReply { key: String, text: String },
 
     /// Any → all. Dismissed locally somewhere → dismissed everywhere,
     /// including on the phone.
@@ -135,6 +156,9 @@ impl Message {
             Message::Presence { .. } => "presence",
             Message::Notification { .. } => "notification",
             Message::NotificationDismiss { .. } => "notification_dismiss",
+            Message::NotificationInvoke { .. } => "notification_invoke",
+            Message::NotificationAction { .. } => "notification_action",
+            Message::NotificationReply { .. } => "notification_reply",
             Message::MediaState { .. } => "media_state",
             Message::MediaCommand { .. } => "media_command",
             Message::Clipboard { .. } => "clipboard",
@@ -168,6 +192,19 @@ pub enum PresenceState {
     Active,
     Idle,
     Locked,
+}
+
+/// One thing a phone notification offers to do. `index` is positional
+/// in the phone's own action array — it round-trips in
+/// `NotificationAction`/`NotificationReply` so the phone fires the
+/// right PendingIntent without re-scanning titles.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotifAction {
+    pub index: u32,
+    pub title: String,
+    /// "reply" — carries a RemoteInput, text entry is meaningful;
+    /// "action" — plain button (mark-as-read, archive, …).
+    pub kind: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

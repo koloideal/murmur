@@ -42,6 +42,7 @@ fun NotificationsCard() {
     val removed by Secrets.removedFlow.collectAsState()
     val hide by Secrets.hideTextFlow.collectAsState()
     val mirror by Secrets.mirrorFlow.collectAsState()
+    val dismissRemote by Secrets.dismissRemoteFlow.collectAsState()
 
     AnimatedVisibility(
         visible = settled && !removed,
@@ -60,12 +61,20 @@ fun NotificationsCard() {
                     enter = fadeIn(tween(250)) + expandVertically(tween(250)),
                     exit = fadeOut(tween(200)) + shrinkVertically(tween(200)),
                 ) {
-                    ToggleRow(
-                        "hide message text",
-                        "laptops show only the app and the title",
-                        checked = hide,
-                        onChange = { secrets.hideNotificationText = it },
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ToggleRow(
+                            "hide message text",
+                            "laptops show only the app and the title",
+                            checked = hide,
+                            onChange = { secrets.hideNotificationText = it },
+                        )
+                        ToggleRow(
+                            "dismiss everywhere",
+                            "closing a notification on a laptop clears it here too",
+                            checked = dismissRemote,
+                            onChange = { secrets.dismissRemote = it },
+                        )
+                    }
                 }
             }
         }
