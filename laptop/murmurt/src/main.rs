@@ -1,4 +1,5 @@
 mod doctor;
+mod jsonc;
 mod geometry;
 mod install;
 

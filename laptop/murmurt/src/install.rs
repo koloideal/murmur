@@ -173,11 +173,11 @@ fn fragment_body(src: &str, comment: &str) -> String {
     src.trim_end().to_string()
 }
 
-/// Insert `"group/murmur",` right after the `"modules-left": [` opening
-/// line, inside marker comments. Skips if the group is already listed.
+/// Insert `"group/murmur"` right after the opening bracket of the
+/// top-level modules-left array — positional, so single-line arrays
+/// and compact formatting survive. Skips if the group is already
+/// referenced inside any modules array.
 fn merge_modules_array(content: &str) -> String {
-    // the group definition is `"group/murmur": {` — a *use* inside a
-    // modules array is the bare string; only the latter should stop us
     let referenced = content.lines().any(|l| {
         l.contains("\"group/murmur\"") && !l.trim_start().starts_with("\"group/murmur\":")
     });
@@ -185,58 +185,69 @@ fn merge_modules_array(content: &str) -> String {
         println!("  note: \"group/murmur\" already referenced — leaving module arrays untouched");
         return content.to_string();
     }
-    let mut out = String::new();
-    let mut injected = false;
-    for line in content.lines() {
-        out.push_str(line);
-        out.push('\n');
-        if !injected && line.contains("\"modules-left\"") && line.contains('[') {
-            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-            out.push_str(&format!(
-                "{indent}    // >>> murmur island\n{indent}    \"group/murmur\",\n{indent}    // <<< murmur island\n"
-            ));
-            injected = true;
+    let scan = crate::jsonc::scan(content);
+    match scan.array_open("modules-left") {
+        Some((mut pos, nonempty)) => {
+            let comma = if nonempty { "," } else { "" };
+            let mut frag = format!(
+                "        // >>> murmur island\n        \"group/murmur\"{comma}\n        // <<< murmur island\n"
+            );
+            let rest = &content[pos..];
+            if rest.starts_with('\n') {
+                pos += 1;
+            } else if !rest.trim_start_matches([' ', '\t']).starts_with('\n') && !rest.trim().is_empty() {
+                frag.insert(0, '\n');
+            }
+            crate::jsonc::insert_at(content, pos, &frag)
+        }
+        None => {
+            println!("  warn: no \"modules-left\" array found — add \"group/murmur\" to your modules manually");
+            content.to_string()
         }
     }
-    if !injected {
-        println!("  warn: no \"modules-left\" array found — add \"group/murmur\" to your modules manually");
-    }
-    out
 }
 
 /// Insert the module definitions right after the root object's opening
-/// brace — first position means no trailing-comma guessing. The fragment
-/// defines `group/murmur` itself, so it carries no trailing comma issues:
-/// every key line ends with `,` and ordering inside an object is free.
+/// brace — positional, comma-correct for empty and non-empty objects.
 fn merge_module_defs(content: &str) -> String {
     if content.contains("\"custom/murmur-status\"") && !content.contains(">>> murmur island") {
         println!("  note: murmur modules already defined manually — not touching definitions");
         return content.to_string();
     }
-    // rebuild from scratch if upgrading: strip old blocks first, but
-    // keep the array injection — it re-inserts harmlessly either way
     let content = &strip_blocks_in_jsonc(content);
     let body = fragment_body(WAYBAR_MODULES, "//");
-    let mut out = String::new();
-    let mut injected = false;
-    for line in content.lines() {
-        out.push_str(line);
-        out.push('\n');
-        if !injected && line.trim() == "{" {
-            out.push_str("    // >>> murmur island\n");
-            for l in body.lines() {
-                out.push_str("    ");
-                out.push_str(l);
-                out.push('\n');
-            }
-            out.push_str("    // <<< murmur island\n");
-            injected = true;
+    let scan = crate::jsonc::scan(content);
+    let Some(pos) = scan.root_open() else {
+        println!("  warn: no root object found — is this a waybar config?");
+        return content.to_string();
+    };
+    // the fragment ends with a trailing comma — correct only when the
+    // object has keys of its own following our block
+    let mut body = body.trim_end().to_string();
+    if !scan.root_nonempty() {
+        if let Some(stripped) = body.strip_suffix(',') {
+            body = stripped.to_string();
         }
     }
-    if !injected {
-        out.push_str(&format!("\n// >>> murmur island\n{body}\n// <<< murmur island\n"));
+    // insert at a line boundary: if the brace shares its line with
+    // content, start the fragment with a newline — either way the
+    // fragment is whole lines ending with a newline, so stripping the
+    // marker lines later can never eat user content
+    let mut frag = String::from("    // >>> murmur island\n");
+    for l in body.lines() {
+        frag.push_str("    ");
+        frag.push_str(l);
+        frag.push('\n');
     }
-    out
+    frag.push_str("    // <<< murmur island\n");
+    let mut pos = pos;
+    let rest = &content[pos..];
+    if rest.starts_with('\n') {
+        pos += 1; // insert after the newline, at the next line's start
+    } else if !rest.trim_start_matches([' ', '\t']).starts_with('\n') && !rest.trim().is_empty() {
+        frag.insert(0, '\n'); // brace shares its line with content
+    }
+    crate::jsonc::insert_at(content, pos, &frag)
 }
 
 fn strip_blocks_in_jsonc(content: &str) -> String {
@@ -255,19 +266,29 @@ fn merge_waybar(over: &Option<String>) -> Result<()> {
         let merged = merge_module_defs(&content);
         let merged = merge_modules_array(&merged);
         if merged != content {
-            fs::write(cfg, merged)?;
-            println!("  merged module defs + group/murmur into {}", cfg.display());
+            // hard gate: a merge we can't validate never touches the file
+            if crate::jsonc::valid_jsonc(&merged) {
+                fs::write(cfg, merged)?;
+                println!("  merged module defs + group/murmur into {}", cfg.display());
+            } else {
+                println!("  ERROR: merged config would be invalid jsonc — left {} untouched", cfg.display());
+                println!("         merge manually from contrib/waybar-island/waybar.modules.jsonc");
+            }
         }
 
         let css = cfg.with_file_name("style.css");
         if css.exists() {
             backup_once(&css)?;
             let content = fs::read_to_string(&css)?;
-            let body = fragment_body(WAYBAR_STYLE, "/*");
-            let merged = merge_block(&content, &body, "css");
-            if merged != content {
-                fs::write(&css, merged)?;
-                println!("  merged island styles into {}", css.display());
+            if content.contains("#custom-murmur-status") && !content.contains(">>> murmur island") {
+                println!("  note: {} already styles murmur modules manually — not touching it", css.display());
+            } else {
+                let body = fragment_body(WAYBAR_STYLE, "/*");
+                let merged = merge_block(&content, &body, "css");
+                if merged != content {
+                    fs::write(&css, merged)?;
+                    println!("  merged island styles into {}", css.display());
+                }
             }
         } else {
             println!("  note: {} not found — copy contrib/waybar-island/waybar.style.css manually", css.display());
