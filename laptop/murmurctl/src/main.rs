@@ -623,31 +623,115 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Dial { addr } => {
-            // Probe the peer before accepting the dial: a typo'd or
-            // unreachable address must fail loudly here, not vanish
-            // into the daemon's redial loop.
+            let p = Paint::new();
             let probe_target = if addr.contains(':') {
                 addr.clone()
             } else {
                 format!("{addr}:17894")
             };
+
+            // Interactive probe: spin while TCP connects, verify the link
+            // comes up through the daemon afterwards. A dial that cannot
+            // connect is rejected before the daemon ever hears about it.
             use std::net::{TcpStream, ToSocketAddrs};
-            let resolved = probe_target
-                .to_socket_addrs()
-                .ok()
-                .and_then(|mut it| it.next());
-            let reachable = resolved
-                .map(|sa| {
-                    TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(1500)).is_ok()
-                })
-                .unwrap_or(false);
-            if !reachable {
-                anyhow::bail!(
-                    "cannot reach {probe_target} — host unreachable or murmur not listening there; dial rejected"
+            let target = probe_target.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let resolved = target
+                    .to_socket_addrs()
+                    .ok()
+                    .and_then(|mut it| it.next());
+                let ok = resolved
+                    .map(|sa| {
+                        TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(1500))
+                            .is_ok()
+                    })
+                    .unwrap_or(false);
+                let _ = tx.send(ok);
+            });
+
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "ⴇ", "⦿", "⦗", "⧈", "⬗"];
+            let mut i = 0usize;
+            let probe = loop {
+                if let Ok(ok) = rx.try_recv() {
+                    break Some(ok);
+                }
+                if i * 90 > 2500 {
+                    break None;
+                }
+                print!(
+                    "\r  {} {}",
+                    p.wrap("38;5;141", frames[i % frames.len()]),
+                    p.dim(format!("connecting to {probe_target}…"))
                 );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                std::thread::sleep(std::time::Duration::from_millis(90));
+                i += 1;
+            };
+            print!("\r{}\r", " ".repeat(60));
+
+            match probe {
+                Some(true) => {}
+                _ => {
+                    println!(
+                        "  {} {} {}",
+                        p.red("✗"),
+                        p.bold("cannot reach"),
+                        format!("{probe_target} — dial rejected, nothing was added")
+                    );
+                    println!(
+                        "  {}",
+                        p.dim("host unreachable or murmur is not listening there")
+                    );
+                    std::process::exit(1);
+                }
             }
+            println!(
+                "  {} {} {}",
+                p.green("✓"),
+                p.dim("peer answers on"),
+                p.bold(&probe_target)
+            );
+
             ask(serde_json::json!({"cmd": "dial", "addr": addr}))?;
-            println!("dialing {addr} — `murmurctl status` shows the link");
+
+            // Now confirm the handshake actually completes: poll the daemon
+            // for the peer showing up in the lan table.
+            let ip = addr.split(':').next().unwrap_or(&addr).to_string();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut linked: Option<String> = None;
+            while std::time::Instant::now() < deadline {
+                if let Ok(d) = ask(serde_json::json!({"cmd": "status"})) {
+                    if let (Some(peers), Some(addrs)) =
+                        (d["lan_peers"].as_array(), d["lan_addrs"].as_object())
+                    {
+                        for peer in peers.iter().filter_map(|v| v.as_str()) {
+                            if let Some(a) = addrs.get(peer).and_then(|v| v.as_str()) {
+                                if a.starts_with(&ip) {
+                                    linked = Some(peer.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if linked.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            match linked {
+                Some(name) => println!(
+                    "  {} linked — {} joined the family table",
+                    p.green("✓"),
+                    p.bold(name)
+                ),
+                None => println!(
+                    "  {} {}",
+                    p.red("✗"),
+                    "handshake never completed — wrong key family, firewall, or ghost host; the daemon will keep redialing in background"
+                ),
+            }
             Ok(())
         }
         Cmd::Completions { shell } => {
