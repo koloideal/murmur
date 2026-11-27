@@ -1004,6 +1004,35 @@ fn cmd_uninstall(yes: bool) -> anyhow::Result<()> {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "disable", "--now", "murmurd.service"])
         .status();
+    // systemctl can quietly no-op — no user bus in this shell, or the
+    // daemon was spawned bare rather than by the unit. Sweep survivors
+    // by exact process name; a living daemon is the artifact people
+    // actually mean by "uninstall didn't remove murmurd".
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned());
+    let mut pkill = std::process::Command::new("pkill");
+    pkill.arg("-x");
+    if let Some(u) = &uid {
+        pkill.args(["-U", u]);
+    }
+    let _ = pkill.arg("murmurd").status();
+    // Verify: a survivor means an odd runtime (no procps, foreign pid
+    // ns) — say so instead of leaving a ghost behind the deleted unit.
+    let alive = std::process::Command::new("pgrep")
+        .args(["-x", "murmurd"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    if alive {
+        println!(
+            "  {} a murmurd process is still alive — kill it by hand: pkill -x murmurd",
+            p.yellow("!")
+        );
+    }
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
