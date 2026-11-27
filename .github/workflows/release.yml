@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: stamp release version into the workspace
-        run: sed -i '0,/^version = /s/^version = .*/version = "${GITHUB_REF_NAME#v}"/' server/Cargo.toml
+        run: sed -i "0,/^version = /s/^version = .*/version = \"${GITHUB_REF_NAME#v}\"/" server/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
@@ -66,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: stamp release version into the workspace
-        run: sed -i '0,/^version = /s/^version = .*/version = "${GITHUB_REF_NAME#v}"/' laptop/Cargo.toml
+        run: sed -i "0,/^version = /s/^version = .*/version = \"${GITHUB_REF_NAME#v}\"/" laptop/Cargo.toml
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - name: build murmurd + murmurctl + murmurt (glibc — Arch machines)
