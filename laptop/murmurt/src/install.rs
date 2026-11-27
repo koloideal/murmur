@@ -360,12 +360,18 @@ fn merge_swaync() -> Result<()> {
 
     let style = dir.join("style.css");
     if style.exists() {
-        backup_once(&style)?;
         let content = fs::read_to_string(&style)?;
-        let merged = merge_block(&content, SWAYNC_STYLE, "css");
-        if merged != content {
-            fs::write(&style, merged)?;
-            println!("  merged murmur block into {}", style.display());
+        if content.trim() == SWAYNC_STYLE.trim() {
+            println!("  {} is already the murmur stylesheet", style.display());
+        } else if content.contains(".notification.low") && !content.contains(">>> murmur island") {
+            println!("  note: {} already styles murmur manually — not touching it", style.display());
+        } else {
+            backup_once(&style)?;
+            let merged = merge_block(&content, SWAYNC_STYLE, "css");
+            if merged != content {
+                fs::write(&style, merged)?;
+                println!("  merged murmur block into {}", style.display());
+            }
         }
     } else {
         write_file(&style, SWAYNC_STYLE.as_bytes(), false)?;
