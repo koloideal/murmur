@@ -59,9 +59,11 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     };
 
     let deny: HashSet<String> = shared.cfg.clipboard_mime_deny.iter().cloned().collect();
-    // Hash we just applied from the network — next local event with it
-    // is echo, not a real copy.
-    let mut suppress: Option<u64> = None;
+    // Hashes we just applied from the network — the watcher's echo of
+    // each is not a real copy. Multi-slot on purpose: two inbound clips
+    // landing before the watcher fires would overwrite a single slot
+    // and the unconsumed echo would rebroadcast — a ping-pong loop.
+    let mut suppress: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // Last hash we broadcast — repeated local events are deduped.
     let mut last_sent: Option<u64> = None;
 
@@ -71,10 +73,11 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 let Some(ev) = ev else { return Ok(()) };
                 let wlclip::ClipEvent::Data { mime, offered, data } = ev else { continue };
                 let hash = hash_clip(&data);
-                // Only clear suppress on a match — an unrelated local
-                // event arriving before the echo must not consume it.
-                if suppress == Some(hash) {
-                    suppress = None;
+                // Consume exactly one matching suppression — the echo is
+                // one watcher event per apply, and an unrelated local
+                // event must not eat the slot.
+                if let Some(pos) = suppress.iter().position(|h| *h == hash) {
+                    suppress.remove(pos);
                     continue; // echo of our own apply
                 }
                 if last_sent == Some(hash) {
@@ -121,7 +124,10 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 };
                 // Hash from the wire is the *sender's* — we suppress by
                 // the local hash the watcher will actually see.
-                suppress = Some(hash_clip(&data));
+                suppress.push_back(hash_clip(&data));
+                while suppress.len() > 8 {
+                    suppress.pop_front();
+                }
                 *shared.last_clip.lock().unwrap() =
                     Some(("in".to_string(), from.to_string(), crate::state::now_ts()));
                 tracing::debug!("clip ← apply hash={hash:x} mime={mime} explicit={explicit}");

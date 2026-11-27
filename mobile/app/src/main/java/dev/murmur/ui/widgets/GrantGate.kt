@@ -168,7 +168,7 @@ fun GrantGate(grants: Grants) {
         if (!grants.battery) {
             GrantRow(
                 title = "battery exemption",
-                hint = "keeps the link alive in the background",
+                hint = "keeps the link alive in the background" + oemBatteryWarning()?.let { " — $it" }.orEmpty(),
             ) {
                 ctx.startActivity(
                     Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
@@ -183,6 +183,17 @@ fun GrantGate(grants: Grants) {
         ) { Text("quit murmur") }
         }
     }
+}
+
+/** Samsung/Xiaomi and friends run their own background killers on top
+ *  of stock doze — the exemption alone doesn't survive them. Naming
+ *  the exact screen saves the user a support search later. */
+private fun oemBatteryWarning(): String? = when {
+    android.os.Build.MANUFACTURER.equals("samsung", ignoreCase = true) ->
+        "also check samsung's settings → battery → background usage limits — \"sleeping apps\" kills murmur silently"
+    android.os.Build.MANUFACTURER.equals("xiaomi", ignoreCase = true) ->
+        "also check miui's battery saver for murmur — it kills background links"
+    else -> null
 }
 
 @Composable

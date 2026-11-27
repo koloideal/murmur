@@ -237,6 +237,11 @@ class MurmurService : Service() {
             }
         }
         scope.launch {
+            lan.portBusyFlow.collect { busy ->
+                status.update { it.copy(portBusy = busy) }
+            }
+        }
+        scope.launch {
             lan.lanAddrFlow.collect { a ->
                 status.update { it.copy(lanAddr = a) }
             }
@@ -561,6 +566,9 @@ class MurmurService : Service() {
         val devices: List<DeviceInfo> = emptyList(),
         val familyName: String? = null,
         val keyEpoch: Long = 0,
+        /** Listen port stayed busy across retries — another copy of
+         *  murmur is almost certainly installed on this phone. */
+        val portBusy: Boolean = false,
     )
 
     companion object {

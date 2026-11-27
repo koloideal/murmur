@@ -19,8 +19,10 @@ import java.io.File
  */
 object ClipboardBridge {
 
-    /** Received images outlive the paste by an hour, then get swept. */
-    private const val CLIP_TTL_MS = 3_600_000L
+    /** Received images outlive the paste by a day, then get swept — an
+ *  hour was short enough that a clipboard entry could die before a
+ *  perfectly reasonable paste. */
+    private const val CLIP_TTL_MS = 86_400_000L
 
     fun apply(ctx: Context, msg: Msg.Clipboard) {
         val data = Base64.decode(msg.data_b64, Base64.NO_WRAP)

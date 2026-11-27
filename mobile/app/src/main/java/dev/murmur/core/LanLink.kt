@@ -327,14 +327,27 @@ class LanLink(
 
     // -- link -----------------------------------------------------------------
 
+    /** Sticky bind failure on the listen port. Transient failures
+     *  happen; a port that stays busy across retries is almost always
+     *  a second murmur copy on the same phone (release + debug) — the
+     *  two silently steal each other's inbound links, and the user
+     *  deserves to know. */
+    val portBusyFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
     private suspend fun acceptLoop() {
         // Same retry story as the beacon socket — a busy :17894 or a
         // transient bind failure must not disable inbound links forever.
+        var failures = 0
         while (srv == null && started) {
             srv = runCatching { ServerSocket(LINK_PORT) }
                 .onFailure { Log.w(TAG, "listen :$LINK_PORT: $it") }.getOrNull()
-            if (srv == null) delay(SOCKET_RETRY_MS)
+            if (srv == null) {
+                failures += 1
+                if (failures >= 3) portBusyFlow.value = true
+                delay(SOCKET_RETRY_MS)
+            }
         }
+        portBusyFlow.value = false
         val server = srv ?: return
         while (started) {
             val s = runCatching { server.accept() }.getOrNull() ?: break

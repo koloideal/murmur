@@ -175,8 +175,13 @@ fun StatusCard() {
                 if (removed) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "the relay no longer knows this phone — it was removed " +
-                            "from the family. Its keys are useless now.",
+                        if (serverless) {
+                            "the family rotated this phone out — it was removed. " +
+                                "Its keys are useless now."
+                        } else {
+                            "the relay no longer knows this phone — it was removed " +
+                                "from the family. Its keys are useless now."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
@@ -193,6 +198,26 @@ fun StatusCard() {
                         "can't reach the relay — is it running?",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (serverless && status.running && !online && !connectingGrace) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "no peers on the lan — devices find each other on the " +
+                            "same network; is the laptop awake?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                if (status.portBusy) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "the lan port is busy — another copy of murmur on this " +
+                            "phone? two copies steal each other's links; uninstall one",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
                     )
                 }
                 Spacer(Modifier.height(16.dp))
