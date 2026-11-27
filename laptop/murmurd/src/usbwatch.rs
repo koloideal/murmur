@@ -12,21 +12,8 @@ use crate::state::Shared;
 use murmur_proto::DeviceKind;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use tracing::{debug, info};
-
-/// Gateways seen on usb interfaces recently — ctl status uses this to
-/// tag the transport of a peer address. Process-global and append-only
-/// within an interface's lifetime; stale entries are harmless (a few
-/// bytes, and worst case the tag lingers on a re-used address).
-fn usb_gateways() -> &'static Mutex<HashSet<std::net::IpAddr>> {
-    static G: OnceLock<Mutex<HashSet<std::net::IpAddr>>> = OnceLock::new();
-    G.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-pub fn is_usb_gateway(ip: &std::net::IpAddr) -> bool {
-    usb_gateways().lock().unwrap().contains(ip)
-}
 
 /// Interface names whose backing device lives on the usb bus — rndis,
 /// cdc_ether, cdc_ncm all surface there.
