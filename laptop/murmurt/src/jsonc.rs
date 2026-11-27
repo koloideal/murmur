@@ -100,6 +100,33 @@ impl<'a> Scan<'a> {
         let nonempty = next_meaningful_byte(self.text, bracket_abs + 1).map(|(_, c)| c != b']').unwrap_or(false);
         Some((bracket_abs + 1, nonempty))
     }
+
+    /// Position of the `]` closing the array value of `key` — for
+    /// appending at the end rather than the start.
+    pub fn array_close(&self, key: &str) -> Option<usize> {
+        let keypos = find_key_outside_comments(self.text, key)?;
+        let after = &self.text[keypos..];
+        let colon = after.find(':')?;
+        let bracket_rel = after[colon..].find('[')?;
+        let bracket_abs = keypos + colon + bracket_rel;
+        let mut depth = 0i32;
+        for &(pos, c) in self.structural.iter() {
+            if pos <= bracket_abs {
+                continue;
+            }
+            match c {
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => {
+                    if depth == 0 && c == b']' {
+                        return Some(pos);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 /// Find `"key"` as a top-level-ish key: a quoted string in the text that

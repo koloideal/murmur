@@ -190,18 +190,22 @@ fn merge_modules_array(content: &str) -> String {
         return content.to_string();
     }
     let scan = crate::jsonc::scan(content);
-    match scan.array_open("modules-left") {
-        Some((mut pos, nonempty)) => {
-            let comma = if nonempty { "," } else { "" };
-            let mut frag = format!(
-                "        // >>> murmur island\n        \"group/murmur\"{comma}\n        // <<< murmur island\n"
-            );
-            let rest = &content[pos..];
-            if rest.starts_with('\n') {
-                pos += 1;
-            } else if !rest.trim_start_matches([' ', '\t']).starts_with('\n') && !rest.trim().is_empty() {
-                frag.insert(0, '\n');
+    // Append at the end of the array: the island is a trailing status
+    // group — right of power/clock/audio in a typical left module list.
+    match scan.array_close("modules-left") {
+        Some(close) => {
+            let nonempty = scan.array_open("modules-left").map(|(_, ne)| ne).unwrap_or(false);
+            // insert before the whitespace that precedes `]`, so the
+            // closing bracket keeps its indentation
+            let mut pos = close;
+            let bytes = content.as_bytes();
+            while pos > 0 && (bytes[pos - 1] == b' ' || bytes[pos - 1] == b'\t' || bytes[pos - 1] == b'\n') {
+                pos -= 1;
             }
+            let comma = if nonempty { "," } else { "" };
+            let frag = format!(
+                "{comma}\n        // >>> murmur island\n        \"group/murmur\"\n        // <<< murmur island\n    "
+            );
             crate::jsonc::insert_at(content, pos, &frag)
         }
         None => {
@@ -505,4 +509,50 @@ pub fn uninstall(waybar_config: Option<String>) -> Result<()> {
         .status();
     println!("\ndone. murmurt itself is still in ~/.local/bin — delete it manually if you want it gone.");
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::merge_modules_array;
+
+    #[test]
+    fn appends_island_at_end_of_modules_left() {
+        let cfg = r#"{
+    "modules-left": [
+        "custom/power",
+        "clock"
+    ],
+    "modules-right": ["network"]
+}
+"#;
+        let out = merge_modules_array(cfg);
+        let power = out.find("\"custom/power\"").unwrap();
+        let island = out.find("\"group/murmur\",").or_else(|| out.find("\"group/murmur\"")).unwrap();
+        assert!(island > power, "island must come after power");
+        // comma follows the last pre-existing element, closing bracket intact
+        assert!(out.contains("\"clock\","));
+        assert!(out.trim_end().ends_with('}'));
+        // well-formed: one group/murmur reference, markers paired
+        assert_eq!(out.matches(">>> murmur island").count(), 1);
+        assert_eq!(out.matches("<<< murmur island").count(), 1);
+    }
+
+    #[test]
+    fn skips_when_already_referenced() {
+        let cfg = r#"{ "modules-left": ["group/murmur", "clock"] }"#;
+        assert_eq!(merge_modules_array(cfg), cfg);
+    }
+
+    #[test]
+    fn handles_empty_array_without_comma() {
+        let cfg = "{
+    \"modules-left\": [
+    ]
+}
+";
+        let out = merge_modules_array(cfg);
+        assert!(out.contains("\"group/murmur\""));
+        assert!(!out.contains("[,"), "no leading comma in empty array: {out}");
+    }
 }

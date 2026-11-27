@@ -332,9 +332,13 @@ if command -v waybar >/dev/null 2>&1 || [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" 
             fi
             pkill -SIGUSR2 -x waybar 2>/dev/null || true
             if pgrep -x swaync >/dev/null 2>&1; then
+                # Restart with the exact original command line — the
+                # config/css paths are user-specific (e.g. under hypr/)
+                # and a bare `swaync` would fall back to defaults.
+                SWAYNC_ARGS=$(ps -o args= -C swaync | head -1)
                 pkill -x swaync
                 sleep 1
-                setsid nohup swaync >/dev/null 2>&1 &
+                setsid nohup $SWAYNC_ARGS >/dev/null 2>&1 &
             fi
             box "${B}island installed${R0}" \
                 "" \
