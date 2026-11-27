@@ -12,14 +12,56 @@
 //! Joiner side (`murmurd pair --code`): one-shot [`join`] — handshake,
 //! print the SAS, wait for `PairData`, hand the secrets to provisioning.
 
+use std::collections::HashMap;
+
+/// Pairing state owned by the inviter side. Sessions are the joiner's
+/// conn ids: a `PairHello`'s `env.from` is matched against `invites`.
+/// Entries expire — an invite nobody finishes within TTL is swept.
+#[derive(Default)]
+pub struct Pairing {
+    /// Outstanding invites: session → our ephemeral DH key.
+    pub invites: HashMap<DeviceId, InviteEntry>,
+    /// `PairHello` received for one of our invites.
+    pub pending: HashMap<DeviceId, Pending>,
+    /// Serverless pair sockets staged by session id: `serve_pair`
+    /// registers the joiner's socket writer here *before* the
+    /// PairHello reaches `pair::handle_ctl`, which moves it into the
+    /// fresh `Pending`.
+    pub pair_reply: HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>,
+}
+
+/// How long an invite/pending stays around without progress.
+pub const PAIR_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+pub struct InviteEntry {
+    pub key: PairKey,
+    pub created: std::time::Instant,
+}
+
+pub struct Pending {
+    /// Our ephemeral key (kept for DH at confirm time).
+    pub key: PairKey,
+    /// Joiner's pubkey from its `PairHello`.
+    pub peer_pub: PublicKey,
+    /// Name the joiner asked to be registered under.
+    pub name: String,
+    /// When the invite was issued (TTL counts from then, not from hello).
+    pub created: std::time::Instant,
+    /// Serverless pairing: the joiner's direct socket writer — its
+    /// PairAccept/PairData ride this instead of the (absent) relay.
+    pub reply: Option<mpsc::UnboundedSender<Envelope>>,
+}
+
+/// Shared daemon state: identity, key, presence table, outbound queue.
+
 use crate::feature::{Feature, FeatureCtx};
-use crate::state::{InviteEntry, PAIR_TTL, Pending, Shared};
+use crate::state::Shared;
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use murmur_proto::control::{HelloRole, PairBlob};
 use murmur_proto::{
-    AuthToken, Control, DeviceId, Envelope, FamilyKey, FamilyKind, Invite, PairKey, Route,
-    sas_code,
+    AuthToken, Control, DeviceId, Envelope, FamilyKey, FamilyKind, Invite, PairKey, PublicKey,
+    Route, sas_code,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};

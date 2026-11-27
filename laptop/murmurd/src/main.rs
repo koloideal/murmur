@@ -10,6 +10,7 @@ mod ctl;
 mod feature;
 mod install;
 mod keyring;
+mod links;
 mod lan;
 mod integ;
 mod lockproc;

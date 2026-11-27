@@ -1,7 +1,9 @@
 use crate::config::{Config, Secrets};
 use crate::keyring::{Keyring, Roster};
+use crate::links::load_lan_addrs;
+use crate::pair::Pairing;
 use murmur_proto::{
-    Control, DeviceId, Envelope, Message, PairKey, PresenceState, PublicKey, Route,
+    Control, DeviceId, Envelope, Message, PairKey, PresenceState, Route,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,80 +17,6 @@ pub fn now_ts() -> u64 {
         .unwrap_or(0)
 }
 
-/// Pairing state owned by the inviter side. Sessions are the joiner's
-/// conn ids: a `PairHello`'s `env.from` is matched against `invites`.
-/// Entries expire — an invite nobody finishes within TTL is swept.
-#[derive(Default)]
-pub struct Pairing {
-    /// Outstanding invites: session → our ephemeral DH key.
-    pub invites: HashMap<DeviceId, InviteEntry>,
-    /// `PairHello` received for one of our invites.
-    pub pending: HashMap<DeviceId, Pending>,
-    /// Serverless pair sockets staged by session id: `serve_pair`
-    /// registers the joiner's socket writer here *before* the
-    /// PairHello reaches `pair::handle_ctl`, which moves it into the
-    /// fresh `Pending`.
-    pub pair_reply: HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>,
-}
-
-/// Pure active-node election — the function every node computes
-/// independently over its presence map. Latest active timestamp wins,
-/// ties break toward the smaller DeviceId; entries past the staleness
-/// cutoff don't count. Pure so the convergence tests can hammer it.
-/// Presence merge rule: a fresher timestamp overwrites, stale never
-/// does — the table is order-independent *by construction*, which is
-/// what makes the distributed election converge at all.
-pub(crate) fn presence_merge(
-    map: &mut HashMap<DeviceId, (PresenceState, u64)>,
-    id: DeviceId,
-    state: PresenceState,
-    ts: u64,
-) {
-    if map.get(&id).is_none_or(|(_, old)| ts > *old) {
-        map.insert(id, (state, ts));
-    }
-}
-
-pub(crate) fn elect_active(
-    map: &HashMap<DeviceId, (PresenceState, u64)>,
-    now: u64,
-) -> Option<DeviceId> {
-    let cutoff = now.saturating_sub(PRESENCE_STALE);
-    map.iter()
-        .filter(|(_, (s, ts))| *s == PresenceState::Active && *ts >= cutoff)
-        .max_by(|(a_id, (_, a_ts)), (b_id, (_, b_ts))| {
-            a_ts.cmp(b_ts).then(b_id.cmp(a_id)) // later ts wins; smaller id wins ties
-        })
-        .map(|(id, _)| *id)
-}
-
-/// How long an invite/pending stays around without progress.
-pub const PAIR_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Presence entries older than this stop counting for the active-node
-/// election — 2.5× the 60s heartbeat, so one missed beat still counts.
-pub const PRESENCE_STALE: u64 = 150;
-
-pub struct InviteEntry {
-    pub key: PairKey,
-    pub created: std::time::Instant,
-}
-
-pub struct Pending {
-    /// Our ephemeral key (kept for DH at confirm time).
-    pub key: PairKey,
-    /// Joiner's pubkey from its `PairHello`.
-    pub peer_pub: PublicKey,
-    /// Name the joiner asked to be registered under.
-    pub name: String,
-    /// When the invite was issued (TTL counts from then, not from hello).
-    pub created: std::time::Instant,
-    /// Serverless pairing: the joiner's direct socket writer — its
-    /// PairAccept/PairData ride this instead of the (absent) relay.
-    pub reply: Option<mpsc::UnboundedSender<Envelope>>,
-}
-
-/// Shared daemon state: identity, key, presence table, outbound queue.
 pub struct Shared {
     pub cfg: Config,
     pub id: DeviceId,
@@ -115,10 +43,10 @@ pub struct Shared {
     /// Live LAN links keyed by peer — a star/mesh fast-path: several
     /// devices can each hold a direct link, unicast picks its peer,
     /// broadcast gets an early copy on every link.
-    lan: Mutex<HashMap<DeviceId, (mpsc::UnboundedSender<Envelope>, crate::lan::Transport)>>,
+    pub(crate) lan: Mutex<HashMap<DeviceId, (mpsc::UnboundedSender<Envelope>, crate::lan::Transport)>>,
     /// This node's last measured round-trip per peer in ms
     /// (0 = unknown); each peer measures its own on its side.
-    lan_rtt: Mutex<HashMap<DeviceId, u64>>,
+    pub(crate) lan_rtt: Mutex<HashMap<DeviceId, u64>>,
     /// Last clipboard sync event — ("in" origin id | "out", unix ts) —
     /// the island's clip widget shows direction instead of content.
     pub last_clip: Mutex<Option<(String, String, u64)>>,
@@ -127,13 +55,13 @@ pub struct Shared {
     pub feature_status: RwLock<Vec<(&'static str, fn(&Arc<Shared>) -> serde_json::Value)>>,
     /// Peers whose link just died — one-shot redial markers for the
     /// dialer (bounded by peer count, entries expire after a minute).
-    lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
+    pub(crate) lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
     /// Last-proven dial address per peer — learned when a link
     /// validates (socket remote addr / the peer's advertised
     /// `lan_addr`). On broadcast-filtered networks no fresh beacon
     /// ever arrives, so `lan::redial_loop` uses this map to bring a
     /// dead link back without discovery.
-    lan_addrs: Mutex<HashMap<DeviceId, std::net::SocketAddr>>,
+    pub(crate) lan_addrs: Mutex<HashMap<DeviceId, std::net::SocketAddr>>,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.
@@ -281,110 +209,6 @@ impl Shared {
         true
     }
 
-    /// Link bookkeeping for [`crate::lan`]. Called on every valid
-    /// frame — a no-op while the map already points at this channel,
-    /// so it never tramples the link's measured RTT.
-    pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>, transport: crate::lan::Transport) {
-        {
-            let mut lan = self.lan.lock().unwrap();
-            if matches!(lan.get(&peer), Some((t, _)) if t.same_channel(&tx)) {
-                return;
-            }
-            lan.insert(peer, (tx, transport));
-            self.lan_rtt.lock().unwrap().insert(peer, 0);
-        }
-        // The link-up is a rendezvous: announce so the peer pins our
-        // identity + name, and re-announce presence — the heartbeat's
-        // 60s window would otherwise leave the peer rejecting clips
-        // from an "inactive" origin. In a serverless family it's the
-        // *only* rendezvous — there is no relay connect to hang this on.
-        self.announce_identity();
-        self.broadcast_presence();
-    }
-    /// Push a pre-built envelope down a live link — for frames that
-    /// must ride a specific key (a re-key sealed under the peer's old
-    /// key), not the current-key seal `send` always applies.
-    pub(crate) fn lan_send(&self, peer: &DeviceId, env: Envelope) {
-        if let Some((tx, _)) = self.lan.lock().unwrap().get(peer) {
-            let _ = tx.send(env);
-        }
-    }
-
-    /// Transport tag per linked peer — ctl shows how the link rides.
-    pub fn lan_transports(&self) -> Vec<(DeviceId, crate::lan::Transport)> {
-        self.lan
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(p, (_, t))| (*p, *t))
-            .collect()
-    }
-
-    /// Live peers — the ctl/island "on lan" truth.
-    pub fn lan_peers(&self) -> Vec<DeviceId> {
-        self.lan.lock().unwrap().keys().copied().collect()
-    }
-    pub fn lan_rtt(&self, peer: &DeviceId) -> u64 {
-        self.lan_rtt.lock().unwrap().get(peer).copied().unwrap_or(0)
-    }
-    pub fn lan_rtt_set(&self, peer: DeviceId, ms: u64) {
-        self.lan_rtt.lock().unwrap().insert(peer, ms);
-    }
-    /// Tear down whichever peer slot still points at `tx` — a dying
-    /// old link must not clear a newer one adopted under the same peer.
-    /// A genuinely lost peer (slot removed, not merely replaced) gets
-    /// a redial marker so the next beacon reconnects without waiting
-    /// out the rate limit.
-    pub fn lan_clear(&self, tx: &mpsc::UnboundedSender<Envelope>) {
-        let mut g = self.lan.lock().unwrap();
-        let removed: Vec<DeviceId> = g
-            .iter()
-            .filter(|(_, (t, _))| t.same_channel(tx))
-            .map(|(p, _)| *p)
-            .collect();
-        g.retain(|_, (t, _)| !t.same_channel(tx));
-        let remaining: std::collections::HashSet<DeviceId> = g.keys().copied().collect();
-        drop(g);
-        self.lan_rtt
-            .lock()
-            .unwrap()
-            .retain(|p, _| remaining.contains(p));
-        if !removed.is_empty() {
-            let now = std::time::Instant::now();
-            let mut d = self.lan_dropped.lock().unwrap();
-            for p in removed {
-                d.insert(p, now);
-            }
-            d.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(60));
-        }
-    }
-
-    /// Consume the "just lost this peer" marker — the dialer skips the
-    /// rate limit once so a broken fast path comes back on the very
-    /// next beacon instead of up to DIAL_EVERY + beacon cadence later.
-    pub fn lan_redial_pending(&self, peer: &DeviceId) -> bool {
-        self.lan_dropped.lock().unwrap().remove(peer).is_some()
-    }
-
-    /// Remember where this peer was last reachable — refreshed on
-    /// every validated link and beacon-advertised `lan_addr`.
-    /// Persisted: a daemon restart on a broadcast-filtered network
-    /// would otherwise lose the only rendezvous it has.
-    pub fn lan_addr_set(&self, peer: DeviceId, addr: std::net::SocketAddr) {
-        {
-            let mut m = self.lan_addrs.lock().unwrap();
-            if m.get(&peer) == Some(&addr) {
-                return;
-            }
-            m.insert(peer, addr);
-        }
-        save_lan_addrs(&self.lan_addrs.lock().unwrap());
-    }
-
-    /// Snapshot for the redial loop and `murmurctl status`.
-    pub fn lan_addrs(&self) -> HashMap<DeviceId, std::net::SocketAddr> {
-        self.lan_addrs.lock().unwrap().clone()
-    }
 
     /// True on first sight of this envelope — call only *after* a
     /// successful `open()` so forged LAN frames can't poison the table.
@@ -395,6 +219,10 @@ impl Shared {
     /// the stored history would swallow it. Gap detection resets the
     /// sender's window; stragglers just above/below the mark still
     /// dedupe correctly.
+    pub fn token_hex(&self) -> String {
+        self.token_hex.clone()
+    }
+
     pub fn dedupe(&self, from: DeviceId, seq: u64) -> bool {
         self.seen.lock().unwrap().check(from, seq)
     }
@@ -419,102 +247,8 @@ impl Shared {
         Ok(())
     }
 
-    /// Active-node election: newest `active` wins; ties → smaller DeviceId.
-    /// Deterministic across nodes given the same presence table.
-    /// Entries older than PRESENCE_STALE are ignored: delivery is
-    /// live-only, so a peer silent that long is dead — without the
-    /// cutoff a crashed "active" laptop wins the election forever and
-    /// explicit pushes/commands route to a ghost.
-    pub fn active_node(&self) -> Option<DeviceId> {
-        elect_active(&self.presence.lock().unwrap(), now_ts())
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.active_node() == Some(self.id)
-    }
-
-    /// The mirror path is alive: a direct LAN link, or another device
-    /// whose presence broadcast is still fresh. Used by the notify
-    /// feature to hide desktop twins' own popups.
-    pub fn peer_online(&self) -> bool {
-        if !self.lan_peers().is_empty() {
-            return true;
-        }
-        let cutoff = now_ts().saturating_sub(PRESENCE_STALE);
-        self.presence
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(id, (_, ts))| *id != self.id && *ts >= cutoff)
-    }
-
-    pub fn token_hex(&self) -> String {
-        self.token_hex.clone()
-    }
-
-    /// Update own state and remember it for the next broadcast.
-    pub fn set_local_state(&self, state: PresenceState) {
-        self.presence
-            .lock()
-            .unwrap()
-            .insert(self.id, (state, now_ts()));
-        self.broadcast_presence();
-    }
-
-    /// Re-announce current presence state to everyone. The wire ts is
-    /// fresh; refresh our own table row too or it ages past the stale
-    /// cutoff and our election drifts from what the peers compute.
-    pub fn broadcast_presence(&self) {
-        let ts = now_ts();
-        let state = {
-            let mut m = self.presence.lock().unwrap();
-            let s = m
-                .get(&self.id)
-                .map(|(s, _)| *s)
-                .unwrap_or(PresenceState::Active);
-            m.insert(self.id, (s, ts));
-            s
-        };
-        let _ = self.send(Route::All, &Message::Presence { state, ts });
-        tracing::debug!("presence → broadcast {state:?} ts={ts}");
-    }
-
-    /// Called on disconnect. Peer rows are kept — a LAN peer is still
-    /// legitimately alive while the relay is gone. `active_node`'s
-    /// stale cutoff ages out whatever stops broadcasting.
-    pub fn note_presence_offline(&self) {}
-
-    pub fn note_presence(&self, id: DeviceId, state: PresenceState, ts: u64) {
-        presence_merge(&mut self.presence.lock().unwrap(), id, state, ts);
-    }
 }
 
-/// `lan_addrs.json` — remembered peer dial addresses, keyed by hex id.
-/// Both directions stay stringly: DeviceId/SocketAddr parse cleanly
-/// and a hand-editable file beats a schema for two fields.
-fn load_lan_addrs() -> HashMap<DeviceId, std::net::SocketAddr> {
-    std::fs::read_to_string(crate::config::data_path("lan_addrs.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
-        .map(|m| {
-            m.iter()
-                .filter_map(|(id, a)| {
-                    Some((id.parse::<DeviceId>().ok()?, a.parse::<std::net::SocketAddr>().ok()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn save_lan_addrs(m: &HashMap<DeviceId, std::net::SocketAddr>) {
-    let flat: HashMap<String, String> = m
-        .iter()
-        .map(|(id, a)| (id.to_string(), a.to_string()))
-        .collect();
-    if let Ok(j) = serde_json::to_string(&flat) {
-        let _ = std::fs::write(crate::config::data_path("lan_addrs.json"), j);
-    }
-}
 
 /// Coalescing slot for replaceable state messages — `None` means the
 /// message is latency-critical and goes to the hi channel as-is.
@@ -584,78 +318,6 @@ mod tests {
 
     fn dev(b: u8) -> DeviceId {
         DeviceId([b; 8])
-    }
-
-    fn apply(events: &[(u8, PresenceState, u64)]) -> HashMap<DeviceId, (PresenceState, u64)> {
-        let mut m = HashMap::new();
-        for (d, st, ts) in events {
-            presence_merge(&mut m, dev(*d), *st, *ts);
-        }
-        m
-    }
-
-    // ---- election convergence ----------------------------------------
-
-    /// The same event multiset in any order yields the same winner —
-    /// the property the whole distributed election rests on.
-    #[test]
-    fn election_converges_under_permutations() {
-        let events = vec![
-            (1u8, PresenceState::Active, 100u64),
-            (1, PresenceState::Active, 200),   // same node, newer beat
-            (2, PresenceState::Active, 150),
-            (2, PresenceState::Idle, 250),     // goes idle — out of the race
-            (3, PresenceState::Active, 200),   // ts tie with dev1 — smaller id wins
-        ];
-        let now = 300; // everything fresh: 300 - 150 < PRESENCE_STALE window check below
-        // ensure events are inside the staleness window for `now`
-        let now = if PRESENCE_STALE > 200 { now } else { 100 + PRESENCE_STALE - 1 };
-
-        let reference = elect_active(&apply(&events), now);
-
-        // permute by rotation+reversal — cheap but covers reordering classes
-        for rot in 0..events.len() {
-            let mut p: Vec<_> = events.clone();
-            p.rotate_left(rot);
-            assert_eq!(elect_active(&apply(&p), now), reference, "rotation {rot}");
-            p.reverse();
-            assert_eq!(elect_active(&apply(&p), now), reference, "reversed rotation {rot}");
-        }
-        // dev1: ts 200, active, smaller than dev3 — the winner
-        assert_eq!(reference, Some(dev(1)));
-    }
-
-    #[test]
-    fn election_rules() {
-        let now = 1_000_000;
-        let fresh = now - PRESENCE_STALE + 10;
-        // stale entries don't count
-        let mut m = HashMap::new();
-        m.insert(dev(1), (PresenceState::Active, now - PRESENCE_STALE - 1));
-        assert_eq!(elect_active(&m, now), None);
-        // idle/locked never win
-        m.insert(dev(1), (PresenceState::Idle, fresh));
-        m.insert(dev(2), (PresenceState::Locked, fresh));
-        assert_eq!(elect_active(&m, now), None);
-        // later ts beats earlier
-        m.insert(dev(3), (PresenceState::Active, fresh));
-        m.insert(dev(4), (PresenceState::Active, fresh + 5));
-        assert_eq!(elect_active(&m, now), Some(dev(4)));
-        // tie → smaller id
-        let mut t = HashMap::new();
-        t.insert(dev(9), (PresenceState::Active, fresh));
-        t.insert(dev(5), (PresenceState::Active, fresh));
-        assert_eq!(elect_active(&t, now), Some(dev(5)));
-    }
-
-    #[test]
-    fn merge_never_goes_backwards() {
-        let mut m = HashMap::new();
-        presence_merge(&mut m, dev(1), PresenceState::Active, 100);
-        presence_merge(&mut m, dev(1), PresenceState::Idle, 90); // stale — ignored
-        assert_eq!(m[&dev(1)], (PresenceState::Active, 100));
-        presence_merge(&mut m, dev(1), PresenceState::Idle, 110); // newer — wins
-        assert_eq!(m[&dev(1)], (PresenceState::Idle, 110));
     }
 
     // ---- dedup window -------------------------------------------------

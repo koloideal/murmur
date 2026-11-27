@@ -128,3 +128,198 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Election — pure functions plus the Shared accessors other features
+// read. Lives here rather than state.rs because presence semantics
+// (recording, merging, electing) are one cohesive topic.
+// ---------------------------------------------------------------------------
+
+use crate::state::{now_ts, Shared};
+use murmur_proto::{DeviceId, Route};
+use std::collections::HashMap;
+
+/// Presence entries older than this stop counting for the active-node
+/// election — 2.5× the 60s heartbeat, so one missed beat still counts.
+pub const PRESENCE_STALE: u64 = 150;
+
+/// Pure active-node election — the function every node computes
+/// independently over its presence map. Latest active timestamp wins,
+/// ties break toward the smaller DeviceId; entries past the staleness
+/// cutoff don't count. Pure so the convergence tests can hammer it.
+/// Presence merge rule: a fresher timestamp overwrites, stale never
+/// does — the table is order-independent *by construction*, which is
+/// what makes the distributed election converge at all.
+pub(crate) fn presence_merge(
+    map: &mut HashMap<DeviceId, (PresenceState, u64)>,
+    id: DeviceId,
+    state: PresenceState,
+    ts: u64,
+) {
+    if map.get(&id).is_none_or(|(_, old)| ts > *old) {
+        map.insert(id, (state, ts));
+    }
+}
+
+pub(crate) fn elect_active(
+    map: &HashMap<DeviceId, (PresenceState, u64)>,
+    now: u64,
+) -> Option<DeviceId> {
+    let cutoff = now.saturating_sub(PRESENCE_STALE);
+    map.iter()
+        .filter(|(_, (s, ts))| *s == PresenceState::Active && *ts >= cutoff)
+        .max_by(|(a_id, (_, a_ts)), (b_id, (_, b_ts))| {
+            a_ts.cmp(b_ts).then(b_id.cmp(a_id)) // later ts wins; smaller id wins ties
+        })
+        .map(|(id, _)| *id)
+}
+
+
+impl Shared {
+    /// Active-node election: newest `active` wins; ties → smaller DeviceId.
+    /// Deterministic across nodes given the same presence table.
+    /// Entries older than PRESENCE_STALE are ignored: delivery is
+    /// live-only, so a peer silent that long is dead — without the
+    /// cutoff a crashed "active" laptop wins the election forever and
+    /// explicit pushes/commands route to a ghost.
+    pub fn active_node(&self) -> Option<DeviceId> {
+        elect_active(&self.presence.lock().unwrap(), now_ts())
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active_node() == Some(self.id)
+    }
+
+    /// The mirror path is alive: a direct LAN link, or another device
+    /// whose presence broadcast is still fresh. Used by the notify
+    /// feature to hide desktop twins' own popups.
+    pub fn peer_online(&self) -> bool {
+        if !self.lan_peers().is_empty() {
+            return true;
+        }
+        let cutoff = now_ts().saturating_sub(PRESENCE_STALE);
+        self.presence
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, (_, ts))| *id != self.id && *ts >= cutoff)
+    }
+
+    /// Update own state and remember it for the next broadcast.
+    pub fn set_local_state(&self, state: PresenceState) {
+        self.presence
+            .lock()
+            .unwrap()
+            .insert(self.id, (state, now_ts()));
+        self.broadcast_presence();
+    }
+
+    /// Re-announce current presence state to everyone. The wire ts is
+    /// fresh; refresh our own table row too or it ages past the stale
+    /// cutoff and our election drifts from what the peers compute.
+    pub fn broadcast_presence(&self) {
+        let ts = now_ts();
+        let state = {
+            let mut m = self.presence.lock().unwrap();
+            let s = m
+                .get(&self.id)
+                .map(|(s, _)| *s)
+                .unwrap_or(PresenceState::Active);
+            m.insert(self.id, (s, ts));
+            s
+        };
+        let _ = self.send(Route::All, &Message::Presence { state, ts });
+        tracing::debug!("presence → broadcast {state:?} ts={ts}");
+    }
+
+    /// Called on disconnect. Peer rows are kept — a LAN peer is still
+    /// legitimately alive while the relay is gone. `active_node`'s
+    /// stale cutoff ages out whatever stops broadcasting.
+    pub fn note_presence_offline(&self) {}
+
+    pub fn note_presence(&self, id: DeviceId, state: PresenceState, ts: u64) {
+        presence_merge(&mut self.presence.lock().unwrap(), id, state, ts);
+    }
+}
+
+#[cfg(test)]
+mod election_tests {
+    use super::*;
+
+    fn dev(b: u8) -> DeviceId {
+        DeviceId([b; 8])
+    }
+
+    fn apply(events: &[(u8, PresenceState, u64)]) -> HashMap<DeviceId, (PresenceState, u64)> {
+        let mut m = HashMap::new();
+        for (d, st, ts) in events {
+            presence_merge(&mut m, dev(*d), *st, *ts);
+        }
+        m
+    }
+
+    // ---- election convergence ----------------------------------------
+
+    /// The same event multiset in any order yields the same winner —
+    /// the property the whole distributed election rests on.
+    #[test]
+    fn election_converges_under_permutations() {
+        let events = vec![
+            (1u8, PresenceState::Active, 100u64),
+            (1, PresenceState::Active, 200),   // same node, newer beat
+            (2, PresenceState::Active, 150),
+            (2, PresenceState::Idle, 250),     // goes idle — out of the race
+            (3, PresenceState::Active, 200),   // ts tie with dev1 — smaller id wins
+        ];
+        let now = 300; // everything fresh: 300 - 150 < PRESENCE_STALE window check below
+        // ensure events are inside the staleness window for `now`
+        let now = if PRESENCE_STALE > 200 { now } else { 100 + PRESENCE_STALE - 1 };
+
+        let reference = elect_active(&apply(&events), now);
+
+        // permute by rotation+reversal — cheap but covers reordering classes
+        for rot in 0..events.len() {
+            let mut p: Vec<_> = events.clone();
+            p.rotate_left(rot);
+            assert_eq!(elect_active(&apply(&p), now), reference, "rotation {rot}");
+            p.reverse();
+            assert_eq!(elect_active(&apply(&p), now), reference, "reversed rotation {rot}");
+        }
+        // dev1: ts 200, active, smaller than dev3 — the winner
+        assert_eq!(reference, Some(dev(1)));
+    }
+
+    #[test]
+    fn election_rules() {
+        let now = 1_000_000;
+        let fresh = now - PRESENCE_STALE + 10;
+        // stale entries don't count
+        let mut m = HashMap::new();
+        m.insert(dev(1), (PresenceState::Active, now - PRESENCE_STALE - 1));
+        assert_eq!(elect_active(&m, now), None);
+        // idle/locked never win
+        m.insert(dev(1), (PresenceState::Idle, fresh));
+        m.insert(dev(2), (PresenceState::Locked, fresh));
+        assert_eq!(elect_active(&m, now), None);
+        // later ts beats earlier
+        m.insert(dev(3), (PresenceState::Active, fresh));
+        m.insert(dev(4), (PresenceState::Active, fresh + 5));
+        assert_eq!(elect_active(&m, now), Some(dev(4)));
+        // tie → smaller id
+        let mut t = HashMap::new();
+        t.insert(dev(9), (PresenceState::Active, fresh));
+        t.insert(dev(5), (PresenceState::Active, fresh));
+        assert_eq!(elect_active(&t, now), Some(dev(5)));
+    }
+
+    #[test]
+    fn merge_never_goes_backwards() {
+        let mut m = HashMap::new();
+        presence_merge(&mut m, dev(1), PresenceState::Active, 100);
+        presence_merge(&mut m, dev(1), PresenceState::Idle, 90); // stale — ignored
+        assert_eq!(m[&dev(1)], (PresenceState::Active, 100));
+        presence_merge(&mut m, dev(1), PresenceState::Idle, 110); // newer — wins
+        assert_eq!(m[&dev(1)], (PresenceState::Idle, 110));
+    }
+
+}
