@@ -5,14 +5,22 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.FileProvider
 import dev.murmur.core.Msg
+import java.io.File
 
 /**
  * Applies incoming Clipboard messages to the phone clipboard.
  * Writes are allowed from background on Android 10+; the system may show a
  * small preview chip — cosmetic, verify on-device.
+ *
+ * Images land as a cache-backed content Uri via FileProvider — the
+ * pasting app gets a temporary read grant through the clipboard.
  */
 object ClipboardBridge {
+
+    /** Received images outlive the paste by an hour, then get swept. */
+    private const val CLIP_TTL_MS = 3_600_000L
 
     fun apply(ctx: Context, msg: Msg.Clipboard) {
         val data = Base64.decode(msg.data_b64, Base64.NO_WRAP)
@@ -28,10 +36,7 @@ object ClipboardBridge {
                         putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
                     }
                 }
-            "image/png" -> {
-                // TODO: write to cache, hand out a content Uri via FileProvider
-                return
-            }
+            "image/png" -> ClipData.newUri(ctx.contentResolver, "murmur", cacheImage(ctx, data))
             else -> {
                 Log.d("ClipboardBridge", "dropped mime ${msg.mime}")
                 return
@@ -39,5 +44,15 @@ object ClipboardBridge {
         }
         ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
         Log.d("ClipboardBridge", "applied ${data.size}B ${msg.mime}")
+    }
+
+    /** Write the PNG under cacheDir/clips and hand out a FileProvider Uri. */
+    private fun cacheImage(ctx: Context, png: ByteArray): android.net.Uri {
+        val dir = File(ctx.cacheDir, "clips").apply { mkdirs() }
+        val cutoff = System.currentTimeMillis() - CLIP_TTL_MS
+        dir.listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
+        val f = File(dir, "clip-${System.currentTimeMillis()}.png")
+        f.writeBytes(png)
+        return FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
     }
 }

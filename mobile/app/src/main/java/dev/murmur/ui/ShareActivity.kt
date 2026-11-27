@@ -18,9 +18,9 @@ class ShareActivity : Activity() {
         when {
             text.isNullOrBlank() -> toast("nothing to send")
             MurmurService.instance == null -> {
-                // TODO: queue the push and deliver once the service is up
+                dev.murmur.core.PendingPush.enqueue(this, text)
                 MurmurService.start(this)
-                toast("murmur is starting — share again in a second")
+                toast("queued — sends when murmur connects")
             }
             else -> {
                 val st = MurmurService.status.value

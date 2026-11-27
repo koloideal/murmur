@@ -17,8 +17,9 @@ class ProcessTextActivity : Activity() {
         if (text.isNullOrBlank()) {
             toast("nothing selected")
         } else if (MurmurService.instance == null) {
+            dev.murmur.core.PendingPush.enqueue(this, text)
             MurmurService.start(this)
-            toast("murmur is starting — try again in a second")
+            toast("queued — sends when murmur connects")
         } else {
             val st = MurmurService.status.value
             // Serverless families have no relay at all — a live LAN peer

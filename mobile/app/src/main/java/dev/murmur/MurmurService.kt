@@ -34,6 +34,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
@@ -153,6 +154,7 @@ class MurmurService : Service() {
                         name = secrets.deviceName,
                         role = "auth",
                         token_hex = secrets.authTokenHex(),
+                        proto_v = Envelope.VERSION,
                     )
                 },
                 scope = scope,
@@ -194,6 +196,16 @@ class MurmurService : Service() {
         hub.wire(NotifyFeature())
         if (!serverless) relay.start()
         lan.start()
+        // Shares queued while the service was down go out on first
+        // transport readiness — the relay for serverful, any live link
+        // for serverless.
+        scope.launch {
+            status.first { it.relay == Relay.State.ONLINE || it.lanPeers.isNotEmpty() }
+            dev.murmur.core.PendingPush.drain(this@MurmurService).forEach {
+                android.util.Log.i("MurmurService", "delivering queued share (${it.length}B)")
+                pushClipboard(it)
+            }
+        }
         var seenPeers = emptySet<String>()
         scope.launch {
             lan.peersFlow.collect { p ->
@@ -375,6 +387,11 @@ class MurmurService : Service() {
     /** Seal and enqueue an E2E message. */
     fun send(msg: Msg, to: String = Envelope.ALL) {
         val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
+        if (pt.size > Envelope.MAX_PAYLOAD) {
+            android.util.Log.w("MurmurService",
+                "message over wire cap (${pt.size}B > ${Envelope.MAX_PAYLOAD}B) — dropped")
+            return
+        }
         val env = Envelope(
             v = Envelope.VERSION,
             from = secrets.deviceId!!,

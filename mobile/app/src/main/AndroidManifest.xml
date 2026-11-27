@@ -97,6 +97,18 @@
                 android:value="true" />
         </service>
 
+        <!-- received image clips are shared with pasting apps via a
+             cache-backed content Uri — never world-readable -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <receiver
             android:name=".ExitReceiver"
             android:exported="false" />
