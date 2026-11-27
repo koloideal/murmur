@@ -10,10 +10,10 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.IBinder
 import android.util.Base64
-import dev.murmur.bridge.ClipboardBridge
 import dev.murmur.bridge.MediaBridge
-import dev.murmur.bridge.NotificationBridge
 import dev.murmur.core.Envelope
+import dev.murmur.core.FeatureHub
+import dev.murmur.core.PresenceTable
 import dev.murmur.core.FamilyKey
 import dev.murmur.core.LanLink
 import dev.murmur.core.Msg
@@ -22,6 +22,11 @@ import dev.murmur.core.Control
 import dev.murmur.core.DeviceInfo
 import dev.murmur.core.Secrets
 import dev.murmur.core.protoJson
+import dev.murmur.feature.ClipboardFeature
+import dev.murmur.feature.KeyringFeature
+import dev.murmur.feature.MediaFeature
+import dev.murmur.feature.NotifyFeature
+import dev.murmur.feature.PresenceFeature
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,8 +60,10 @@ class MurmurService : Service() {
     private lateinit var media: MediaBridge
     private lateinit var identity: dev.murmur.core.IdentityKey
 
-    /** device → (state, ts), mirrored from Presence broadcasts. */
-    private val presence = mutableMapOf<String, Pair<String, Long>>()
+    /** Laptop presence + the active-device election — fed by the
+     *  presence feature, read by the clipboard feature's apply rule. */
+    private val presenceTable = PresenceTable()
+    private val hub = FeatureHub()
 
     /** Recently seen (sender, seq) — frames arrive over both the LAN
      *  early-copy path and the relay; the duplicate collapses here.
@@ -171,6 +178,20 @@ class MurmurService : Service() {
             familyName = secrets.familyName,
             startedAtMs = android.os.SystemClock.elapsedRealtime(),
         )
+        // Feature hub — mirrors murmurd's feature.rs: adding a feature
+        // never touches the pipeline below, it wires in here.
+        hub.wire(PresenceFeature(presenceTable))
+        hub.wire(KeyringFeature(
+            secrets, identity, presenceTable, secrets.deviceId!!,
+            send = { msg, to -> send(msg, to) },
+            onKeyRotated = { newKey, epoch ->
+                key = newKey
+                status.update { it.copy(keyEpoch = epoch) }
+            },
+        ))
+        hub.wire(ClipboardFeature(this, secrets) { activeDevice() })
+        hub.wire(MediaFeature(media))
+        hub.wire(NotifyFeature())
         if (!serverless) relay.start()
         lan.start()
         var seenPeers = emptySet<String>()
@@ -327,36 +348,7 @@ class MurmurService : Service() {
     }
 
     private fun announceIdentity(to: String = Envelope.ALL) =
-        send(Msg.Identity(identity.publicB64, "phone", secrets.deviceName, PHONE_CAPS.toList()), to)
-
-    /** TOFU: the first identity a member announces under the current
-     *  family key is the one we trust for its key rotations. */
-    private fun pin(from: String, id: Msg.Identity) {
-        if (from == secrets.deviceId || from in secrets.revokedIds) return
-        id.name?.let { secrets.peerNames = secrets.peerNames + (from to it) }
-        val roster = secrets.roster
-        if (roster.containsKey(from)) return
-        secrets.roster = roster + (from to (id.pub_b64 to id.kind))
-        announceIdentity(to = from) // they may have missed ours
-    }
-
-    /** Adopt a rotation sealed to our identity by a pinned laptop.
-     *  Newer epoch wins; same epoch → smaller rotator id (two laptops
-     *  rotating at once still converge). */
-    private fun applyRotation(from: String, r: Msg.KeyRotate) {
-        val cur = secrets.keyEpoch
-        val rot = secrets.keyRotator
-        val newer = r.epoch > cur || (r.epoch == cur && rot != null && from < rot)
-        if (!newer) return
-        val rotatorPub = secrets.roster[from]?.first ?: return
-        val mine = r.keys.firstOrNull { it.device_id == secrets.deviceId } ?: return
-        val newKey = identity.openRekey(rotatorPub, r.epoch, mine.sealed_b64) ?: return
-        secrets.rotateFamilyKey(newKey, r.epoch, from, r.revoked)
-        key = FamilyKey.fromBytes(newKey)
-        r.revoked.forEach { presence.remove(it) }
-        status.update { it.copy(keyEpoch = r.epoch) }
-        announceIdentity()
-    }
+        send(Msg.Identity(identity.publicB64, "phone", secrets.deviceName, KeyringFeature.PHONE_CAPS), to)
 
     /** Push the locally edited name to the registry. */
     fun pushName() {
@@ -417,23 +409,9 @@ class MurmurService : Service() {
         )
     }
 
-    /** Active laptop = newest `active` presence; ties → smaller id. The
-     *  same deterministic rule murmurd uses, computed over laptop ids only
-     *  (the phone never reports presence). */
-    fun activeDevice(): String? {
-        // Same election as murmurd::active_node: newest active wins,
-        // ties → smaller id, and anything silent past the stale cutoff
-        // is dead — a crashed "active" laptop must not win forever or
-        // clips/commands route to a ghost.
-        val cutoff = System.currentTimeMillis() / 1000 - PRESENCE_STALE_S
-        return presence
-            .filterValues { (state, ts) -> state == "active" && ts >= cutoff }
-            .maxWithOrNull(
-                compareBy<Map.Entry<String, Pair<String, Long>>> { it.value.second }
-                    .thenByDescending { it.key },
-            )
-            ?.key
-    }
+    /** Active laptop by the family election — delegates to the
+     *  presence table; see PresenceTable.activeDevice for the rule. */
+    fun activeDevice(): String? = presenceTable.activeDevice()
 
     private fun onEnvelope(env: Envelope) {
         // Cleartext control replies (Devices) — handled before decrypt.
@@ -475,21 +453,9 @@ class MurmurService : Service() {
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
 
-        when (msg) {
-            is Msg.Presence -> presence[env.from] = msg.state to msg.ts
-            is Msg.MediaCommand -> media.execute(msg)
-            is Msg.Clipboard -> {
-                // Phone-side rule: apply only clips from the active laptop.
-                android.util.Log.d("ClipboardBridge", "clip from ${msg.origin} active=${activeDevice()}")
-                if (msg.origin == activeDevice() &&
-                    secrets.clipEnabled && secrets.clipRecv
-                ) ClipboardBridge.apply(this, msg)
-            }
-            is Msg.NotificationDismiss -> NotificationBridge.requestCancel(msg.key)
-            is Msg.Identity -> pin(env.from, msg)
-            is Msg.KeyRotate -> applyRotation(env.from, msg)
-            else -> Unit // Notification/MediaState are phone-originated
-        }
+        // Tag-dispatch to the wired features — same invariant as
+        // murmurd: dedupe happened above, features see a frame once.
+        hub.dispatch(env.from, msg)
     }
 
     private fun statusNotification(text: String): Notification {
@@ -575,7 +541,6 @@ class MurmurService : Service() {
     )
 
     companion object {
-        private val PHONE_CAPS = listOf("clipboard", "media", "notify")
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
         internal const val PAUSED_ID = 2
@@ -587,9 +552,6 @@ class MurmurService : Service() {
          *  in-flight duplicate — the LAN early copy is never that late;
          *  it's a peer restart (seq resets to 1). */
         private const val RESTART_GAP = 64L
-        /** 2.5× the 60s presence heartbeat — mirrors murmurd's
-         *  PRESENCE_STALE. Older entries lose the election. */
-        private const val PRESENCE_STALE_S = 150L
 
         /** The dashboard is on screen — gates the device-list poller. */
         val uiVisible = MutableStateFlow(false)
