@@ -193,4 +193,67 @@ mod tests {
             assert!(env.open(&key).is_err(), "foreign family frames die at the seal");
         });
     }
+
+    /// Simultaneous-dial tie-break: the socket dialed by the smaller
+    /// device id must win on both sides independently, or each end
+    /// closes the socket the other one keeps — the flap loop seen on
+    /// real wifi. The matrix pins the decision table.
+    #[test]
+    fn lan_adopt_tiebreak_matrix() {
+        use crate::lan::{LinkDir, Transport, winner_dir};
+        use crate::links::AdoptOutcome;
+        with_env(|| {
+            let family = FamilyKey::random();
+            // me = 0x10; peer_big = 0x20 (I am smaller), peer_small = 0x01.
+            let (shared, _o, _l) = node(0x10, &family);
+            let peer_big = DeviceId([0x20; 8]);
+            let peer_small = DeviceId([0x01; 8]);
+
+            assert_eq!(winner_dir(shared.id, peer_big), LinkDir::Outbound);
+            assert_eq!(winner_dir(shared.id, peer_small), LinkDir::Inbound);
+
+            let mk = || tokio::sync::mpsc::unbounded_channel().0;
+
+            // Fresh adopt always succeeds.
+            let a = mk();
+            assert_eq!(
+                shared.lan_adopt(peer_big, a.clone(), Transport::Lan, LinkDir::Outbound),
+                AdoptOutcome::Adopted
+            );
+            // Same channel is a no-op.
+            assert_eq!(
+                shared.lan_adopt(peer_big, a, Transport::Lan, LinkDir::Outbound),
+                AdoptOutcome::Kept
+            );
+            // Winner direction (Outbound for the bigger peer) holds: an
+            // inbound challenger is rejected.
+            assert_eq!(
+                shared.lan_adopt(peer_big, mk(), Transport::Lan, LinkDir::Inbound),
+                AdoptOutcome::Rejected
+            );
+            // A winner-direction challenger replaces even a winner.
+            assert_eq!(
+                shared.lan_adopt(peer_big, mk(), Transport::Lan, LinkDir::Outbound),
+                AdoptOutcome::Adopted
+            );
+
+            // Mirror image: peer_small is the dialer of the surviving
+            // socket, so inbound wins for me. A loser-direction incumbent
+            // must yield to the winner-direction challenger.
+            let loser = mk();
+            assert_eq!(
+                shared.lan_adopt(peer_small, loser, Transport::Lan, LinkDir::Outbound),
+                AdoptOutcome::Adopted // no incumbent yet — adopted provisionally
+            );
+            assert_eq!(
+                shared.lan_adopt(peer_small, mk(), Transport::Lan, LinkDir::Inbound),
+                AdoptOutcome::Adopted // inbound is winner here — evicts
+            );
+            // And once the winner holds, the loser is refused.
+            assert_eq!(
+                shared.lan_adopt(peer_small, mk(), Transport::Lan, LinkDir::Outbound),
+                AdoptOutcome::Rejected
+            );
+        });
+    }
 }

@@ -36,17 +36,48 @@ fn save_lan_addrs(m: &HashMap<DeviceId, std::net::SocketAddr>) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdoptOutcome {
+    /// Freshly registered or replaced an older link.
+    Adopted,
+    /// This channel was already the registered one — nothing changed.
+    Kept,
+    /// Lost the simultaneous-dial tie-break — close the socket.
+    Rejected,
+}
+
 impl Shared {
     /// Link bookkeeping for [`crate::lan`]. Called on every valid
     /// frame — a no-op while the map already points at this channel,
     /// so it never tramples the link's measured RTT.
-    pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>, transport: crate::lan::Transport) {
+    /// Adopt a validated link. Simultaneous dials (both sides redial
+    /// remembered addresses) briefly hold two sockets per pair; the
+    /// tie-break keeps only the one dialed by the smaller device id —
+    /// both sides compute it independently and close the same loser,
+    /// so the flap of crossing close-orders can't happen. Returns
+    /// [AdoptOutcome::Rejected] when this link loses: the caller closes
+    /// the socket instead of letting its reader live on unregistered.
+    pub fn lan_adopt(
+        &self,
+        peer: DeviceId,
+        tx: mpsc::UnboundedSender<Envelope>,
+        transport: crate::lan::Transport,
+        dir: crate::lan::LinkDir,
+    ) -> AdoptOutcome {
         {
             let mut lan = self.lan.lock().unwrap();
-            if matches!(lan.get(&peer), Some((t, _)) if t.same_channel(&tx)) {
-                return;
+            if matches!(lan.get(&peer), Some((t, _, _)) if t.same_channel(&tx)) {
+                return AdoptOutcome::Kept;
             }
-            lan.insert(peer, (tx, transport));
+            let winner = crate::lan::winner_dir(self.id, peer);
+            if let Some((_, _, old_dir)) = lan.get(&peer) {
+                let old_wins = *old_dir == winner;
+                let new_wins = dir == winner;
+                if old_wins && !new_wins {
+                    return AdoptOutcome::Rejected;
+                }
+            }
+            lan.insert(peer, (tx, transport, dir));
             self.lan_rtt.lock().unwrap().insert(peer, 0);
         }
         // The link-up is a rendezvous: announce so the peer pins our
@@ -56,12 +87,13 @@ impl Shared {
         // *only* rendezvous — there is no relay connect to hang this on.
         self.announce_identity();
         self.broadcast_presence();
+        AdoptOutcome::Adopted
     }
     /// Push a pre-built envelope down a live link — for frames that
     /// must ride a specific key (a re-key sealed under the peer's old
     /// key), not the current-key seal `send` always applies.
     pub(crate) fn lan_send(&self, peer: &DeviceId, env: Envelope) {
-        if let Some((tx, _)) = self.lan.lock().unwrap().get(peer) {
+        if let Some((tx, ..)) = self.lan.lock().unwrap().get(peer) {
             let _ = tx.send(env);
         }
     }
@@ -72,7 +104,7 @@ impl Shared {
             .lock()
             .unwrap()
             .iter()
-            .map(|(p, (_, t))| (*p, *t))
+            .map(|(p, (_, t, _))| (*p, *t))
             .collect()
     }
 
@@ -95,10 +127,10 @@ impl Shared {
         let mut g = self.lan.lock().unwrap();
         let removed: Vec<DeviceId> = g
             .iter()
-            .filter(|(_, (t, _))| t.same_channel(tx))
+            .filter(|(_, (t, ..))| t.same_channel(tx))
             .map(|(p, _)| *p)
             .collect();
-        g.retain(|_, (t, _)| !t.same_channel(tx));
+        g.retain(|_, (t, ..)| !t.same_channel(tx));
         let remaining: std::collections::HashSet<DeviceId> = g.keys().copied().collect();
         drop(g);
         self.lan_rtt

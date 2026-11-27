@@ -40,10 +40,21 @@ class LanLink(
      *  broadcast entirely. */
     private val sendRelay: (Msg) -> Unit = {},
 ) {
+    /** Which end of the socket we are — the simultaneous-dial
+     *  tie-break needs it. */
+    private enum class Dir { Inbound, Outbound }
+
     /** One live link to a peer — socket + writer handle + last RTT. */
-    private class Link(val sock: Socket, val out: OutputStream) {
+    private class Link(val sock: Socket, val out: OutputStream, val dir: Dir) {
         @Volatile var rttMs: Long? = null
     }
+
+    /** Mirror-symmetric with murmurd: the socket dialed by the smaller
+     *  device id survives a simultaneous dial; both sides compute this
+     *  independently and close the same loser, so no crossing close
+     *  order can flap the pair. Hex-string compare == byte compare. */
+    private fun winnerDir(peer: String): Dir =
+        if (peer < selfId) Dir.Inbound else Dir.Outbound
 
     private val links = ConcurrentHashMap<String, Link>()
 
@@ -334,7 +345,7 @@ class LanLink(
                 runCatching { s.close() }
                 break
             }
-            scope.launch(Dispatchers.IO) { serveLink(s) }
+            scope.launch(Dispatchers.IO) { serveLink(s, Dir.Inbound) }
         }
     }
 
@@ -346,7 +357,10 @@ class LanLink(
         while (started) {
             delay(DIAL_MS + (0L..DIAL_JITTER_MS).random())
             for ((peer, addr) in peerAddrs) {
-                if (links.containsKey(peer) || !started) continue
+                // Skip only when the winner-direction link is up —
+                // a loser-direction registration is transient and must
+                // not starve the socket that survives the tie-break.
+                if (links[peer]?.dir == winnerDir(peer) || !started) continue
                 val s = runCatching {
                     Socket().apply {
                         connect(InetSocketAddress(addr.hostString, addr.port), DIAL_TIMEOUT_MS)
@@ -357,17 +371,22 @@ class LanLink(
                 val ok = runCatching {
                     s.getOutputStream().apply { write((hi.toJson() + "\n").toByteArray()); flush() }
                 }.isSuccess
-                if (!ok || links.containsKey(peer)) {
+                if (!ok) {
                     runCatching { s.close() }
                     continue
                 }
+                // A link appearing meanwhile is NOT a reason to close:
+                // this socket may be the winner-direction one — the
+                // tie-break in serveLink decides deterministically.
+                // Killing it here on a blind containsKey starved the
+                // surviving socket whenever both sides dialed at once.
                 Log.i(TAG, "dialed ${addr.hostString}:${addr.port} ($peer)")
-                scope.launch(Dispatchers.IO) { serveLink(s) }
+                scope.launch(Dispatchers.IO) { serveLink(s, Dir.Outbound) }
             }
         }
     }
 
-    private fun serveLink(s: Socket) {
+    private fun serveLink(s: Socket, dir: Dir) {
         // The peer's own broadcasts reach the link every few seconds;
         // longer silence = dead transport (Wi-Fi off kills the route
         // without RST, and TCP alone would idle for minutes).
@@ -377,7 +396,7 @@ class LanLink(
         while (true) {
             val read = runCatching { readLineBounded(r) }
             val line = read.getOrNull() ?: run {
-                Log.i(TAG, "link read ended (${read.exceptionOrNull()?.javaClass?.simpleName}: ${read.exceptionOrNull()?.message})")
+                Log.i(TAG, "link read ended ($dir, ${read.exceptionOrNull()?.javaClass?.simpleName}: ${read.exceptionOrNull()?.message})")
                 break
             }
             if (line.isEmpty()) continue
@@ -397,12 +416,23 @@ class LanLink(
             // peer replaces the stale link; different peers coexist.
             if (peerId != env.from) {
                 peerId = env.from
+                val winner = winnerDir(env.from)
+                links[env.from]?.let { existing ->
+                    // Simultaneous dial: two sockets live for one peer.
+                    // Keep the winner-direction one — close the loser,
+                    // even if the loser is this very socket.
+                    if (existing.dir == winner && dir != winner) {
+                        Log.i(TAG, "lan link to ${env.from}: simultaneous dial, this socket loses")
+                        runCatching { s.close() }
+                        return
+                    }
+                }
                 val fresh = !links.containsKey(env.from)
                 // A reconnect replaces the stale link — close the old
                 // socket so its reader thread exits too.
-                links.put(env.from, Link(s, s.getOutputStream()))
+                links.put(env.from, Link(s, s.getOutputStream(), dir))
                     ?.let { runCatching { it.sock.close() } }
-                if (fresh) Log.i(TAG, "lan link up with ${env.from}")
+                if (fresh) Log.i(TAG, "lan link up with ${env.from} ($dir)")
                 // Fallback rendezvous until its beacon names the port.
                 if (!peerAddrs.containsKey(env.from)) {
                     s.inetAddress?.hostAddress?.let { rememberAddr(env.from, it, LINK_PORT) }

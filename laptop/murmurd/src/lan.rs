@@ -55,6 +55,30 @@ pub enum Transport {
     Usb,
 }
 
+/// Which end of the socket we are. Simultaneous dials are legitimate
+/// (both sides redial remembered addresses — the DHCP-change recovery
+/// path), so a pair can hold two connections for a moment. Both sides
+/// then close the same loser independently — the rule is mirror-
+/// symmetric: the socket dialed by the smaller device id wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkDir {
+    /// We accepted this socket — the peer dialed us.
+    Inbound,
+    /// We dialed this socket.
+    Outbound,
+}
+
+/// The winner direction from my perspective: if the peer's id is the
+/// smaller one, the surviving socket is the one *it* dialed — inbound
+/// for me; otherwise the one I dialed.
+pub fn winner_dir(me: murmur_proto::DeviceId, peer: murmur_proto::DeviceId) -> LinkDir {
+    if peer < me {
+        LinkDir::Inbound
+    } else {
+        LinkDir::Outbound
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct DialHint {
     pub peer: Option<murmur_proto::DeviceId>,
@@ -283,10 +307,24 @@ async fn dial_loop(
     let mut last_dial = std::collections::HashMap::new();
     while let Some(hint) = rx.recv().await {
         if let Some(peer) = hint.peer {
+            // A revoked device keeps beaconing until its owner notices
+            // — dialing it is pure churn: the link can't ever validate.
+            if shared.keys.read().unwrap().revoked.contains(&peer) {
+                continue;
+            }
             if hint.kind != DeviceKind::Phone && shared.id > peer {
                 continue; // the lower-id side initiates
             }
-            if shared.lan_peers().contains(&peer)
+            // Skip only when the *winner-direction* link is already
+            // up: a loser-direction registration is transient by
+            // design and must not starve the surviving socket. The
+            // phone-half of this rule is what lets the winner ever
+            // form when both sides redial each other.
+            let winner_up = {
+                let lan = shared.lan.lock().unwrap();
+                matches!(lan.get(&peer), Some((_, _, d)) if *d == winner_dir(shared.id, peer))
+            };
+            if winner_up
                 || (!hint.trusted && !in_local_subnet(hint.addr))
             {
                 continue;
@@ -310,7 +348,7 @@ async fn dial_loop(
                     Some(peer) => info!("lan: dialed {addr} ({peer})"),
                     None => info!("lan: dialed {addr} (manual)"),
                 }
-                spawn_link(&shared, &hub, s, hint.transport);
+                spawn_link(&shared, &hub, s, hint.transport, LinkDir::Outbound);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }
@@ -326,17 +364,27 @@ async fn redial_loop(shared: Arc<Shared>) {
     let mut tick = tokio::time::interval(DIAL_EVERY);
     loop {
         tick.tick().await;
-        let linked: std::collections::HashSet<_> =
-            shared.lan_peers().into_iter().collect();
+        let linked: std::collections::HashSet<_> = {
+            let lan = shared.lan.lock().unwrap();
+            lan.iter()
+                .filter(|(p, (_, _, d))| *d == winner_dir(shared.id, **p))
+                .map(|(p, _)| *p)
+                .collect()
+        };
         let roster = shared.roster.lock().unwrap().clone();
         for (peer, addr) in shared.lan_addrs() {
             if linked.contains(&peer) {
                 continue;
             }
-            let kind = roster
-                .get(&peer)
-                .map(|m| m.kind)
-                .unwrap_or(DeviceKind::Phone);
+            // A device dropped from the roster must not be redialed
+            // from the stale address cache — failed pairings register
+            // members whose joiner never came back, and every redial
+            // to such a phantom is a socket the real peer has to
+            // tie-break away.
+            let kind = match roster.get(&peer) {
+                Some(m) => m.kind,
+                None => continue,
+            };
             let _ = shared.lan_dial.send(DialHint {
                 peer: Some(peer),
                 addr: addr.ip(),
@@ -357,7 +405,7 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
             Ok((s, addr)) => {
                 let _ = s.set_nodelay(true);
                 info!("lan: accepted {addr}");
-                spawn_link(shared, hub, s, Transport::Lan); // acceptor: usb inference happens dial-side, laptops dial phones
+                spawn_link(shared, hub, s, Transport::Lan, LinkDir::Inbound); // acceptor: usb inference happens dial-side, laptops dial phones
             }
             Err(e) => {
                 warn!("lan: accept: {e}");
@@ -392,6 +440,7 @@ fn spawn_link(
     hub: &Arc<Hub>,
     s: TcpStream,
     transport: Transport,
+    dir: LinkDir,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
     // tokio::TcpStream has no try_clone — bounce through std to grab a
@@ -448,6 +497,7 @@ fn spawn_link(
         validated,
         remote_ip,
         transport,
+        dir,
     ));
     tokio::spawn(ping_loop(shared.clone(), tx_hi));
 }
@@ -524,6 +574,7 @@ async fn link_reader(
     validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
     remote_ip: Option<std::net::IpAddr>,
     transport: Transport,
+    dir: LinkDir,
 ) {
     // Links have no handshake — an unauthenticated LAN peer could feed
     // newline-free garbage forever. `Take` bounds each line at the wire
@@ -593,14 +644,19 @@ async fn link_reader(
                 // Each peer owns its own map slot — a second device
                 // links alongside, never evicts.
                 if !shared.lan_peers().contains(&env.from) {
-                    info!("lan: link up with {}", env.from);
+                    info!("lan: link up with {} ({dir:?})", env.from);
                     // Proven reachable → worth remembering for the
                     // beacon-free redial path.
                     if let Some(ip) = remote_ip {
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, LINK_PORT));
                     }
                 }
-                shared.lan_adopt(env.from, tx.clone(), transport);
+                if shared.lan_adopt(env.from, tx.clone(), transport, dir)
+                    == crate::links::AdoptOutcome::Rejected
+                {
+                    info!("lan: {} link down (tie-break loser)", env.from);
+                    break;
+                }
                 // The peer's advertised lan_addr:tcp_port is the
                 // better truth — it's where IT accepts dials.
                 if let Message::LanBeacon {

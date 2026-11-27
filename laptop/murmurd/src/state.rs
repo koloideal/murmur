@@ -43,7 +43,7 @@ pub struct Shared {
     /// Live LAN links keyed by peer — a star/mesh fast-path: several
     /// devices can each hold a direct link, unicast picks its peer,
     /// broadcast gets an early copy on every link.
-    pub(crate) lan: Mutex<HashMap<DeviceId, (mpsc::UnboundedSender<Envelope>, crate::lan::Transport)>>,
+    pub(crate) lan: Mutex<HashMap<DeviceId, (mpsc::UnboundedSender<Envelope>, crate::lan::Transport, crate::lan::LinkDir)>>,
     /// This node's last measured round-trip per peer in ms
     /// (0 = unknown); each peer measures its own on its side.
     pub(crate) lan_rtt: Mutex<HashMap<DeviceId, u64>>,
@@ -165,12 +165,12 @@ impl Shared {
                 // Broadcast rides every live link — each peer gets its
                 // early copy; the relay copy follows as always.
                 Route::All => {
-                    for (tx, _) in lan.values() {
+                    for (tx, ..) in lan.values() {
                         let _ = tx.send(env.clone());
                     }
                 }
                 Route::Device(d) => {
-                    if let Some((tx, _)) = lan.get(d) {
+                    if let Some((tx, ..)) = lan.get(d) {
                         let _ = tx.send(env.clone());
                     }
                 }
