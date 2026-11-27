@@ -151,12 +151,21 @@ fun StatusCard() {
                 // amplitude swell: the wave inhales once and settles.
                 // Emission happens only at feature truth-points, so
                 // heartbeats/reposts can't fake liveliness here.
-                val pulses = remember { mutableStateListOf<Pair<Long, PulseKind>>() }
+                val pulses = remember { mutableStateListOf<GhostPulse>() }
                 LaunchedEffect(Unit) {
                     EventPulses.flow.collect { kind ->
                         val now = System.currentTimeMillis()
-                        pulses.add(now to kind)
-                        pulses.removeAll { now - it.first > PULSE_MS }
+                        // Each pulse rolls its own shape once: jump height
+                        // and packet width vary within the range that
+                        // stays inside the card, so a burst of events
+                        // reads as distinct leaps, not one blob.
+                        pulses.add(GhostPulse(
+                            t0 = now,
+                            kind = kind,
+                            lift = (14..24).random().toFloat(),
+                            span = (45..85).random().toFloat() / 100f,
+                        ))
+                        pulses.removeAll { now - it.t0 > PULSE_MS }
                     }
                 }
                 // Live link → the wave bleeds to the card's edges (the
@@ -179,39 +188,60 @@ fun StatusCard() {
                         }
                         .height(56.dp),
                 ) {
-                    // sin(pi·p) is exactly one smooth inhale per event:
-                    // zero at birth, crest mid-life, zero at death.
-                    // Overlapping events superpose; the hue follows the
-                    // dominant kind (clipboard orange, notify blue,
-                    // media green — gruvbox accents).
+                    // The main wave never reacts — liveliness is the
+                    // ghosts'. One event = one wave-packet torn off the
+                    // wave: same sine, windowed to a central piece (Hann
+                    // taper, so it reads as a chunk of the wave rather
+                    // than a clipped copy), dimmer, jumping up off the
+                    // baseline and settling back onto it — sin(pi·p) is
+                    // zero at both ends by construction. Kind shows only
+                    // as a faint tint in the ghost.
                     val nowMs = System.currentTimeMillis()
-                    var boost = 0f
-                    var rw = 0f; var gw = 0f; var bw = 0f
-                    for ((t0, kind) in pulses) {
-                        val p = (nowMs - t0) / PULSE_MS.toFloat()
+                    val amp = 13.dp.toPx()
+                    val wl = size.width / 3.2f
+                    for (pulse in pulses) {
+                        val p = (nowMs - pulse.t0) / PULSE_MS.toFloat()
                         if (p !in 0f..1f) continue
                         val env = sin(PI.toFloat() * p)
-                        boost += env
-                        val kc = when (kind) {
+                        val tint = when (pulse.kind) {
                             PulseKind.CLIP -> PULSE_CLIP
                             PulseKind.NOTIFY -> PULSE_NOTIFY
                             PulseKind.MEDIA -> PULSE_MEDIA
                         }
-                        rw += kc.red * env; gw += kc.green * env; bw += kc.blue * env
+                        val ghostColor = lerp(
+                            color.copy(alpha = 0.34f * env),
+                            tint.copy(alpha = 0.34f * env),
+                            0.55f,
+                        )
+                        // Hann-ish taper over a random-width central span
+                        // of the wave — outside the span the packet is
+                        // zero, so it reads as a piece torn off the wave.
+                        val span = pulse.span
+                        val lo = (1f - span) / 2f
+                        drawPath(
+                            wavePath(size.width, size.height / 2f,
+                                amplitude = amp,
+                                wavelength = wl,
+                                phase = phase,
+                                offsetY = -pulse.lift.dp.toPx() * env,
+                                ampWindow = { t ->
+                                    val u = (t - lo) / span
+                                    if (u in 0f..1f) {
+                                        val s = sin(PI.toFloat() * u)
+                                        s * s
+                                    } else 0f
+                                }),
+                            ghostColor,
+                            style = Stroke(width = 3.dp.toPx()),
+                        )
                     }
-                    boost = boost.coerceAtMost(1.8f)
-                    val base = color.copy(alpha = 0.85f)
-                    val waveColor = if (boost > 0.01f) {
-                        val mix = Color(rw / boost, gw / boost, bw / boost)
-                        lerp(base, mix, (boost / 1.8f).coerceAtMost(1f) * 0.85f)
-                    } else base
                     drawPath(
                         wavePath(size.width, size.height / 2f,
-                            amplitude = 13.dp.toPx() * (1f + boost),
-                            wavelength = size.width / 3.2f,
+                            amplitude = amp,
+                            wavelength = wl,
                             phase = phase),
-                        waveColor,
-                        style = Stroke(width = 4.dp.toPx() * (1f + boost * 0.4f)),
+                        color.copy(alpha = 0.85f),
+                        style = Stroke(width = 4.dp.toPx()),
                     )
                 }
                 Text(
@@ -478,8 +508,19 @@ private fun NameRow(name: String, onSave: (String) -> Unit) {
 }
 
 
-/** One pulse's full inhale-exhale, milliseconds. */
+/** One pulse's full leap, milliseconds. */
 private const val PULSE_MS = 1400L
-private val PULSE_CLIP = Color(0xFFD65D0E)
-private val PULSE_NOTIFY = Color(0xFF458588)
-private val PULSE_MEDIA = Color(0xFFB8BB26)
+
+/** A wave-packet ghost: when it was born, what kind tore it off, and
+ *  its rolled-once shape — lift in dp, span as a fraction of width. */
+private data class GhostPulse(
+    val t0: Long,
+    val kind: PulseKind,
+    val lift: Float,
+    val span: Float,
+)
+
+// Shades of green — one family, distinguishable kinds.
+private val PULSE_CLIP = Color(0xFFB8BB26)   // bright gruvbox green
+private val PULSE_NOTIFY = Color(0xFF8EC07C) // aqua-green
+private val PULSE_MEDIA = Color(0xFF98971A)  // deep olive

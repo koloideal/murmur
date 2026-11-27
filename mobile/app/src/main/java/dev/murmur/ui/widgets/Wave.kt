@@ -19,13 +19,15 @@ fun wavePath(
     phase: Float = 0f,
     fromX: Float = 0f,
     toX: Float = width,
+    offsetY: Float = 0f,
+    ampWindow: (Float) -> Float = { 1f },
 ): Path {
     val p = Path()
     var x = fromX
-    p.moveTo(x, centerY + amplitude * sin(TAU * x / wavelength + phase))
+    p.moveTo(x, centerY + offsetY + amplitude * ampWindow(x / width) * sin(TAU * x / wavelength + phase))
     while (x < toX) {
         x = (x + STEP).coerceAtMost(toX)
-        p.lineTo(x, centerY + amplitude * sin(TAU * x / wavelength + phase))
+        p.lineTo(x, centerY + offsetY + amplitude * ampWindow(x / width) * sin(TAU * x / wavelength + phase))
     }
     return p
 }
