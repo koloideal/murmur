@@ -47,6 +47,12 @@ struct Res {
     data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Machine-readable error class — the contract scripts branch on
+    /// (humans read `error`). Stable values: `offline` (target or relay
+    /// unreachable), `invalid` (bad request/args), `denied` (server
+    /// refused), absent/`internal` for everything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
 }
 
 impl Res {
@@ -55,14 +61,20 @@ impl Res {
             ok: true,
             data: Some(data),
             error: None,
+            kind: None,
         }
     }
 
     fn err(e: impl std::fmt::Display) -> Self {
+        Self::err_kind("internal", e)
+    }
+
+    fn err_kind(kind: &'static str, e: impl std::fmt::Display) -> Self {
         Self {
             ok: false,
             data: None,
             error: Some(e.to_string()),
+            kind: Some(kind),
         }
     }
 }
@@ -111,7 +123,7 @@ async fn handle(stream: tokio::net::UnixStream, shared: Arc<Shared>) -> anyhow::
             Ok(req) => dispatch(&shared, req).await,
             Err(e) => {
                 warn!("ctl parse: {e}");
-                Res::err("bad request")
+                Res::err_kind("invalid", "bad request")
             }
         };
         w.write_all(serde_json::to_string(&res)?.as_bytes()).await?;
@@ -222,7 +234,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                             "family": fam,
                             "devices": d,
                         })),
-                        _ => Res::err("no reply from server (offline?)"),
+                        _ => Res::err_kind("offline", "no reply from server (offline?)"),
                     }
                 }
                 Err(e) => Res::err(e),
@@ -255,7 +267,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                         )
                         .await;
                         match err {
-                            Ok(Some(reason)) => Res::err(reason),
+                            Ok(Some(reason)) => Res::err_kind("denied", reason),
                             _ => Res::ok(serde_json::json!(null)),
                         }
                     }
@@ -321,7 +333,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     });
                     Res::ok(serde_json::json!({"dialing": format!("{ip}:{port}")}))
                 }
-                Err(_) => Res::err("dial expects <ip> or <ip:port>"),
+                Err(_) => Res::err_kind("invalid", "dial expects <ip> or <ip:port>"),
             }
         }
     }

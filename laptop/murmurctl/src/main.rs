@@ -62,10 +62,39 @@ fn sock_path() -> PathBuf {
         .join("murmur.sock")
 }
 
+/// Exit-code contract for scripts:
+///   0 ok · 1 cli usage/other · 2 murmurd unreachable · 3 daemon
+///   reported failure · 4 the *target* is unreachable (kind=offline).
+/// Kinds ride the daemon's `kind` field; absent kinds are `internal`.
+
+/// murmurd answered `ok:false` — carries the machine-readable class.
+#[derive(Debug)]
+struct DaemonError {
+    kind: String,
+    msg: String,
+}
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+impl std::error::Error for DaemonError {}
+
+/// The control socket itself wouldn't connect — murmurd is down.
+#[derive(Debug)]
+struct DaemonDown(String);
+impl std::fmt::Display for DaemonDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for DaemonDown {}
+
 fn request(req: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let path = sock_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!("connect {} — is murmurd running?", path.display()))?;
+    let stream = UnixStream::connect(&path).map_err(|_| {
+        DaemonDown(format!("connect {} — is murmurd running?", path.display()))
+    })?;
     let mut w = stream.try_clone()?;
     w.write_all(serde_json::to_string(&req)?.as_bytes())?;
     w.write_all(b"\n")?;
@@ -79,8 +108,23 @@ fn ask(req: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     if res["ok"].as_bool() == Some(true) {
         Ok(res["data"].clone())
     } else {
-        anyhow::bail!("{}", res["error"].as_str().unwrap_or("daemon error"))
+        Err(DaemonError {
+            kind: res["kind"].as_str().unwrap_or("internal").to_string(),
+            msg: res["error"].as_str().unwrap_or("daemon error").to_string(),
+        }
+        .into())
     }
+}
+
+/// Map a failure to its script-visible exit code.
+fn exit_code(e: &anyhow::Error) -> i32 {
+    if e.downcast_ref::<DaemonDown>().is_some() {
+        return 2;
+    }
+    if let Some(de) = e.downcast_ref::<DaemonError>() {
+        return if de.kind == "offline" { 4 } else { 3 };
+    }
+    1
 }
 
 // ---------- tiny ansi kit (colors only on a tty) ----------
@@ -577,6 +621,16 @@ fn main() -> anyhow::Result<()> {
         print_help(&Paint::new());
         return Ok(());
     };
+    let r = dispatch(cmd);
+    if let Err(e) = r {
+        let code = exit_code(&e);
+        eprintln!("{e:#}");
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn dispatch(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
         Cmd::Status => cmd_status(),
         Cmd::Devices { all } => cmd_devices(all),
@@ -688,7 +742,7 @@ fn main() -> anyhow::Result<()> {
                         "  {}",
                         p.dim("host unreachable or murmur is not listening there")
                     );
-                    std::process::exit(1);
+                    std::process::exit(4); // target offline — the contract's kind=offline
                 }
             }
             println!(
@@ -731,11 +785,18 @@ fn main() -> anyhow::Result<()> {
                     p.green("✓"),
                     p.bold(name)
                 ),
-                None => println!(
-                    "  {} {}",
-                    p.red("✗"),
-                    "handshake never completed — wrong key family, firewall, or ghost host; the daemon will keep redialing in background"
-                ),
+                None => {
+                    println!(
+                        "  {} {}",
+                        p.red("✗"),
+                        "handshake never completed — wrong key family, firewall, or ghost host; the daemon will keep redialing in background"
+                    );
+                    // The honest verdict: no link exists. TCP-connect
+                    // proves nothing on middleboxed networks (hotspots
+                    // answer SYNs for dead addresses) — the handshake
+                    // is the only real signal, and it failed.
+                    std::process::exit(4);
+                }
             }
             Ok(())
         }
