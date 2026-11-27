@@ -174,7 +174,7 @@ impl Shared {
         );
     }
 
-    fn pin(&self, id: DeviceId, pub_b64: &str, kind: DeviceKind, name: Option<String>, caps: &[String]) {
+    pub(crate) fn pin(&self, id: DeviceId, pub_b64: &str, kind: DeviceKind, name: Option<String>, caps: &[String]) {
         if id == self.id
             || PairKey::public_from_b64(&pub_b64).is_err()
             || self.keys.read().unwrap().revoked.contains(&id)
@@ -270,7 +270,7 @@ impl Shared {
         self.persist_roster();
     }
 
-    fn apply_rotation(&self, from: DeviceId, epoch: u64, revoked: Vec<DeviceId>, keys: Vec<SealedKey>) {
+    pub(crate) fn apply_rotation(&self, from: DeviceId, epoch: u64, revoked: Vec<DeviceId>, keys: Vec<SealedKey>) {
         if from == self.id || !self.keys.read().unwrap().supersedes(epoch, from) {
             return;
         }

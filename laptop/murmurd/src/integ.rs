@@ -120,6 +120,66 @@ mod tests {
     }
 
     #[test]
+    fn key_rotation_flows_end_to_end() {
+        with_env(|| {
+            use murmur_proto::DeviceKind;
+            let family = FamilyKey::random();
+            let (a, mut a_out, mut a_lo) = node(1, &family);
+            let (b, _b_out, _b_lo) = node(2, &family);
+
+            // both nodes pin each other — in production Identity frames
+            // do this; here we seed the same roster state directly
+            for (node, peer_id, peer_pub) in [
+                (&a, DeviceId([2; 8]), b.identity.public_b64()),
+                (&b, DeviceId([1; 8]), a.identity.public_b64()),
+            ] {
+                node.pin(peer_id, &peer_pub, DeviceKind::Laptop, None, &[]);
+            }
+
+            // A rotates: the KeyRotate frame must leave under the OLD
+            // key so stragglers can read it
+            let old_key = a.keys.read().unwrap().current.clone();
+            a.rotate(vec![]).expect("rotate");
+            assert_eq!(a.keys.read().unwrap().epoch, 1);
+
+            // the wire carries whatever pin() announced too — drain
+            // until the rotation frame, exactly like a real link would
+            let mut found = None;
+            for _ in 0..8 {
+                let Some(env) = pump_one(&mut a_out, &mut a_lo) else { break };
+                let msg = env.open(&old_key).expect("rotation rides the pre-rotation key");
+                if let murmur_proto::Message::KeyRotate { epoch, revoked, keys } = msg {
+                    found = Some((env, epoch, revoked, keys));
+                    break;
+                }
+            }
+            let (env, epoch, revoked, keys) = found.expect("rotation frame emitted");
+
+            // B applies it exactly as its keyring feature would
+            b.apply_rotation(env.from, epoch, revoked, keys);
+            assert_eq!(b.keys.read().unwrap().epoch, 1, "B followed the rotation");
+            assert_eq!(
+                b.keys.read().unwrap().current.0,
+                a.keys.read().unwrap().current.0,
+                "both sides now hold the same family key"
+            );
+
+            // and post-rotation traffic really flows: A's new-key frame
+            // opens at B
+            a.send(Route::All, &Message::Presence { state: PresenceState::Active, ts: 7 })
+                .unwrap();
+            let mut env2 = None;
+            while let Some(e) = pump_one(&mut a_out, &mut a_lo) {
+                env2 = Some(e); // last frame on the wire is ours
+            }
+            let env2 = env2.unwrap();
+            assert!(env2.open(&old_key).is_err(), "post-rotation frames reject the old key");
+            let key_b = b.keys.read().unwrap().current.clone();
+            assert!(env2.open(&key_b).is_ok(), "B opens A's post-rotation traffic");
+        });
+    }
+
+    #[test]
     fn wrong_family_frames_never_open() {
         with_env(|| {
             let fam_a = FamilyKey::random();
