@@ -22,6 +22,9 @@ class KeyringFeature(
     private val send: (Msg, String) -> Unit,
     /** The transport key itself rotates — the service swaps it in. */
     private val onKeyRotated: (newKey: FamilyKey, epoch: Long) -> Unit,
+    /** A rotation arrived that revokes *us* — the family kicked this
+     *  device. The service stops itself; there is nothing to retry. */
+    private val onKicked: () -> Unit = {},
 ) : Feature {
     override val consumes = setOf("identity", "key_rotate")
 
@@ -36,7 +39,18 @@ class KeyringFeature(
     private fun pin(from: String, id: Msg.Identity) {
         if (from == selfId || from in secrets.revokedIds) return
         id.name?.let { secrets.peerNames = secrets.peerNames + (from to it) }
-        val roster = secrets.roster
+        var roster = secrets.roster
+        // Re-pairing reuse: the inviter mints a fresh device id per
+        // pairing, but the long-term identity key survives — the same
+        // physical device reappears under a new id with a pubkey the
+        // roster already knows. Keeping both ghosts the stale one.
+        val replaced = roster.entries
+            .filter { it.key != from && it.value.first == id.pub_b64 }
+            .map { it.key }
+        if (replaced.isNotEmpty()) {
+            android.util.Log.i("KeyringFeature", "pin: $from replaces $replaced — same identity key")
+            roster = roster - replaced
+        }
         if (roster.containsKey(from)) return
         secrets.roster = roster + (from to (id.pub_b64 to id.kind))
         announceBack(from)
@@ -50,6 +64,11 @@ class KeyringFeature(
         val rot = secrets.keyRotator
         val newer = r.epoch > cur || (r.epoch == cur && rot != null && from < rot)
         if (!newer) return
+        if (selfId in r.revoked) {
+            android.util.Log.w("KeyringFeature", "this device was revoked by the rotation — kicked")
+            onKicked()
+            return
+        }
         val rotatorPub = secrets.roster[from]?.first ?: return
         val mine = r.keys.firstOrNull { it.device_id == selfId } ?: return
         val newKey = identity.openRekey(rotatorPub, r.epoch, mine.sealed_b64) ?: return

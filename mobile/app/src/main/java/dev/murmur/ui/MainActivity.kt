@@ -60,7 +60,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // Publishes settledFlow before the first frame decides which
         // world to show.
-        Secrets(this)
+        val secrets = Secrets(this)
+        // Pairing's celebration normally starts the service — but a
+        // process death in the seconds between secrets-save and the
+        // burst's last frame leaves the phone paired-yet-silent. The
+        // start is idempotent, so kick it unconditionally.
+        if (secrets.deviceId != null && dev.murmur.MurmurService.instance == null) {
+            dev.murmur.MurmurService.start(this)
+        }
         setContent {
             MurmurTheme {
                 val grants = rememberGrants()

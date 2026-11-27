@@ -183,6 +183,24 @@ impl Shared {
         }
         {
             let mut r = self.roster.lock().unwrap();
+            // Re-pairing reuse: the inviter mints a fresh device id per
+            // pairing, but the physical device's long-term identity key
+            // survives — so a re-paired phone reappears under a new id
+            // with a pubkey the roster already knows. Keeping both ids
+            // ghosts the stale one forever (it never announces again);
+            // the new id inherits the chair. Within-family impersonation
+            // is not a threat here — the family key is shared anyway.
+            let replaced: Vec<DeviceId> = r
+                .iter()
+                .filter(|(rid, m)| **rid != id && m.pub_b64 == pub_b64)
+                .map(|(rid, _)| *rid)
+                .collect();
+            if !replaced.is_empty() {
+                for stale in &replaced {
+                    info!("pin: {id} replaces {stale} — same identity key, re-paired");
+                    r.remove(stale);
+                }
+            }
             match r.get_mut(&id) {
                 Some(m) if m.pub_b64 == pub_b64 => {
                     // Same pinned key — fresh names and caps are welcome.

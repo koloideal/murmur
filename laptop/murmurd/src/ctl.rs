@@ -245,6 +245,32 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 Err(e) => Res::err(e),
             }
         }
+        Req::Revoke { device_id } if shared.cfg.family_kind == murmur_proto::FamilyKind::Serverless => {
+            match device_id.parse::<murmur_proto::DeviceId>() {
+                Ok(device_id) => {
+                    if device_id == shared.id {
+                        return Res::err_kind(
+                            "self",
+                            "can't revoke yourself — to leave the family, uninstall instead",
+                        );
+                    }
+                    if !shared.roster.lock().unwrap().contains_key(&device_id)
+                        && !shared.keys.read().unwrap().revoked.contains(&device_id)
+                    {
+                        return Res::err_kind("unknown", format!("{device_id} is not in the family"));
+                    }
+                    // There is no server to enforce the kick, so the key
+                    // itself does it: rotation seals the new key to
+                    // everyone except the revoked, and the rotation frame
+                    // carries the revocation to every member it reaches.
+                    match shared.rotate(vec![device_id]) {
+                        Ok(epoch) => Res::ok(serde_json::json!({"epoch": epoch})),
+                        Err(e) => Res::err(e),
+                    }
+                }
+                Err(e) => Res::err(e),
+            }
+        }
         Req::Revoke { device_id } => match device_id.parse::<murmur_proto::DeviceId>() {
             Ok(device_id) => {
                 let mut rx = shared.ctl_events.subscribe();

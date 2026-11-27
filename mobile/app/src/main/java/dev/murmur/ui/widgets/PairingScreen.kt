@@ -34,10 +34,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,14 +62,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import dev.murmur.MurmurService
-import dev.murmur.core.PairStage
-import dev.murmur.core.PairingException
+import dev.murmur.core.PairingController
 import dev.murmur.core.Secrets
-import dev.murmur.core.pair
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 /**
  * Everything an unpaired phone sees — the entire screen. First the
@@ -82,86 +77,38 @@ import kotlinx.coroutines.launch
 fun PairingScreen() {
     val ctx = LocalContext.current
     val secrets = remember { Secrets(ctx) }
-    val scope = rememberCoroutineScope()
 
-    var phase by remember { mutableStateOf("idle") }
-    var manual by remember { mutableStateOf(false) }
-    var inviteMode by remember { mutableStateOf(false) }
-    var code by remember { mutableStateOf("") }
-    var invite by remember { mutableStateOf("") }
-    var server by remember { mutableStateOf(secrets.serverUrl.ifEmpty { "wss://" }) }
-    var job by remember { mutableStateOf<Job?>(null) }
+    // The handshake lives in PairingController's process-wide scope —
+    // rotating the phone recreates this screen mid-SAS and must not
+    // kill a multi-minute socket dialogue. Local state below is pure
+    // input form; the durable truth is the controller's StateFlow.
+    val pairState by PairingController.state.collectAsState()
+    val phase = pairState.phase
+    val sas = pairState.sas
+    val error = pairState.error
+    val hint = pairState.hint
+    val celebrating = pairState.celebrating
+    val burstFamily = pairState.burstFamily
+    val lanOnly = pairState.lanOnly
+    val lanCode = pairState.lanCode
+
+    var manual by rememberSaveable { mutableStateOf(false) }
+    var inviteMode by rememberSaveable { mutableStateOf(false) }
+    var code by rememberSaveable { mutableStateOf("") }
+    var invite by rememberSaveable { mutableStateOf("") }
+    var server by rememberSaveable { mutableStateOf(secrets.serverUrl.ifEmpty { "wss://" }) }
     var scanning by remember { mutableStateOf(false) }
-    var sas by remember { mutableStateOf("") }
-    var sasAnswer by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var hint by remember { mutableStateOf<String?>(null) }
-    var celebrating by remember { mutableStateOf(false) }
-    var burstFamily by remember { mutableStateOf<String?>(null) }
-    var lanOnly by remember { mutableStateOf(false) }
-    var lanCode by remember { mutableStateOf(false) }
+    var localHint by remember { mutableStateOf<String?>(null) }
     /** Family kind the user picked on the split screen — null = the
      *  choice itself is what's showing. The invite that arrives from
      *  the laptop is the real truth; this only shapes which fields
      *  the phone even offers (a serverless world has no server field). */
-    var kind by remember { mutableStateOf<String?>(null) }
+    var kind by rememberSaveable { mutableStateOf<String?>(null) }
 
     val codeReady = code.length == 8
 
     fun runPairing(input: String, short: Boolean = false, byCode: Boolean = false) {
-        phase = "connecting"
-        error = null
-        hint = null
-        lanCode = byCode
-        // The invite itself declares the family's kind — a serverless
-        // one dials the laptop directly and never sees a server.
-        lanOnly = byCode ||
-            (!short && dev.murmur.core.Invite.decode(input)?.kind == "serverless")
-        job = scope.launch {
-            try {
-                val onStage: (PairStage) -> Unit = { st ->
-                    when (st) {
-                        is PairStage.AwaitingAccept -> phase = "accept"
-                        is PairStage.AwaitingConfirm -> phase = "confirm"
-                    }
-                }
-                val onSas: suspend (String) -> Boolean = { s ->
-                    sas = s
-                    phase = "sas"
-                    val answer = CompletableDeferred<Boolean>().also { sasAnswer = it }
-                    answer.await()
-                }
-                val prov = if (byCode) {
-                    dev.murmur.core.pairLanCode(input, secrets.deviceName, onStage, onSas)
-                } else {
-                    pair(
-                        input,
-                        secrets.deviceName,
-                        serverUrl = if (short) server.trim() else null,
-                        onStage = onStage,
-                        onSas = onSas,
-                    )
-                }
-                secrets.save(prov.deviceId, prov.tokenHex, prov.familyKey, prov.serverUrl, prov.keyEpoch, prov.familyName, prov.familyKind)
-                burstFamily = prov.familyName
-                phase = "done"
-                // Service starts only after the burst finishes — it
-                // constructs a Secrets whose init flips settledFlow,
-                // which would collapse this card before frame one.
-                celebrating = true
-            } catch (e: CancellationException) {
-                phase = "idle"
-                throw e
-            } catch (e: PairingException) {
-                error = e.message
-                if (short) hint = "check the code and the server address, then try again"
-                phase = "idle"
-            } catch (e: Exception) {
-                error = e.message ?: "pairing failed"
-                if (short) hint = "can't reach the server — is the address right and the port open?"
-                phase = "idle"
-            }
-        }
+        PairingController.start(ctx, input, short = short, byCode = byCode, server = server)
     }
 
     val cameraPerm = rememberLauncherForActivityResult(
@@ -170,7 +117,7 @@ fun PairingScreen() {
         if (granted) scanning = true
         else {
             manual = true
-            hint = "no camera access — enter the code manually instead"
+            localHint = "no camera access — enter the code manually instead"
         }
     }
     fun scan() {
@@ -204,17 +151,11 @@ fun PairingScreen() {
         Step("compare the six digits here and on the laptop"),
         Step("confirm on the laptop — answer y to “codes match?”"),
     )
-    fun cancel() {
-        job?.cancel()
-        sasAnswer?.complete(false)
-        lanCode = false
-        phase = "idle"
-    }
+    fun cancel() = PairingController.cancel()
 
     if (kind == null) {
         FamilyKindSplit { picked ->
             kind = picked
-            if (picked == "serverless") lanOnly = true
         }
         return
     }
@@ -236,11 +177,9 @@ fun PairingScreen() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     PairDoneBurst(familyName = burstFamily, onFinished = {
-                        celebrating = false
-                        phase = "idle"
+                        PairingController.finishCelebration()
                         code = ""
                         invite = ""
-                        Secrets.settledFlow.value = true
                         MurmurService.start(ctx)
                     })
                 }
@@ -324,12 +263,10 @@ fun PairingScreen() {
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(onClick = {
-                            phase = "confirm"
-                            sasAnswer?.complete(true)
+                            PairingController.answerSas(true)
                         }) { Text("match") }
                         OutlinedButton(onClick = {
-                            phase = "idle"
-                            sasAnswer?.complete(false)
+                            PairingController.answerSas(false)
                         }) { Text("don't match") }
                     }
                 }
@@ -433,7 +370,7 @@ fun PairingScreen() {
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
-                    hint?.let {
+                    (hint ?: localHint)?.let {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             it,
@@ -444,10 +381,7 @@ fun PairingScreen() {
                     OutlinedButton(
                         onClick = {
                             kind = null
-                            lanOnly = false
                             manual = false
-                            error = null
-                            hint = null
                         },
                         modifier = Modifier.align(Alignment.End),
                     ) { Text("‹ family kind") }

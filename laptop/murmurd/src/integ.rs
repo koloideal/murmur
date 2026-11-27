@@ -256,4 +256,33 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn repaired_device_replaces_its_old_id() {
+        // The inviter mints a fresh device id per pairing, but the
+        // physical device's identity key survives. When the same key
+        // reappears under a new id, the stale id must leave the roster
+        // — keeping both ghosts it forever.
+        use murmur_proto::DeviceKind;
+        let family = FamilyKey::random();
+        let (a, _a_out, _a_lo) = node(1, &family);
+        let phone_key = murmur_proto::PairKey::generate();
+        let pub_b64 = phone_key.public_b64();
+
+        a.pin(DeviceId([7; 8]), &pub_b64, DeviceKind::Phone, None, &[]);
+        assert!(a.roster.lock().unwrap().contains_key(&DeviceId([7; 8])));
+
+        // same physical phone re-pairs: new id, same identity key
+        a.pin(DeviceId([9; 8]), &pub_b64, DeviceKind::Phone, None, &[]);
+        let r = a.roster.lock().unwrap();
+        assert!(!r.contains_key(&DeviceId([7; 8])), "stale id must be retired");
+        assert!(r.contains_key(&DeviceId([9; 8])), "new id must be pinned");
+
+        // a genuinely different device with another key coexists fine
+        drop(r);
+        let other = murmur_proto::PairKey::generate();
+        a.pin(DeviceId([11; 8]), &other.public_b64(), DeviceKind::Phone, None, &[]);
+        let r = a.roster.lock().unwrap();
+        assert!(r.contains_key(&DeviceId([9; 8])) && r.contains_key(&DeviceId([11; 8])));
+    }
 }

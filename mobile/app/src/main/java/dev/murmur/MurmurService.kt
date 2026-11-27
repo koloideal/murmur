@@ -190,6 +190,12 @@ class MurmurService : Service() {
                 key = newKey
                 status.update { it.copy(keyEpoch = epoch) }
             },
+            onKicked = {
+                // Same shape as the relay's REVOKED: keys off the wire,
+                // dashboard offers re-pairing.
+                secrets.removed = true
+                stopSelf()
+            },
         ))
         hub.wire(ClipboardFeature(this, secrets) { activeDevice() })
         hub.wire(MediaFeature(media))
