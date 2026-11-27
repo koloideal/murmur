@@ -175,6 +175,36 @@ pub(crate) fn elect_active(
 }
 
 
+/// Clipboard-target election: who clipboard traffic follows. Unlike
+/// [`elect_active`] this never answers "nobody" while a live laptop
+/// exists — the user's real flow is phone-in-hand with the laptop
+/// untouched for minutes, and dropping their deliberate shares because
+/// no node is `active` was exactly the reported "stops in both
+/// directions". Tiers: active beats idle beats locked (engagement
+/// outranks recency); within a tier freshest ts wins, ties → smaller
+/// id. Same inputs on every node → same target, so exactly one laptop
+/// applies an explicit push.
+pub(crate) fn elect_clip_target(
+    map: &HashMap<DeviceId, (PresenceState, u64)>,
+    now: u64,
+) -> Option<DeviceId> {
+    let cutoff = now.saturating_sub(PRESENCE_STALE);
+    let rank = |s: &PresenceState| match s {
+        PresenceState::Active => 2u8,
+        PresenceState::Idle => 1,
+        PresenceState::Locked => 0,
+    };
+    map.iter()
+        .filter(|(_, (_, ts))| *ts >= cutoff)
+        .max_by(|(a_id, (a_s, a_ts)), (b_id, (b_s, b_ts))| {
+            rank(a_s)
+                .cmp(&rank(b_s))
+                .then(a_ts.cmp(b_ts))
+                .then(b_id.cmp(a_id))
+        })
+        .map(|(id, _)| *id)
+}
+
 impl Shared {
     /// Active-node election: newest `active` wins; ties → smaller DeviceId.
     /// Deterministic across nodes given the same presence table.
@@ -188,6 +218,13 @@ impl Shared {
 
     pub fn is_active(&self) -> bool {
         self.active_node() == Some(self.id)
+    }
+
+    /// Am I the laptop clipboard traffic should follow right now —
+    /// the tiered fallback election, so clipboard never dies just
+    /// because the user is looking at their phone instead of typing.
+    pub fn is_clip_target(&self) -> bool {
+        elect_clip_target(&self.presence.lock().unwrap(), now_ts()) == Some(self.id)
     }
 
     /// The mirror path is alive: a direct LAN link, or another device
@@ -310,6 +347,35 @@ mod election_tests {
         t.insert(dev(9), (PresenceState::Active, fresh));
         t.insert(dev(5), (PresenceState::Active, fresh));
         assert_eq!(elect_active(&t, now), Some(dev(5)));
+    }
+
+    // ---- clip-target fallback election -------------------------------
+
+    /// The user's real flow: phone in hand, laptop untouched for three
+    /// minutes — presence flips idle and every explicit share was
+    /// silently dropped. The clip target must never be "nobody" while
+    /// a live laptop exists: active first, then idle, then locked.
+    #[test]
+    fn clip_target_falls_back_past_active() {
+        let now = 1_000_000;
+        let fresh = now - PRESENCE_STALE + 10;
+        let mut m = HashMap::new();
+        // no active node at all — an idle laptop still takes the traffic
+        m.insert(dev(1), (PresenceState::Idle, fresh));
+        assert_eq!(elect_clip_target(&m, now), Some(dev(1)));
+        // locked is the last resort, not a drop
+        let mut l = HashMap::new();
+        l.insert(dev(2), (PresenceState::Locked, fresh));
+        assert_eq!(elect_clip_target(&l, now), Some(dev(2)));
+        // active still beats a fresher idle — engagement outranks recency
+        let mut x = HashMap::new();
+        x.insert(dev(3), (PresenceState::Active, fresh - 5));
+        x.insert(dev(4), (PresenceState::Idle, fresh));
+        assert_eq!(elect_clip_target(&x, now), Some(dev(3)));
+        // staleness applies to every tier — a dead laptop wins nothing
+        let mut s = HashMap::new();
+        s.insert(dev(5), (PresenceState::Idle, now - PRESENCE_STALE - 1));
+        assert_eq!(elect_clip_target(&s, now), None);
     }
 
     #[test]

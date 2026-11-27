@@ -8,7 +8,9 @@
 //! whether we're the active node.
 //!
 //! Inbound (family → local): `explicit` clips (phone share menu /
-//! process-text) are applied only on the active laptop; laptop clips
+//! process-text) are applied only on the clipboard-target laptop —
+//! the tiered presence election that falls back past `active` rather
+//! than dropping shares whenever the user is phone-in-hand; laptop clips
 //! apply everywhere. Applied clips land in `suppress` so the watcher
 //! doesn't rebroadcast them.
 //!
@@ -115,7 +117,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 let Message::Clipboard { hash, mime, data_b64, explicit, .. } = (*msg).clone() else {
                     continue;
                 };
-                if !should_apply(hash, explicit, last_sent, shared.is_active()) {
+                if !should_apply(hash, explicit, last_sent, shared.is_clip_target()) {
                     continue;
                 }
                 use base64::Engine;
@@ -146,8 +148,8 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
 /// and a clip whose hash matches what we just broadcast is our own
 /// echo coming back around — applying it would re-trigger the watcher
 /// and ping-pong the clipboard forever.
-pub(crate) fn should_apply(hash: u64, explicit: bool, last_sent: Option<u64>, is_active: bool) -> bool {
-    if explicit && !is_active {
+pub(crate) fn should_apply(hash: u64, explicit: bool, last_sent: Option<u64>, is_clip_target: bool) -> bool {
+    if explicit && !is_clip_target {
         return false;
     }
     if last_sent == Some(hash) {
@@ -177,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_push_respects_active_node() {
+    fn explicit_push_respects_clip_target() {
         // explicit (share/process-text) is a deliberate targeting act —
         // inactive laptops must not fight over who owns the clipboard
         assert!(should_apply(0xBB, true, None, true));
