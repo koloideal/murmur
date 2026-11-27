@@ -1,6 +1,7 @@
 package dev.murmur.core
 
 import android.util.Base64
+import android.util.Log
 import com.goterl.lazysodium.LazySodiumAndroid
 import com.goterl.lazysodium.SodiumAndroid
 import kotlinx.coroutines.CompletableDeferred
@@ -190,6 +191,7 @@ suspend fun pair(
                         "then run murmurctl invite on it",
                 )
             }
+            Log.d(TAG, "pair accepted, computing sas")
             val accept = frame as? Control.PairAccept
                 ?: throw PairingException("expected pair_accept")
             val peerPub = Base64.decode(accept.pubkey_b64, Base64.NO_WRAP)
@@ -206,12 +208,17 @@ suspend fun pair(
             onStage(PairStage.AwaitingConfirm(session))
 
             // The inviter sends PairData only after *their* confirmation.
-            val data = next().second as? Control.PairData
+            Log.d(TAG, "pair awaiting pair_data")
+            val got = next()
+            Log.d(TAG, "pair got post-confirm frame: ${got.second::class.simpleName}")
+            val data = got.second as? Control.PairData
                 ?: throw PairingException("expected pair_data")
             val blobBytes = Base64.decode(data.blob_b64, Base64.NO_WRAP)
+            Log.d(TAG, "pair blob ${blobBytes.size}B, opening")
             val blob = protoJson.decodeFromString<PairBlob>(
                 FamilyKey.fromBytes(dh).open(blobBytes).decodeToString(),
             )
+            Log.d(TAG, "pair blob opened, device=${blob.device_id}")
             Provisioning(
                 deviceId = blob.device_id,
                 tokenHex = blob.token_hex,
@@ -230,6 +237,7 @@ suspend fun pair(
     }
 }
 
+private const val TAG = "MurmurPair"
 private const val TIMEOUT_MS = 180_000L
 private const val HELLO_RETRY_MS = 3_000L
 private const val CONNECT_MS = 10_000
@@ -318,6 +326,7 @@ private suspend fun pairLan(
             tcpNoDelay = true
         }
     }
+    Log.d(TAG, "pair tcp connected to $addr")
     return try {
         coroutineScope {
             val out = socket.getOutputStream()
@@ -329,11 +338,19 @@ private suspend fun pairLan(
                 try {
                     while (true) {
                         val line = br.readLine() ?: break
-                        val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: continue
-                        env.controlPayload()?.let { frames.trySend(env.from to it) }
+                        Log.d(TAG, "pair rx line ${line.length}B")
+                        val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: run {
+                            Log.w(TAG, "pair rx unparsable envelope")
+                            continue
+                        }
+                        val ctl = env.controlPayload()
+                        Log.d(TAG, "pair rx ctl=${ctl?.let { it::class.simpleName } ?: "null(dropped)"} from=${env.from}")
+                        ctl?.let { frames.trySend(env.from to it) }
                     }
+                    Log.w(TAG, "pair socket closed by peer")
                     failure.complete(PairingException("connection closed"))
                 } catch (e: java.io.IOException) {
+                    Log.w(TAG, "pair socket error: ${e.message}")
                     failure.complete(PairingException(e.message ?: "connection failed"))
                 }
             }
@@ -352,7 +369,14 @@ private suspend fun pairLan(
                 return f
             }
 
+            // The reader child blocks in `readLine`, which coroutine
+            // cancellation can't interrupt — and `coroutineScope` can't
+            // complete while a child lives. Whatever way the handshake
+            // ends (success, error, cancel, timeout), closing the socket
+            // is what actually kills the reader and lets the scope return.
+            try {
             withTimeout(TIMEOUT_MS) {
+                Log.d(TAG, "pair sending hello, awaiting accept")
                 onStage(PairStage.AwaitingAccept(session))
                 var seq = 1L
                 suspend fun hello() = sendFrame(
@@ -377,6 +401,7 @@ private suspend fun pairLan(
                         frame = got.second
                     }
                 }
+                Log.d(TAG, "pair accept consumed, computing dh+sas")
                 val accept = frame as Control.PairAccept
                 val peerPub = Base64.decode(accept.pubkey_b64, Base64.NO_WRAP)
                 val dh = pairKey.dh(peerPub)
@@ -386,13 +411,16 @@ private suspend fun pairLan(
                     hexToBytes(session),
                     hexToBytes(inviter),
                 )
+                Log.d(TAG, "pair sas=$sas, showing")
                 if (!onSas(sas)) {
                     throw PairingException("rejected — codes didn't match")
                 }
+                Log.d(TAG, "pair sas confirmed by user, awaiting pair_data")
                 onStage(PairStage.AwaitingConfirm(session))
 
                 val data = next().second as? Control.PairData
                     ?: throw PairingException("expected pair_data")
+                Log.d(TAG, "pair pair_data consumed")
                 val blobBytes = Base64.decode(data.blob_b64, Base64.NO_WRAP)
                 val blob = protoJson.decodeFromString<PairBlob>(
                     FamilyKey.fromBytes(dh).open(blobBytes).decodeToString(),
@@ -408,6 +436,9 @@ private suspend fun pairLan(
                     familyName = blob.family_name,
                     familyKind = "serverless",
                 )
+            }
+            } finally {
+                runCatching { socket.close() }
             }
         }
     } finally {
