@@ -75,7 +75,7 @@ fn sock_path() -> std::path::PathBuf {
 }
 
 pub fn feature() -> Feature {
-    Feature::new("ctl", None, |ctx| Box::pin(run(ctx)))
+    Feature::new("ctl", &[], |ctx| Box::pin(run(ctx)))
 }
 
 async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
@@ -158,8 +158,10 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                     .map(|(i, _)| i.to_string())
                     .collect::<Vec<_>>(),
                 "active_node": shared.active_node().map(|i| i.to_string()),
-                "last_clip": shared.last_clip.lock().unwrap().clone()
-                    .map(|(d, o, ts)| serde_json::json!({"dir": d, "origin": o, "ts": ts})),
+
+                "features": shared.feature_status.read().unwrap().iter()
+                    .map(|(name, hook)| (name.to_string(), hook(&shared)))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
                 "key_epoch": shared.keys.read().unwrap().epoch,
                 "members": shared.roster.lock().unwrap().len(),
                 "presence": presence,

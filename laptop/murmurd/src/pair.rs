@@ -38,7 +38,7 @@ const BEACON_WAIT: Duration = Duration::from_secs(120);
 // ---------- inviter side ----------
 
 pub fn feature() -> Feature {
-    Feature::new("pair", None, |ctx| Box::pin(run(ctx)))
+    Feature::new("pair", &[], |ctx| Box::pin(run(ctx)))
 }
 
 /// Consume inbound pair frames: a `PairHello` whose `from` matches one of

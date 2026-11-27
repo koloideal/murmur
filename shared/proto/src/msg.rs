@@ -86,6 +86,11 @@ pub enum Message {
         kind: DeviceKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// Feature capabilities the sender speaks ("clipboard", "media",
+        /// "notify", ...). Peers check before sending feature traffic;
+        /// mixed-version families stop silently dropping messages.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
     },
 
     /// LAN fast-path beacon: sealed envelope over UDP broadcast *and*
@@ -119,6 +124,27 @@ pub enum Message {
         revoked: Vec<DeviceId>,
         keys: Vec<SealedKey>,
     },
+}
+
+impl Message {
+    /// The serde `"t"` tag of this variant — the hub dispatches on it and
+    /// features declare consumption in these terms. Compile-enforced:
+    /// a new variant fails to compile until its tag is named here.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Message::Presence { .. } => "presence",
+            Message::Notification { .. } => "notification",
+            Message::NotificationDismiss { .. } => "notification_dismiss",
+            Message::MediaState { .. } => "media_state",
+            Message::MediaCommand { .. } => "media_command",
+            Message::Clipboard { .. } => "clipboard",
+            Message::Identity { .. } => "identity",
+            Message::LanBeacon { .. } => "lan_beacon",
+            Message::LanPing { .. } => "lan_ping",
+            Message::LanPong { .. } => "lan_pong",
+            Message::KeyRotate { .. } => "key_rotate",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

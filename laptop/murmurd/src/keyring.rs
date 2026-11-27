@@ -87,6 +87,10 @@ impl Keyring {
     }
 }
 
+/// Capabilities this daemon announces — mirrors the wired features
+/// (media control rides mpris, clipboard sync, phone-notification sink).
+pub const LAPTOP_CAPS: &[&str] = &["clipboard", "media", "notify"];
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Member {
     pub pub_b64: String,
@@ -95,6 +99,11 @@ pub struct Member {
     /// — absent for rosters pinned before names rode the frame.
     #[serde(default)]
     pub name: Option<String>,
+    /// Feature tags the member announced in `Identity` — empty for
+    /// rosters pinned before capabilities rode the frame (treat as
+    /// "unknown", not "incapable").
+    #[serde(default)]
+    pub caps: Vec<String>,
 }
 
 impl Member {
@@ -160,11 +169,12 @@ impl Shared {
                 pub_b64: self.identity.public_b64(),
                 kind: DeviceKind::Laptop,
                 name: Some(self.cfg.name.clone()),
+                caps: LAPTOP_CAPS.iter().map(|s| s.to_string()).collect(),
             },
         );
     }
 
-    fn pin(&self, id: DeviceId, pub_b64: String, kind: DeviceKind, name: Option<String>) {
+    fn pin(&self, id: DeviceId, pub_b64: &str, kind: DeviceKind, name: Option<String>, caps: &[String]) {
         if id == self.id
             || PairKey::public_from_b64(&pub_b64).is_err()
             || self.keys.read().unwrap().revoked.contains(&id)
@@ -175,9 +185,17 @@ impl Shared {
             let mut r = self.roster.lock().unwrap();
             match r.get_mut(&id) {
                 Some(m) if m.pub_b64 == pub_b64 => {
-                    // Same pinned key — a fresh name is still welcome.
+                    // Same pinned key — fresh names and caps are welcome.
+                    let mut dirty = false;
                     if name.is_some() && m.name != name {
                         m.name = name;
+                        dirty = true;
+                    }
+                    if !caps.is_empty() && m.caps != caps {
+                        m.caps = caps.to_vec();
+                        dirty = true;
+                    }
+                    if dirty {
                         drop(r);
                         self.persist_roster();
                     }
@@ -189,7 +207,7 @@ impl Shared {
                 }
                 None => {
                     info!("pinned identity of {id} ({kind:?})");
-                    r.insert(id, Member { pub_b64, kind, name });
+                    r.insert(id, Member { pub_b64: pub_b64.to_string(), kind, name, caps: caps.to_vec() });
                 }
             }
         }
@@ -201,6 +219,7 @@ impl Shared {
                 pub_b64: self.identity.public_b64(),
                 kind: DeviceKind::Laptop,
                 name: Some(self.cfg.name.clone()),
+                caps: LAPTOP_CAPS.iter().map(|s| s.to_string()).collect(),
             },
         );
     }
@@ -361,7 +380,7 @@ impl Shared {
 pub fn feature() -> Feature {
     Feature::new(
         "keyring",
-        Some(|m| matches!(m, Message::Identity { .. } | Message::KeyRotate { .. })),
+        &["identity", "key_rotate"],
         |ctx| Box::pin(run(ctx)),
     )
 }
@@ -373,13 +392,15 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             m = inbox.recv() => match m {
-                Some((from, Message::Identity { pub_b64, kind, name })) => {
-                    shared.pin(from, pub_b64, kind, name)
-                }
-                Some((from, Message::KeyRotate { epoch, revoked, keys })) => {
-                    shared.apply_rotation(from, epoch, revoked, keys)
-                }
-                Some(_) => {}
+                Some((from, msg)) => match &*msg {
+                    Message::Identity { pub_b64, kind, name, caps } => {
+                        shared.pin(from, pub_b64, *kind, name.clone(), caps)
+                    }
+                    Message::KeyRotate { epoch, revoked, keys } => {
+                        shared.apply_rotation(from, *epoch, revoked.clone(), keys.clone())
+                    }
+                    _ => {}
+                },
                 None => return Ok(()),
             },
             c = ctl.recv() => match c {

@@ -5,7 +5,7 @@ use murmur_proto::{
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 
 pub fn now_ts() -> u64 {
@@ -91,6 +91,9 @@ pub struct Shared {
     /// Last clipboard sync event — ("in" origin id | "out", unix ts) —
     /// the island's clip widget shows direction instead of content.
     pub last_clip: Mutex<Option<(String, String, u64)>>,
+    /// Self-status hooks of wired features — ctl renders the registry
+    /// instead of knowing each feature's internals by name.
+    pub feature_status: RwLock<Vec<(&'static str, fn(&Arc<Shared>) -> serde_json::Value)>>,
     /// Peers whose link just died — one-shot redial markers for the
     /// dialer (bounded by peer count, entries expire after a minute).
     lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
@@ -159,6 +162,7 @@ impl Shared {
             lan: Mutex::new(HashMap::new()),
             lan_rtt: Mutex::new(HashMap::new()),
             last_clip: Mutex::new(None),
+            feature_status: RwLock::new(Vec::new()),
             lan_dropped: Mutex::new(HashMap::new()),
             lan_addrs: Mutex::new(load_lan_addrs()),
             lan_dial,

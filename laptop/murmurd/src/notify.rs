@@ -159,12 +159,7 @@ fn proc_running(names: &[String]) -> bool {
 pub fn feature() -> Feature {
     Feature::new(
         "notify",
-        Some(|m| {
-            matches!(
-                m,
-                Message::Notification { .. } | Message::NotificationDismiss { .. }
-            )
-        }),
+        &["notification", "notification_dismiss"],
         |ctx| Box::pin(run(ctx)),
     )
 }
@@ -208,7 +203,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
         tokio::select! {
             m = inbox.recv() => {
                 let Some((_from, msg)) = m else { return Ok(()) };
-                match msg {
+                match (*msg).clone() {
                     Message::Notification { key, pkg, app, title, body, icon_b64, .. } => {
                         // A live desktop twin already shows its own
                         // notifications — the phone copy is a duplicate.

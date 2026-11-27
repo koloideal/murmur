@@ -43,6 +43,8 @@ import kotlinx.serialization.encodeToString
  * itself never broadcasts Presence: it's not a laptop-election candidate.
  */
 class MurmurService : Service() {
+    // capabilities announced to the family — mirrors the bridges this build ships
+
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -325,7 +327,7 @@ class MurmurService : Service() {
     }
 
     private fun announceIdentity(to: String = Envelope.ALL) =
-        send(Msg.Identity(identity.publicB64, "phone", secrets.deviceName), to)
+        send(Msg.Identity(identity.publicB64, "phone", secrets.deviceName, PHONE_CAPS.toList()), to)
 
     /** TOFU: the first identity a member announces under the current
      *  family key is the one we trust for its key rotations. */
@@ -573,6 +575,7 @@ class MurmurService : Service() {
     )
 
     companion object {
+        private val PHONE_CAPS = listOf("clipboard", "media", "notify")
         private const val CHANNEL_ID = "murmur.relay"
         private const val NOTIF_ID = 1
         internal const val PAUSED_ID = 2

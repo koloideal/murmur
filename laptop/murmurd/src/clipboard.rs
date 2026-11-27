@@ -31,9 +31,15 @@ pub fn hash_clip(data: &[u8]) -> u64 {
 pub fn feature() -> Feature {
     Feature::new(
         "clipboard",
-        Some(|m| matches!(m, Message::Clipboard { .. })),
+        &["clipboard"],
         |ctx| Box::pin(run(ctx)),
     )
+    .with_status(|shared| {
+        serde_json::json!({
+            "last_clip": shared.last_clip.lock().unwrap().clone()
+                .map(|(d, o, ts)| serde_json::json!({"dir": d, "origin": o, "ts": ts})),
+        })
+    })
 }
 
 async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
@@ -99,7 +105,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             }
             m = inbox.recv() => {
                 let Some((from, msg)) = m else { return Ok(()) };
-                let Message::Clipboard { hash, mime, data_b64, explicit, .. } = msg else {
+                let Message::Clipboard { hash, mime, data_b64, explicit, .. } = (*msg).clone() else {
                     continue;
                 };
                 if explicit && !shared.is_active() {

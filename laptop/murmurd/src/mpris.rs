@@ -27,7 +27,7 @@ const TRACKID: &str = "/org/mpris/murmur/track0";
 pub fn feature() -> Feature {
     Feature::new(
         "mpris",
-        Some(|m| matches!(m, Message::MediaState { .. })),
+        &["media_state"],
         |ctx| Box::pin(run(ctx)),
     )
 }
@@ -365,7 +365,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             shuffle,
             loop_status,
             ..
-        } = msg
+        } = (*msg).clone()
         else {
             continue;
         };

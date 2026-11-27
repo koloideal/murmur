@@ -447,7 +447,7 @@ def clip_status_fetch() -> dict | None:
         res = ctl({"cmd": "status"})
         if not res.get("ok"):
             return None
-        clip = (res["data"] or {}).get("last_clip")
+        clip = (res["data"] or {}).get("features", {}).get("clipboard", {}).get("last_clip")
         return clip
     except Exception:
         return None

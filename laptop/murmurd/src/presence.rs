@@ -27,7 +27,7 @@ const HEARTBEAT: Duration = Duration::from_secs(60);
 pub fn feature() -> Feature {
     Feature::new(
         "presence",
-        Some(|m| matches!(m, Message::Presence { .. })),
+        &["presence"],
         |ctx| Box::pin(run(ctx)),
     )
 }
@@ -79,7 +79,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
         tokio::select! {
             m = inbox.recv() => {
                 let Some((from, msg)) = m else { return Ok(()) };
-                let Message::Presence { state, ts } = msg else { continue };
+                let Message::Presence { state, ts } = (*msg).clone() else { continue };
                 shared.note_presence(from, state, ts);
             }
             ev = async { logind_rx.as_mut().unwrap().recv().await },

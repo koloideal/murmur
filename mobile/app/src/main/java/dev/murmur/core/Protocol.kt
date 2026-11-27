@@ -130,7 +130,7 @@ sealed class Msg {
      *  registry for — absent in old frames. */
     @Serializable
     @SerialName("identity")
-    data class Identity(val pub_b64: String, val kind: String, val name: String? = null) : Msg()
+    data class Identity(val pub_b64: String, val kind: String, val name: String? = null, val caps: List<String> = emptyList()) : Msg()
 
     /** Sealed beacon — rides UDP broadcast and the relay; the envelope
      *  itself is the auth. `lan_addr` lets relay receivers dial back —
