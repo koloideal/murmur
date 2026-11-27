@@ -123,13 +123,15 @@ const ART: &str = " _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
 |_| |_| |_|\\__,_|_|  |_| |_| |_|\\__,_|_|";
 
 /// Binary tag appended to the logo in a contrasting color.
-const TAG: &str = "   ___  | |_  | |\n  / __| | __| | |\n | (__  | |_  | |\n  \\___|  \\__| |_|";
+const TAG: &str = "       _   _\n   ___| |_| |\n  / __| __| |\n | (__| |_| |\n  \\___|\\__|_|";
 
 /// Installer-style banner: the logo bold in accent, a dim subtitle.
 fn banner(p: &Paint, sub: &str) {
     println!();
-    for (a, t) in ART.lines().zip(TAG.lines()) {
-        println!("  {}{}", p.wrap("1;38;5;141", a), p.wrap("38;5;215", t));
+    let __aw = ART.lines().map(|l| l.len()).max().unwrap_or(0);
+    let __art_off: Vec<&str> = std::iter::once("").chain(ART.lines()).collect();
+    for (a, t) in __art_off.iter().zip(TAG.lines()) {
+        println!("  {}{}", p.wrap("1;38;5;141", format!("{a:<width$}", width = __aw)), p.wrap("38;5;215", t));
     }
     if !sub.is_empty() {
         println!("  {}", p.dim(sub));
@@ -158,7 +160,7 @@ fn print_help(p: &Paint) {
         ],
     ]
     .concat();
-    banner(p, "control the running murmurd");
+    banner(p, "murmur control - control the running murmurd");
     for l in &lines[1..] {
         println!("  {l}");
     }
@@ -559,6 +561,12 @@ fn cmd_pair() -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // clap's own help has no banner — intercept it for visual consistency
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.len() == 2 && (raw[1] == "--help" || raw[1] == "-h") {
+        print_help(&Paint::new());
+        return Ok(());
+    }
     let cli = Cli::parse();
     let Some(cmd) = cli.cmd else {
         print_help(&Paint::new());

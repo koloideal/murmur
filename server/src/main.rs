@@ -350,10 +350,12 @@ const ART: &str = " _ __ ___  _   _ _ __ _ __ ___  _   _ _ __\n\
 
 /// Installer-style banner: the logo bold in accent, a dim subtitle.
 fn banner(p: &Paint, sub: &str) {
-    const TAG: &str = "   ___ \n  / __|\n  \\__ \\\n  |___/";
+    const TAG: &str = "\n  ___\n / __|\n \\__ \\\n |___/";
     println!();
-    for (l, t) in ART.lines().zip(TAG.lines()) {
-        println!("  {}{}", p.wrap("1;38;5;141", l), p.wrap("38;5;215", t));
+    let __aw = ART.lines().map(|l| l.len()).max().unwrap_or(0);
+    let __art_off: Vec<&str> = std::iter::once("").chain(ART.lines()).collect();
+    for (l, t) in __art_off.iter().zip(TAG.lines()) {
+        println!("  {}{}", p.wrap("1;38;5;141", format!("{l:<width$}", width = __aw)), p.wrap("38;5;215", t));
     }
     if !sub.is_empty() {
         println!("  {}", p.dim(sub));
@@ -545,7 +547,7 @@ fn print_help(p: &Paint) {
         ],
     ]
     .concat();
-    banner(p, "the murmur relay — routes ciphertext only");
+    banner(p, "murmur server - the murmur relay — routes ciphertext only");
     for l in &lines[1..] {
         println!("  {l}");
     }
@@ -720,7 +722,7 @@ fn status(args: &[String]) -> anyhow::Result<()> {
         }
         _ => lines.push(format!("bootstrap {}", p.dim("closed — the family has devices"))),
     }
-    banner(&p, "the murmur relay — routes ciphertext only");
+    banner(&p, "murmur server - the murmur relay — routes ciphertext only");
     for l in &lines {
         println!("  {l}");
     }

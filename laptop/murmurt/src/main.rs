@@ -62,12 +62,14 @@ fn print_help() {
     let ac = |s: &str| paint("38;5;141", format!("{s:<21}"));
     let dm = |s: &str| paint("2", s);
     let bd = |s: &str| paint("1", s);
-    const TAG: &str = "  | |_ \n  | __|\n  | |_ \n   \\__|";
+    const TAG: &str = "  _\n | |_\n | __|\n | |_\n  \\__|";
     println!();
-    for (l, t) in ART.lines().zip(TAG.lines()) {
-        println!("  {}{}", paint("1;38;5;141", l), paint("38;5;215", t));
+    let __aw = ART.lines().map(|l| l.len()).max().unwrap_or(0);
+    let __art_off: Vec<&str> = std::iter::once("").chain(ART.lines()).collect();
+    for (l, t) in __art_off.iter().zip(TAG.lines()) {
+        println!("  {}{}", paint("1;38;5;141", &format!("{l:<width$}", width = __aw)), paint("38;5;215", t));
     }
-    println!("  {}", dm("waybar island tooling"));
+    println!("  {}", dm("murmur tools - waybar island tooling"));
     println!();
     println!("  {}", bd("commands"));
     for (c, d) in [
