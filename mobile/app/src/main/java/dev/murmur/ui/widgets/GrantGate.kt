@@ -135,21 +135,23 @@ fun GrantGate(grants: Grants) {
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            "murmur can't run without these",
+            "before anything works",
             style = MaterialTheme.typography.headlineSmall,
         )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
-            "it lives in the background moving your notifications — " +
-                "no access, no app",
+            "murmur whispers between your devices — everything encrypted, " +
+                "nothing leaves the family, no cloud accounts. to do that " +
+                "in the background android asks for three things:",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(24.dp))
         if (!grants.listener) {
             GrantRow(
                 title = "notification access",
-                hint = "sees notifications to mirror them",
+                hint = "reads notifications to mirror them to your laptops — " +
+                    "encrypted end to end, never stored, nowhere else",
             ) {
                 ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             }

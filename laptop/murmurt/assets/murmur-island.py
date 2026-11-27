@@ -180,6 +180,7 @@ def status_tooltip(st: dict | None) -> str:
         f"active {st['active'] or 'none'}"
         + (" (me)" if st["active"] == st["self"] else ""),
         "",
+        "click — full murmurctl status",
     ]
     if not st["peers"]:
         tip.append("no peers online")
@@ -391,6 +392,8 @@ def media_frame(md: dict | None, now: float) -> dict:
     shown = title[:TITLE_LEN] + ("…" if len(title) > TITLE_LEN else "")
     tip = f"{title} — {md['artist']}".strip(" —") or "phone player"
     tip += f"\n{md['status'].lower()}"
+    tip += ("\n\nclick — player popup · right-click — play/pause"
+            "\nscroll ⇅ — seek · ⇄ — track")
     # ∿ — the sine-wave logo. Breathes dim→accent while playing, dim when
     # paused; both ends follow the current bar theme.
     bg, fg, accent = theme_colors()
@@ -479,6 +482,7 @@ def clip_frame(clip: dict | None, names: dict, now: float) -> dict:
         tip = "your copy was shared with the family"
     # k already fades to zero with age — col IS the settled dim then.
     label = f'<span foreground="{col}">{text}</span>'
+    tip += "\n\nright-click — clear clipboard"
     return {"text": label, "class": "clip", "tooltip": tip}
 
 

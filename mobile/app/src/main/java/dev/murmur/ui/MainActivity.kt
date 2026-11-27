@@ -68,11 +68,21 @@ class MainActivity : ComponentActivity() {
         if (secrets.deviceId != null && dev.murmur.MurmurService.instance == null) {
             dev.murmur.MurmurService.start(this)
         }
+        val uiPrefs = getSharedPreferences("murmur_ui", MODE_PRIVATE)
         setContent {
             MurmurTheme {
                 val grants = rememberGrants()
                 val settled by Secrets.settledFlow.collectAsState()
+                var welcomed by remember {
+                    mutableStateOf(uiPrefs.getBoolean("welcomed", false))
+                }
                 when {
+                    // First contact — what murmur even is, before the
+                    // system starts throwing permission dialogs.
+                    !welcomed -> WelcomeScreen(onContinue = {
+                        uiPrefs.edit().putBoolean("welcomed", true).apply()
+                        welcomed = true
+                    })
                     // No access, no app — the gate asks at entry and
                     // offers grant-or-quit, nothing else.
                     !grants.all -> GrantGate(grants)

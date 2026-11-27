@@ -38,6 +38,9 @@ class LanLink(
     /** Push a sealed message onto the relay — the beacon doubles as
      *  relay-borne discovery because many APs suppress client
      *  broadcast entirely. */
+    /** A frame arrived in another protocol generation — the service
+     *  surfaces it; silently dropping is how "offline" goes unexplained. */
+    private val onProtoMismatch: (peer: String, v: Int) -> Unit = { _, _ -> },
     private val sendRelay: (Msg) -> Unit = {},
 ) {
     /** Which end of the socket we are — the simultaneous-dial
@@ -416,6 +419,7 @@ class LanLink(
             val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: continue
             if (env.protoMismatch()) {
                 Log.w(TAG, "${env.from} speaks proto v${env.v} — we speak v${Envelope.VERSION}; upgrade the peer")
+                onProtoMismatch(env.from, env.v)
                 continue
             }
             val pt = runCatching {

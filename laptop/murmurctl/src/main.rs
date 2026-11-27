@@ -202,7 +202,7 @@ fn print_help(p: &Paint) {
             format!("  {} invite a device: QR + walkthrough", c("invite")),
             format!("  {} pending pairing requests", c("pair")),
             format!("  {} rotate the family key", c("rotate")),
-            format!("  {} self-revoke a device", c("revoke")),
+            format!("  {} revoke a device (serverless: key rotation kicks it)", c("revoke")),
             format!("  {} dial a LAN peer by ip[:port]", c("dial")),
             format!("  {} remove every murmur artifact (--yes)", c("uninstall")),
         ],
@@ -444,6 +444,27 @@ fn cmd_devices(all: bool) -> anyhow::Result<()> {
             String::new()
         };
         println!("  {dot} {name:<w$}  {id}{me}  {tail}");
+    }
+    // A wiped or lost device never comes back — but nothing in this
+    // list says what to do about it. The hint costs one line exactly
+    // when it's relevant.
+    let zombies: Vec<&str> = devs
+        .iter()
+        .filter(|x| {
+            x["online"].as_bool() != Some(true)
+                && x["revoked"].as_bool() != Some(true)
+                && x["device_id"].as_str() != Some(selfid)
+        })
+        .filter_map(|x| x["device_id"].as_str())
+        .collect();
+    if !zombies.is_empty() {
+        println!(
+            "  {}",
+            p.dim(format!(
+                "offline for good? wiped or lost devices leave the family with:  murmurctl revoke {}",
+                zombies[0]
+            ))
+        );
     }
     Ok(())
 }

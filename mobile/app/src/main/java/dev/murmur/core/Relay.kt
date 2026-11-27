@@ -41,6 +41,7 @@ class Relay(
     private val hello: () -> Control.Hello,
     private val scope: CoroutineScope,
     private val onAuthed: suspend () -> Unit = {},
+    private val onProtoMismatch: (peer: String, v: Int) -> Unit = { _, _ -> },
 ) {
     /** REVOKED is terminal: the relay no longer knows this device. */
     enum class State { CONNECTING, ONLINE, OFFLINE, REVOKED }
@@ -178,6 +179,7 @@ class Relay(
                             if (it.protoMismatch()) {
                                 android.util.Log.w("Relay",
                                     "frame from ${it.from} speaks proto v${it.v} — we speak v${Envelope.VERSION}; upgrade the peer")
+                                onProtoMismatch(it.from, it.v)
                                 return
                             }
                             _incoming.tryEmit(it)

@@ -430,6 +430,26 @@ if [ -f "$HOME/.config/murmur/config.toml" ]; then
     post_pair
     exit 0
 fi
+# The fork comes first: the answer to everything else depends on
+# whether a family exists at all. First-time users used to hit "got
+# an invite?" — a question they couldn't even parse — and founding was
+# a trailing default-no afterthought.
+if have_tty && askyn y "start a new family on this machine? (no — I'm joining one that exists)"; then
+    # Founding is serverless-only here: it needs nothing but the lan.
+    # A serverful family means running murmurs somewhere first — that
+    # user knows why they're here and finds it in the hint box.
+    NAME=$(ask "" "$(uname -n)" "device name")
+    FAMN=$(ask "" "" "family name (optional)")
+    if [ -n "$FAMN" ]; then
+        "$BIN/murmurd" init --kind serverless --name "$NAME" --family "$FAMN" < /dev/tty || die "init failed"
+    else
+        "$BIN/murmurd" init --kind serverless --name "$NAME" < /dev/tty || die "init failed"
+    fi
+    ok "lan-only family — no relay, no accounts, devices find each other on one network"
+    post_pair "you founded a family"
+    exit 0
+fi
+
 if have_tty && askyn y "got an invite or code from your family? (murmurctl invite on a member)"; then
     CODE=$(ask "" "" "paste the invite string or XXXX-XXXX code")
     if [ -n "$CODE" ]; then
@@ -451,18 +471,6 @@ if have_tty && askyn y "got an invite or code from your family? (murmurctl invit
         exit 0
     fi
     warn "nothing entered — nothing paired"
-fi
-
-if have_tty && askyn n "found a serverless family on this machine? (lan only — no relay, ever)"; then
-    NAME=$(ask "" "$(uname -n)" "device name")
-    FAMN=$(ask "" "" "family name (optional)")
-    if [ -n "$FAMN" ]; then
-        "$BIN/murmurd" init --kind serverless --name "$NAME" --family "$FAMN" < /dev/tty || die "init failed"
-    else
-        "$BIN/murmurd" init --kind serverless --name "$NAME" < /dev/tty || die "init failed"
-    fi
-    post_pair "you founded a family"
-    exit 0
 fi
 
 hint_box

@@ -163,6 +163,7 @@ class MurmurService : Service() {
                     media.publishNow()
                     pollDevices()
                 },
+                onProtoMismatch = ::noteProtoMismatch,
             )
         }
         identity = secrets.identity()
@@ -170,6 +171,7 @@ class MurmurService : Service() {
         lan = LanLink(
             secrets.deviceId!!, key, scope, { onEnvelope(it) },
             prefs = getSharedPreferences("lan", MODE_PRIVATE),
+            onProtoMismatch = ::noteProtoMismatch,
         ) { send(it) }
         status.value = Status(
             provisioned = true,
@@ -441,6 +443,12 @@ class MurmurService : Service() {
      *  presence table; see PresenceTable.activeDevice for the rule. */
     fun activeDevice(): String? = presenceTable.activeDevice()
 
+    /** A frame arrived in another protocol generation — surface it in
+     *  status instead of letting "offline" go unexplained. */
+    private fun noteProtoMismatch(peer: String, v: Int) {
+        status.update { it.copy(protoMismatch = it.protoMismatch + (peer to v)) }
+    }
+
     private fun onEnvelope(env: Envelope) {
         // Cleartext control replies (Devices) — handled before decrypt.
         env.controlPayload()?.let { ctl ->
@@ -569,6 +577,9 @@ class MurmurService : Service() {
         /** Listen port stayed busy across retries — another copy of
          *  murmur is almost certainly installed on this phone. */
         val portBusy: Boolean = false,
+        /** Peers seen speaking another protocol generation: id → their
+         *  version. Non-empty = "offline" has a precise reason. */
+        val protoMismatch: Map<String, Int> = emptyMap(),
     )
 
     companion object {

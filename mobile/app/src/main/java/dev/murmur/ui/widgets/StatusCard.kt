@@ -210,6 +210,18 @@ fun StatusCard() {
                         textAlign = TextAlign.Center,
                     )
                 }
+                if (status.protoMismatch.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    val versions = status.protoMismatch.values.distinct().joinToString { "v$it" }
+                    Text(
+                        "a peer speaks protocol $versions, this phone speaks " +
+                            "v${dev.murmur.core.Envelope.VERSION} — they can't understand " +
+                            "each other; update whichever is behind",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 if (status.portBusy) {
                     Spacer(Modifier.height(6.dp))
                     Text(
