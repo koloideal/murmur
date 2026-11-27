@@ -1,0 +1,95 @@
+[
+  {
+    "state": "active",
+    "t": "presence",
+    "ts": 1700000000
+  },
+  {
+    "state": "locked",
+    "t": "presence",
+    "ts": 1700000001
+  },
+  {
+    "app": "Telegram",
+    "body": "there",
+    "icon_b64": "aGk=",
+    "key": "n1",
+    "pkg": "org.telegram",
+    "t": "notification",
+    "title": "hi",
+    "ts": 1700000002
+  },
+  {
+    "key": "n1",
+    "t": "notification_dismiss"
+  },
+  {
+    "album": "LP",
+    "art_b64": null,
+    "artist": "Band",
+    "dur_ms": 200000,
+    "loop_status": "track",
+    "player": "spotify",
+    "pos_ms": 42000,
+    "shuffle": true,
+    "status": "playing",
+    "t": "media_state",
+    "title": "Song",
+    "ts": 1700000003
+  },
+  {
+    "op": "play",
+    "t": "media_command"
+  },
+  {
+    "op": "seek",
+    "pos_ms": 10000,
+    "t": "media_command"
+  },
+  {
+    "data_b64": "aGVsbG8=",
+    "explicit": true,
+    "hash": 3735928559,
+    "mime": "text/plain",
+    "origin": "0101010101010101",
+    "t": "clipboard",
+    "ts": 1700000004
+  },
+  {
+    "caps": [
+      "clipboard",
+      "media"
+    ],
+    "kind": "phone",
+    "name": "pixel",
+    "pub_b64": "cHVi",
+    "t": "identity"
+  },
+  {
+    "kind": "laptop",
+    "lan_addr": "192.168.1.5",
+    "t": "lan_beacon",
+    "tcp_port": 17894
+  },
+  {
+    "t": "lan_ping",
+    "ts": 1700000005
+  },
+  {
+    "t": "lan_pong",
+    "ts": 1700000005
+  },
+  {
+    "epoch": 3,
+    "keys": [
+      {
+        "device_id": "0202020202020202",
+        "sealed_b64": "c2VhbGVk"
+      }
+    ],
+    "revoked": [
+      "0909090909090909"
+    ],
+    "t": "key_rotate"
+  }
+]

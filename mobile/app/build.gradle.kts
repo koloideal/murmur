@@ -80,6 +80,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

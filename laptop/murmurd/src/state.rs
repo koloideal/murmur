@@ -31,6 +31,37 @@ pub struct Pairing {
     pub pair_reply: HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>,
 }
 
+/// Pure active-node election — the function every node computes
+/// independently over its presence map. Latest active timestamp wins,
+/// ties break toward the smaller DeviceId; entries past the staleness
+/// cutoff don't count. Pure so the convergence tests can hammer it.
+/// Presence merge rule: a fresher timestamp overwrites, stale never
+/// does — the table is order-independent *by construction*, which is
+/// what makes the distributed election converge at all.
+pub(crate) fn presence_merge(
+    map: &mut HashMap<DeviceId, (PresenceState, u64)>,
+    id: DeviceId,
+    state: PresenceState,
+    ts: u64,
+) {
+    if map.get(&id).is_none_or(|(_, old)| ts > *old) {
+        map.insert(id, (state, ts));
+    }
+}
+
+pub(crate) fn elect_active(
+    map: &HashMap<DeviceId, (PresenceState, u64)>,
+    now: u64,
+) -> Option<DeviceId> {
+    let cutoff = now.saturating_sub(PRESENCE_STALE);
+    map.iter()
+        .filter(|(_, (s, ts))| *s == PresenceState::Active && *ts >= cutoff)
+        .max_by(|(a_id, (_, a_ts)), (b_id, (_, b_ts))| {
+            a_ts.cmp(b_ts).then(b_id.cmp(a_id)) // later ts wins; smaller id wins ties
+        })
+        .map(|(id, _)| *id)
+}
+
 /// How long an invite/pending stays around without progress.
 pub const PAIR_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -337,30 +368,9 @@ impl Shared {
     /// sender's window; stragglers just above/below the mark still
     /// dedupe correctly.
     pub fn dedupe(&self, from: DeviceId, seq: u64) -> bool {
-        /// This far below the high-water mark can't be an in-flight
-        /// duplicate — the LAN early copy is never that late.
-        const RESTART_GAP: u64 = 64;
-        let mut g = self.seen.lock().unwrap();
-        let last = g.last.get(&from).copied().unwrap_or(0);
-        let last = if seq <= last && last - seq > RESTART_GAP {
-            g.set.retain(|(f, _)| *f != from);
-            g.order.retain(|(f, _)| *f != from);
-            seq
-        } else {
-            last.max(seq)
-        };
-        g.last.insert(from, last);
-        if !g.set.insert((from, seq)) {
-            return false;
-        }
-        g.order.push_back((from, seq));
-        if g.order.len() > 4096 {
-            if let Some(old) = g.order.pop_front() {
-                g.set.remove(&old);
-            }
-        }
-        true
+        self.seen.lock().unwrap().check(from, seq)
     }
+
 
     /// Cleartext control message to the server.
     pub fn send_control(&self, ctl: &Control) -> anyhow::Result<()> {
@@ -388,16 +398,7 @@ impl Shared {
     /// cutoff a crashed "active" laptop wins the election forever and
     /// explicit pushes/commands route to a ghost.
     pub fn active_node(&self) -> Option<DeviceId> {
-        let cutoff = now_ts().saturating_sub(PRESENCE_STALE);
-        self.presence
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, (s, ts))| *s == PresenceState::Active && *ts >= cutoff)
-            .max_by(|(a_id, (_, a_ts)), (b_id, (_, b_ts))| {
-                a_ts.cmp(b_ts).then(b_id.cmp(a_id)) // later ts wins; smaller id wins ties
-            })
-            .map(|(id, _)| *id)
+        elect_active(&self.presence.lock().unwrap(), now_ts())
     }
 
     pub fn is_active(&self) -> bool {
@@ -456,10 +457,7 @@ impl Shared {
     pub fn note_presence_offline(&self) {}
 
     pub fn note_presence(&self, id: DeviceId, state: PresenceState, ts: u64) {
-        let mut m = self.presence.lock().unwrap();
-        if m.get(&id).is_none_or(|(_, old)| ts > *old) {
-            m.insert(id, (state, ts));
-        }
+        presence_merge(&mut self.presence.lock().unwrap(), id, state, ts);
     }
 }
 
@@ -517,4 +515,165 @@ struct Seen {
     last: HashMap<DeviceId, u64>,
     set: std::collections::HashSet<(DeviceId, u64)>,
     order: std::collections::VecDeque<(DeviceId, u64)>,
+}
+
+impl Seen {
+    /// True = first sighting, deliver; false = duplicate, drop.
+    /// High-water marks per sender plus a bounded FIFO window —
+    /// broadcasts intentionally ride both the LAN fast-path and the
+    /// relay, so the second copy must die here.
+    fn check(&mut self, from: DeviceId, seq: u64) -> bool {
+        /// This far below the high-water mark can't be an in-flight
+        /// duplicate — the LAN early copy is never that late; it's a
+        /// sender restart reusing low numbers, so the window resets.
+        const RESTART_GAP: u64 = 64;
+        let last = self.last.get(&from).copied().unwrap_or(0);
+        let last = if seq <= last && last - seq > RESTART_GAP {
+            self.set.retain(|(f, _)| *f != from);
+            self.order.retain(|(f, _)| *f != from);
+            seq
+        } else {
+            last.max(seq)
+        };
+        self.last.insert(from, last);
+        if !self.set.insert((from, seq)) {
+            return false;
+        }
+        self.order.push_back((from, seq));
+        if self.order.len() > 4096 {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(b: u8) -> DeviceId {
+        DeviceId([b; 8])
+    }
+
+    fn apply(events: &[(u8, PresenceState, u64)]) -> HashMap<DeviceId, (PresenceState, u64)> {
+        let mut m = HashMap::new();
+        for (d, st, ts) in events {
+            presence_merge(&mut m, dev(*d), *st, *ts);
+        }
+        m
+    }
+
+    // ---- election convergence ----------------------------------------
+
+    /// The same event multiset in any order yields the same winner —
+    /// the property the whole distributed election rests on.
+    #[test]
+    fn election_converges_under_permutations() {
+        let events = vec![
+            (1u8, PresenceState::Active, 100u64),
+            (1, PresenceState::Active, 200),   // same node, newer beat
+            (2, PresenceState::Active, 150),
+            (2, PresenceState::Idle, 250),     // goes idle — out of the race
+            (3, PresenceState::Active, 200),   // ts tie with dev1 — smaller id wins
+        ];
+        let now = 300; // everything fresh: 300 - 150 < PRESENCE_STALE window check below
+        // ensure events are inside the staleness window for `now`
+        let now = if PRESENCE_STALE > 200 { now } else { 100 + PRESENCE_STALE - 1 };
+
+        let reference = elect_active(&apply(&events), now);
+
+        // permute by rotation+reversal — cheap but covers reordering classes
+        for rot in 0..events.len() {
+            let mut p: Vec<_> = events.clone();
+            p.rotate_left(rot);
+            assert_eq!(elect_active(&apply(&p), now), reference, "rotation {rot}");
+            p.reverse();
+            assert_eq!(elect_active(&apply(&p), now), reference, "reversed rotation {rot}");
+        }
+        // dev1: ts 200, active, smaller than dev3 — the winner
+        assert_eq!(reference, Some(dev(1)));
+    }
+
+    #[test]
+    fn election_rules() {
+        let now = 1_000_000;
+        let fresh = now - PRESENCE_STALE + 10;
+        // stale entries don't count
+        let mut m = HashMap::new();
+        m.insert(dev(1), (PresenceState::Active, now - PRESENCE_STALE - 1));
+        assert_eq!(elect_active(&m, now), None);
+        // idle/locked never win
+        m.insert(dev(1), (PresenceState::Idle, fresh));
+        m.insert(dev(2), (PresenceState::Locked, fresh));
+        assert_eq!(elect_active(&m, now), None);
+        // later ts beats earlier
+        m.insert(dev(3), (PresenceState::Active, fresh));
+        m.insert(dev(4), (PresenceState::Active, fresh + 5));
+        assert_eq!(elect_active(&m, now), Some(dev(4)));
+        // tie → smaller id
+        let mut t = HashMap::new();
+        t.insert(dev(9), (PresenceState::Active, fresh));
+        t.insert(dev(5), (PresenceState::Active, fresh));
+        assert_eq!(elect_active(&t, now), Some(dev(5)));
+    }
+
+    #[test]
+    fn merge_never_goes_backwards() {
+        let mut m = HashMap::new();
+        presence_merge(&mut m, dev(1), PresenceState::Active, 100);
+        presence_merge(&mut m, dev(1), PresenceState::Idle, 90); // stale — ignored
+        assert_eq!(m[&dev(1)], (PresenceState::Active, 100));
+        presence_merge(&mut m, dev(1), PresenceState::Idle, 110); // newer — wins
+        assert_eq!(m[&dev(1)], (PresenceState::Idle, 110));
+    }
+
+    // ---- dedup window -------------------------------------------------
+
+    #[test]
+    fn dedupe_first_true_dupe_false() {
+        let mut s = Seen::default();
+        assert!(s.check(dev(1), 10));
+        assert!(!s.check(dev(1), 10)); // the LAN+relay twin dies here
+        assert!(s.check(dev(1), 11));
+        assert!(s.check(dev(2), 10)); // same seq, different sender — fine
+    }
+
+    #[test]
+    fn dedupe_out_of_order_within_window() {
+        let mut s = Seen::default();
+        assert!(s.check(dev(1), 100));
+        // slightly late early-copy — still recognized as a dupe target
+        assert!(s.check(dev(1), 98));
+        assert!(!s.check(dev(1), 98));
+    }
+
+    #[test]
+    fn dedupe_restart_gap_resets() {
+        let mut s = Seen::default();
+        assert!(s.check(dev(1), 1000));
+        // sender restarted, seq back to small numbers — must not be
+        // dropped as duplicates or the rebooted peer goes deaf
+        assert!(s.check(dev(1), 1));
+        assert!(s.check(dev(1), 2));
+        assert!(!s.check(dev(1), 2));
+    }
+
+    #[test]
+    fn dedupe_window_bounded_and_recent_dupes_survive() {
+        let mut s = Seen::default();
+        for i in 0..5000u64 {
+            assert!(s.check(dev(1), i), "seq {i} first sighting");
+        }
+        // memory is bounded at the 4096 cap even under a long session
+        assert!(s.order.len() <= 4096);
+        // recent sequences are still inside the window — dupes die
+        assert!(!s.check(dev(1), 4999));
+        // a replay of ancient seq 0 is indistinguishable from a sender
+        // restart (gap > RESTART_GAP) — the restart path accepts it.
+        // Correct-by-design: a frame that old can never be in flight.
+        assert!(s.check(dev(1), 0));
+    }
 }
