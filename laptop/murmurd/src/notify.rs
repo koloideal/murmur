@@ -148,9 +148,16 @@ impl NotifyBus {
                     body,
                     pairs,
                     hints,
-                    // 0 = never expire (-1 is the daemon's ~3s default,
-                    // not "forever"). Dismissal is synced, not timed.
-                    0i32,
+                    // swaync: expire_timeout > 0 (ms) beats the daemon's
+                    // own timeout config; 0/-1 fall back to it. Replyable
+                    // mirrors get two minutes — a chat popup that vanishes
+                    // in 12s can't be answered; the rest keep the daemon
+                    // default. Dismissal is synced regardless.
+                    if actions.iter().any(|a| a.kind == "reply") {
+                        120_000i32
+                    } else {
+                        0i32
+                    },
                 ),
             )
             .await?;

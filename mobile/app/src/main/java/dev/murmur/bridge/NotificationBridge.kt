@@ -138,6 +138,11 @@ class NotificationBridge : NotificationListenerService() {
         val arr = n.actions ?: return emptyList()
         return arr.mapIndexedNotNull { i, a ->
             if (a?.actionIntent == null) return@mapIndexedNotNull null
+            // Noise filter: mark-as-read is redundant on mirrors — opening
+            // the notification on the phone reads the chat anyway, and the
+            // button just eats the lane under the murmur tag.
+            val t = a.title?.toString()?.lowercase() ?: ""
+            if (!reply_capable(a) && t in NOISE_ACTIONS) return@mapIndexedNotNull null
             val reply = !a.remoteInputs.isNullOrEmpty() ||
                 a.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY
             dev.murmur.core.NotifAction(
@@ -176,6 +181,15 @@ class NotificationBridge : NotificationListenerService() {
 
         var instance: NotificationBridge? = null
             private set
+
+        private val NOISE_ACTIONS = setOf(
+            "mark as read", "mark read",
+            "пометить прочитанным", "отметить прочитанным",
+        )
+
+        private fun reply_capable(a: Notification.Action): Boolean =
+            !a.remoteInputs.isNullOrEmpty() ||
+                a.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY
 
         /** Apps seen posting notifications this process — the picker's source. */
         val apps = MutableStateFlow<Map<String, App>>(emptyMap())
