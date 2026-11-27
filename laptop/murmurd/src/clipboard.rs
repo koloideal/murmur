@@ -108,11 +108,8 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 let Message::Clipboard { hash, mime, data_b64, explicit, .. } = (*msg).clone() else {
                     continue;
                 };
-                if explicit && !shared.is_active() {
-                    continue; // explicit pushes go to the active node only
-                }
-                if last_sent == Some(hash) {
-                    continue; // our own clip came back around
+                if !should_apply(hash, explicit, last_sent, shared.is_active()) {
+                    continue;
                 }
                 use base64::Engine;
                 let Ok(data) = base64::engine::general_purpose::STANDARD.decode(&data_b64) else {
@@ -130,5 +127,67 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+}
+
+
+/// Anti-echo / targeting decision for an inbound clip, pure so the
+/// matrix is testable: explicit pushes apply only on the active node,
+/// and a clip whose hash matches what we just broadcast is our own
+/// echo coming back around — applying it would re-trigger the watcher
+/// and ping-pong the clipboard forever.
+pub(crate) fn should_apply(hash: u64, explicit: bool, last_sent: Option<u64>, is_active: bool) -> bool {
+    if explicit && !is_active {
+        return false;
+    }
+    if last_sent == Some(hash) {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn echo_of_own_clip_never_applies() {
+        // the ping-pong scenario: we broadcast hash H, the frame comes
+        // back through the family — it must die here or the watcher
+        // sees it as a new local clip and rebroadcasts endlessly
+        assert!(!should_apply(0xAA, false, Some(0xAA), true));
+        assert!(!should_apply(0xAA, true, Some(0xAA), true));
+    }
+
+    #[test]
+    fn foreign_clip_applies_regardless_of_role() {
+        assert!(should_apply(0xBB, false, Some(0xAA), true));
+        assert!(should_apply(0xBB, false, Some(0xAA), false)); // passive sync applies everywhere
+        assert!(should_apply(0xBB, false, None, false));
+    }
+
+    #[test]
+    fn explicit_push_respects_active_node() {
+        // explicit (share/process-text) is a deliberate targeting act —
+        // inactive laptops must not fight over who owns the clipboard
+        assert!(should_apply(0xBB, true, None, true));
+        assert!(!should_apply(0xBB, true, None, false));
+    }
+
+    #[test]
+    fn hash_clip_is_stable_and_content_sensitive() {
+        assert_eq!(hash_clip(b"hello"), hash_clip(b"hello"));
+        assert_ne!(hash_clip(b"hello"), hash_clip(b"world"));
+        assert_ne!(hash_clip(b""), hash_clip(b"\0"));
+    }
+
+    #[test]
+    fn suppress_matches_only_exact_hash() {
+        // the watcher clears suppression ONLY on exact match — an
+        // unrelated local copy must not eat the suppression or the
+        // applied clip echoes back when it finally surfaces
+        let suppress = Some(hash_clip(b"from-network"));
+        assert!(suppress == Some(hash_clip(b"from-network")));
+        assert!(suppress != Some(hash_clip(b"unrelated-local-copy")));
     }
 }
