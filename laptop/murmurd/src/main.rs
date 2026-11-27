@@ -217,6 +217,29 @@ async fn doctor() -> anyhow::Result<()> {
         );
     }
 
+    // Wayland capabilities — clipboard sync and idle detection degrade
+    // silently without them; the fix is the compositor, not a package.
+    match crate::wlclip::probe() {
+        Ok(caps) => {
+            let dc = caps.iter().find(|c| c.contains("data-control"));
+            ok(
+                dc.is_some(),
+                format!("wayland data-control — {}", dc.copied().unwrap_or("?")),
+                "no data-control protocol — clipboard sync won't work on this compositor (GNOME?); needs ext-data-control-v1 or wlr-data-control-v1",
+            );
+            ok(
+                caps.contains(&"ext-idle-notify-v1"),
+                "wayland idle-notify — presence tracking works".into(),
+                "no ext-idle-notify-v1 — this node will never report idle (presence degrades)",
+            );
+        }
+        Err(_) => ok(
+            false,
+            String::new(),
+            "no wayland session — murmurd needs Wayland for clipboard/idle; check WAYLAND_DISPLAY",
+        ),
+    }
+
     // ctl socket: daemon alive outside systemd too
     if !active {
         let sock = std::env::var_os("XDG_RUNTIME_DIR")

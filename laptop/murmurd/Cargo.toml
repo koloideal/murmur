@@ -1,6 +1,6 @@
 [package]
 name = "murmurd"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "murmur laptop daemon: notifications, MPRIS, clipboard, presence"
@@ -25,3 +25,4 @@ base64 = "0.22"
 rustls = { version = "0.23", features = ["ring"] }
 if-addrs = "0.13"
 socket2 = "0.6"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }

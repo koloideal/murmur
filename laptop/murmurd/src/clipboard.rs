@@ -87,6 +87,10 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
                     info!("clipboard: offer tagged {bad} not synced");
                     continue;
                 }
+                if data.len() > murmur_proto::MAX_CLIP {
+                    warn!("clipboard: {}B over wire cap — not synced", data.len());
+                    continue;
+                }
                 tracing::debug!("clip → broadcast hash={hash:x} mime={mime}");
                 use base64::Engine;
                 let msg = Message::Clipboard {
