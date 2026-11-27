@@ -9,7 +9,6 @@ import androidx.compose.runtime.Composable
  */
 val homeWidgets: List<@Composable () -> Unit> = listOf(
     { StatusCard() },
-    { FirstRunHint() },
     { DevicesCard() },
     { NotificationsCard() },
     { ClipboardCard() },

@@ -16,7 +16,21 @@ android {
         // CI runs increment it — Obtainium-style updaters compare this,
         // not the name. Local builds stay at 1.
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.4.0"
+        // The APK always carries the release tag it was cut from, even
+        // when nothing in mobile/ changed since the last one — Obtainium
+        // users see "is my phone current?" against the repo's tags.
+        // Chain: explicit env (CI uses GITHUB_REF_NAME) → nearest git tag
+        // → dev fallback.
+        versionName = run {
+            val fromEnv = System.getenv("MURMUR_VERSION")
+                ?: System.getenv("GITHUB_REF_NAME")?.takeIf { it.startsWith("v") }
+            val fromGit = try {
+                val p = ProcessBuilder("git", "describe", "--tags", "--abbrev=0")
+                    .directory(rootDir.parentFile).start()
+                if (p.waitFor() == 0) p.inputStream.bufferedReader().readText().trim() else null
+            } catch (_: Exception) { null }
+            (fromEnv ?: fromGit ?: "0.0.0-dev").removePrefix("v")
+        }
         // Every phone murmur targets is arm64; the other ABIs only
         // bloated the APK with unused libsodium/JNA builds.
         ndk { abiFilters += listOf("arm64-v8a") }

@@ -20,7 +20,8 @@ import java.util.concurrent.ConcurrentHashMap
  * phone shows. Posted → broadcast; removed → dismiss everywhere, unless we
  * cancelled it ourselves on a remote dismiss (anti-loop via [remoteCancels]).
  *
- * Privacy gates, in order: ongoing/group-summary noise, muted apps,
+ * Privacy gates, in order: ongoing/group-summary noise, MediaStyle
+ * track-churn (the laptop mirrors playback itself), muted apps,
  * `VISIBILITY_SECRET` (the app itself says "not even on a lock screen"),
  * then the optional "hide message text" mode. Android 15+ additionally
  * redacts OTPs for listeners like us before we ever see them.
@@ -42,6 +43,12 @@ class NotificationBridge : NotificationListenerService() {
         val n = sbn.notification
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return // repeats its children
         noteApp(sbn)
+        // MediaStyle posts (track changed, album art refresh) are noise
+        // here — the laptop already mirrors playback through its own
+        // media widget with real controls. The token extra is the
+        // reliable marker; ongoing-ness isn't (paused players drop it).
+        if (n.extras.getParcelable<android.media.session.MediaSession.Token>(
+                Notification.EXTRA_MEDIA_SESSION) != null) return
         val svc = MurmurService.instance ?: return
         if (!Secrets.mirrorFlow.value) return
         if (sbn.packageName in Secrets.mutedFlow.value) return
