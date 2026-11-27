@@ -21,8 +21,8 @@
     "return-type": "json",
     "on-click": "$HOME/.local/bin/murmur-player-toggle.sh",
     "on-click-right": "playerctl -p murmur play-pause",
-        "on-scroll-up": "playerctl -p murmur position 5+",
-        "on-scroll-down": "playerctl -p murmur position 5-",
-        "on-scroll-right": "playerctl -p murmur next",
-        "on-scroll-left": "playerctl -p murmur previous"
+        "on-scroll-up": "$HOME/.local/bin/murmur-player-swipe.sh seek+",
+        "on-scroll-down": "$HOME/.local/bin/murmur-player-swipe.sh seek-",
+        "on-scroll-right": "$HOME/.local/bin/murmur-player-swipe.sh next",
+        "on-scroll-left": "$HOME/.local/bin/murmur-player-swipe.sh previous"
 },
