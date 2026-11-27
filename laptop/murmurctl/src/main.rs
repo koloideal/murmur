@@ -487,6 +487,12 @@ fn cmd_invite() -> anyhow::Result<()> {
                 "  {}",
                 p.dim(format!("laptop: murmurd pair --code {short}"))
             );
+            // Beacon-free fallback for wi-fi that isolates clients or
+            // subnets where broadcast can't pass.
+            println!(
+                "  {}",
+                p.dim(format!("        or direct: murmurd pair --code {short} --server {server}"))
+            );
         }
     }
     if std::io::stdout().is_terminal() {

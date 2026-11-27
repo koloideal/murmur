@@ -14,7 +14,10 @@ pub fn install_user_unit() -> anyhow::Result<()> {
         "[Unit]\n\
          Description=murmur laptop daemon\n\
          PartOf=graphical-session.target\n\
-         After=graphical-session.target\n\n\
+         After=graphical-session.target\n\
+         # installed but unpaired → skip quietly instead of crash-looping\n\
+         # on 'no config' every RestartSec\n\
+         ConditionPathExists=%h/.config/murmur/config.toml\n\n\
          [Service]\n\
          ExecStart={exe} run\n\
          Restart=on-failure\n\

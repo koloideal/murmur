@@ -80,7 +80,23 @@ pub async fn run(
             unreachable!();
         }
     };
-    match UdpSocket::bind(("0.0.0.0", BEACON_PORT)).await {
+    // SO_REUSEADDR: `murmurd pair` listens for an inviter's pair beacon
+    // on the same port — a second bind only works if this socket opted
+    // in. Linux delivers broadcast datagrams to every bound socket, so
+    // both readers see what they need.
+    let beacon_bind = (|| -> std::io::Result<std::net::UdpSocket> {
+        let s = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        s.set_reuse_address(true)?;
+        s.bind(&SocketAddr::from(([0, 0, 0, 0], BEACON_PORT)).into())?;
+        s.set_nonblocking(true)?;
+        Ok(s.into())
+    })()
+    .and_then(UdpSocket::from_std);
+    match beacon_bind {
         Ok(udp) => {
             udp.set_broadcast(true)?;
             info!("lan: beacon :{BEACON_PORT}, link :{LINK_PORT}");
@@ -89,6 +105,16 @@ pub async fn run(
             tokio::spawn(beacon_recv(shared.clone(), udp));
         }
         Err(e) => warn!("lan: beacon off ({e}); inbound links still accepted"),
+    }
+    // Serverless families keep a permanent pair listener — a per-invite
+    // bind made a second invite inside its TTL die with EADDRINUSE.
+    if shared.cfg.family_kind == murmur_proto::FamilyKind::Serverless {
+        match TcpListener::bind(("0.0.0.0", PAIR_PORT)).await {
+            Ok(l) => {
+                tokio::spawn(crate::pair::pair_listen(shared.clone(), l));
+            }
+            Err(e) => warn!("lan: pair :{PAIR_PORT} busy ({e}) — direct invites unreachable"),
+        }
     }
     tokio::spawn(dial_loop(shared.clone(), hub.clone(), dial_rx));
     tokio::spawn(crate::usbwatch::run(shared.clone()));

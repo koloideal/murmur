@@ -85,8 +85,12 @@ have_tty() { true 2>/dev/null < /dev/tty; }
 
 v_url() {
     [ -z "$1" ] && return 0
-    case "$1" in ws://*|wss://*) return 0 ;; esac
-    printf '  %s✗%s expected a ws:// or wss:// URL\n' "$C_RD" "$R0" >&2
+    case "$1" in
+        ws://*|wss://*|tcp://*) return 0 ;;
+        *' '*|*/*) ;;
+        *[a-zA-Z0-9]*) return 0 ;;
+    esac
+    printf "  %s✗%s expected a ws(s):// URL or the inviter's ip[:port]\n" "$C_RD" "$R0" >&2
     return 1
 }
 
@@ -138,7 +142,8 @@ hint_box() {
     box "${B}installed${R0}" \
         "" \
         "join later:   ${B}murmurd pair --code INVITE-OR-XXXX-XXXX${R0}" \
-        "              (add --server wss://DOMAIN only for a relay short code)" \
+        "              relay code → --server wss://DOMAIN" \
+        "              broadcast blocked → --server INVITER-IP" \
         "or found one: ${B}murmurd init --kind serverless --name THIS-HOST${R0}" \
         "              (lan only — no relay, ever)" \
         "" \
@@ -274,7 +279,9 @@ if [ -n "$FW" ]; then
                     || warn "firewalld rules failed — open 17893/udp + 17894-17895/tcp manually" ;;
         esac
     else
-        warn "skipped — without them the phone can't reach this machine on the lan"
+        warn "skipped — nothing can reach this machine on the lan:"
+        warn "no phone links, no discovery, serverless pairing hangs (udp 17893 dropped)"
+        warn "fix later: ${B}sudo $FW allow 17893/udp && sudo $FW allow 17894:17895/tcp${R0}"
     fi
 fi
 
@@ -369,7 +376,7 @@ if [ $# -gt 0 ]; then
     prev=""
     for a in "$@"; do
         case "$prev" in
-            --server) v_url "$a" || die "--server must be a ws:// or wss:// URL (got: $a)" ;;
+            --server) v_url "$a" || die "--server must be a ws(s):// URL or the inviter's ip[:port] (got: $a)" ;;
             --code)
                 printf '%s' "$a" | grep -Eq '^[A-Z0-9]{4}-[A-Z0-9]{4}$|^.{20,}$' || \
                     warn "--code usually looks like XXXX-XXXX or a full invite — continuing anyway"
@@ -394,6 +401,13 @@ fi
 # joiner never has to know the topology. A bare XXXX-XXXX short code
 # needs one more bit of context: which relay (serverful) or none
 # (serverless — the LAN beacon finds the inviter).
+# Already paired? The whole handshake would finish just for provision()
+# to refuse overwriting an existing family — skip straight to running.
+if [ -f "$HOME/.config/murmur/config.toml" ]; then
+    ok "already in a family (config.toml exists) — skipping pair"
+    post_pair
+    exit 0
+fi
 if have_tty && askyn y "got an invite or code from your family? (murmurctl invite on a member)"; then
     CODE=$(ask "" "" "paste the invite string or XXXX-XXXX code")
     if [ -n "$CODE" ]; then
@@ -402,7 +416,7 @@ if have_tty && askyn y "got an invite or code from your family? (murmurctl invit
         _cu=$(printf '%s' "$CODE" | tr 'a-z' 'A-Z')
         case "$_cu" in
             [A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9])
-                SERVER=$(ask v_url "" "relay URL — wss://domain or ws://ip:port (empty = serverless, find on LAN)")
+                SERVER=$(ask v_url "" "relay URL or inviter ip[:port] — wss://domain / ws://ip:port (empty = serverless, find on LAN)")
                 if [ -n "$SERVER" ]; then
                     "$BIN/murmurd" pair --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
                 else

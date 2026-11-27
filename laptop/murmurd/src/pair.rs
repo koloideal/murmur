@@ -159,22 +159,21 @@ fn sweep_pairing(shared: &Shared) {
 
 // ---------- serverless invite listener ----------
 
-/// A serverless invite's rendezvous: an ephemeral TCP listener that
-/// exists only while the invite does. Each accepted socket gets its
-/// own `serve_pair` — a straggler can't block a second attempt.
-async fn pair_listen(shared: Arc<Shared>, listener: TcpListener) {
-    let deadline = Instant::now() + PAIR_TTL;
+/// The serverless pair rendezvous: a permanent listener bound at
+/// daemon start (per-invite binds made a second invite inside TTL die
+/// with EADDRINUSE). Accepted sockets run `serve_pair`; frames for a
+/// session nobody invited get dropped in `handle_ctl`, not here.
+pub(crate) async fn pair_listen(shared: Arc<Shared>, listener: TcpListener) {
     loop {
-        match tokio::time::timeout_at(deadline.into(), listener.accept()).await {
-            Ok(Ok((s, _))) => {
+        match listener.accept().await {
+            Ok((s, _)) => {
                 let _ = s.set_nodelay(true);
                 tokio::spawn(serve_pair(shared.clone(), s));
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 warn!("pair-listen accept: {e}");
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            Err(_) => break, // invite expired — free the port
         }
     }
 }
@@ -273,7 +272,23 @@ async fn pair_beacon_wait(session: DeviceId) -> anyhow::Result<String> {
     let mut buf = [0u8; 2048];
     tokio::time::timeout(BEACON_WAIT, async {
         loop {
-            let (n, _) = udp.recv_from(&mut buf).await?;
+            // A quiet 120s wait reads as a hang — heartbeat every 15s.
+            let (n, _) = match tokio::time::timeout(
+                Duration::from_secs(15),
+                udp.recv_from(&mut buf),
+            )
+            .await
+            {
+                Ok(r) => r?,
+                Err(_) => {
+                    eprintln!(
+                        "  › still listening — beacon must reach us; if the wi-fi \
+                         isolates clients use `--server <inviter-ip>` or the full \
+                         invite string instead"
+                    );
+                    continue;
+                }
+            };
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) else {
                 continue;
             };
@@ -285,28 +300,27 @@ async fn pair_beacon_wait(session: DeviceId) -> anyhow::Result<String> {
         }
     })
     .await
-    .context("no invite answering on this lan — is `murmurctl invite` running there?")?
+    .context(
+        "no invite answering on this lan — re-run `murmurctl invite` if it expired; \
+         client-isolating wi-fi needs `murmurd pair --code CODE --server <inviter-ip>`",
+    )?
 }
 
 impl Shared {
     /// `murmurctl invite`: mint a session, keep our DH key, hand back the
     /// code the new device feeds to `murmurd pair --code` (or scans as
     /// a QR on the phone). In a serverless family the invite carries a
-    /// direct `host:port` the joiner dials — the listener lives as long
-    /// as the invite does.
+    /// direct `host:port` the joiner dials — the listener is permanent,
+    /// bound at daemon start.
     pub fn invite(self: &Arc<Self>) -> anyhow::Result<Invite> {
         let url = match self.cfg.family_kind {
             FamilyKind::Serverful => self.cfg.server_url.clone(),
             FamilyKind::Serverless => {
+                // The pair listener is permanent — bound once at daemon
+                // start in lan::run, so a second invite can't hit
+                // EADDRINUSE while the first is still in TTL.
                 let ip = crate::lan::lan_ipv4()
                     .context("serverless invite needs a LAN address to listen on")?;
-                // Fixed port — a host firewall can allow it once; only
-                // one live invite per machine.
-                let l = std::net::TcpListener::bind((ip, crate::lan::PAIR_PORT))
-                    .context("pair port busy — is another invite live?")?;
-                l.set_nonblocking(true)?;
-                let listener = tokio::net::TcpListener::from_std(l)?;
-                tokio::spawn(pair_listen(self.clone(), listener));
                 format!("{ip}:{}", crate::lan::PAIR_PORT)
             }
         };
@@ -493,6 +507,19 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
             let Some(server_url) = server.map(str::to_owned) else {
                 return join_lan_code(session, name).await;
             };
+            if !server_url.starts_with("ws://") && !server_url.starts_with("wss://") {
+                // Not a relay URL — the inviter's direct `host[:port]`,
+                // for LANs where the pair beacon can't pass (AP client
+                // isolation, filtered subnets). `murmurctl invite` shows
+                // it as `direct`. Default port is the fixed pair port.
+                let addr = server_url.strip_prefix("tcp://").unwrap_or(&server_url);
+                let addr = if addr.contains(':') {
+                    addr.to_owned()
+                } else {
+                    format!("{addr}:{}", crate::lan::PAIR_PORT)
+                };
+                return join_direct(&addr, session, name).await;
+            }
             (session, server_url, FamilyKind::Serverful)
         }
     };
@@ -647,7 +674,10 @@ async fn join_lan_code(session: DeviceId, name: &str) -> anyhow::Result<Paired> 
 /// introduction).
 async fn join_direct(addr: &str, session: DeviceId, name: &str) -> anyhow::Result<Paired> {
     let key = PairKey::generate();
-    let s = TcpStream::connect(addr).await?;
+    let s = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr))
+        .await
+        .with_context(|| format!("{addr} unreachable — host firewall or invite expired?"))?
+        .with_context(|| format!("can't connect to {addr}"))?;
     let _ = s.set_nodelay(true);
     let (r, mut w) = s.into_split();
     eprintln!("  ✓ connected to {addr} — direct");

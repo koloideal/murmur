@@ -3,6 +3,31 @@
 All notable changes to murmur. Dates are tag dates; items are the
 commits that shipped in each release.
 
+## [Unreleased]
+
+### Added
+- `murmurd pair --code CODE --server HOST[:PORT]` — direct dial to the
+  inviter's pair listener, bypassing LAN broadcast entirely (AP
+  isolation, filtered subnets). `tcp://` prefix and bare host accepted.
+- `murmurctl invite` prints the direct-dial fallback for serverless.
+- Beacon wait heartbeats every 15 s with the fallback hint instead of
+  a silent 2-minute hang; connect to the inviter has a 10 s timeout.
+
+### Fixed
+- Second `murmurctl invite` inside the invite TTL died with
+  "pair port busy": the serverless pair listener is now bound once at
+  daemon start and lives permanently.
+- `murmurd pair` couldn't listen for the pair beacon while the daemon
+  was running — the daemon's beacon socket lacked SO_REUSEADDR, so the
+  second bind failed with EADDRINUSE.
+- Unconfigured installs crash-looped: the user unit now carries
+  `ConditionPathExists` on config.toml and skips quietly until paired.
+- install-client: skips the join flow entirely when config.toml
+  already exists (provision would refuse the overwrite anyway), the
+  relay question accepts the inviter's ip[:port], and declining the
+  firewall offer now names what breaks (discovery, phone links,
+  serverless pairing).
+
 ## [0.5.0] — 2026-11-27
 
 ### Added
