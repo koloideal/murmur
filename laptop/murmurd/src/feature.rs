@@ -81,7 +81,7 @@ impl Feature {
 /// Fans each decrypted inbound message out to the features that want it.
 /// Lives on the conn side — conn calls `dispatch` per envelope.
 pub struct Hub {
-    sinks: std::collections::HashMap<
+    pub(crate) sinks: std::collections::HashMap<
         &'static str,
         Vec<mpsc::UnboundedSender<(DeviceId, std::sync::Arc<Message>)>>,
     >,

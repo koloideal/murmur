@@ -263,6 +263,24 @@ impl Shared {
         self.cfg.family_kind == murmur_proto::FamilyKind::Serverful
     }
 
+    /// The inbound invariant every transport shares: dedupe BEFORE
+    /// dispatch, or a dual-path frame (LAN early copy + relay copy)
+    /// reaches features twice. Transports open envelopes themselves;
+    /// what happens after opening is exactly this.
+    pub(crate) fn ingest(
+        &self,
+        hub: &crate::feature::Hub,
+        from: DeviceId,
+        seq: u64,
+        msg: &Message,
+    ) -> bool {
+        if !self.dedupe(from, seq) {
+            return false;
+        }
+        hub.dispatch(from, msg);
+        true
+    }
+
     /// Link bookkeeping for [`crate::lan`]. Called on every valid
     /// frame — a no-op while the map already points at this channel,
     /// so it never tramples the link's measured RTT.

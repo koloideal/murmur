@@ -568,9 +568,7 @@ async fn link_reader(
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, *tcp_port));
                     }
                 }
-                if shared.dedupe(env.from, env.seq) {
-                    hub.dispatch(env.from, &msg);
-                }
+                shared.ingest(&hub, env.from, env.seq, &msg);
             }
             Err(e) => {
                 // Same stale-member recovery as the relay path: an old

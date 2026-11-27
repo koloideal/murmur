@@ -11,6 +11,7 @@ mod feature;
 mod install;
 mod keyring;
 mod lan;
+mod integ;
 mod lockproc;
 mod logind;
 mod mpris;
