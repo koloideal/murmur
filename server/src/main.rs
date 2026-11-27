@@ -1341,3 +1341,122 @@ async fn send_ctl(
         .await?;
     Ok(())
 }
+
+
+// ---------------------------------------------------------------------------
+// Registry security invariants — the relay is the family's only central
+// point of trust, and these are the promises it must never break.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> (Shared, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "murmurs-test-{}-{}",
+            std::process::id(),
+            DeviceId::random()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devices.json");
+        (Shared::load(path.clone()).unwrap(), path)
+    }
+
+    #[test]
+    fn registered_device_auths_and_wrong_token_fails() {
+        let (s, _p) = shared();
+        let id = DeviceId::random();
+        s.register(id, "laptop".into(), "hash-of-token".into());
+        assert!(s.check_auth(&id, "hash-of-token"));
+        assert!(!s.check_auth(&id, "wrong"));
+        assert!(!s.check_auth(&DeviceId::random(), "hash-of-token"));
+        assert_eq!(s.auth_failure(&id), "bad token");
+    }
+
+    /// THE security invariant: revocation kills auth immediately,
+    /// and the reason told to the device is "revoked" — so it stops
+    /// retrying instead of hammering the relay forever.
+    #[test]
+    fn revoke_kills_auth_instantly() {
+        let (s, _p) = shared();
+        let id = DeviceId::random();
+        s.register(id, "phone".into(), "hash".into());
+        assert!(s.check_auth(&id, "hash"));
+        assert!(s.revoke(&id));
+        assert!(!s.check_auth(&id, "hash"), "a revoked device must never auth again");
+        assert_eq!(s.auth_failure(&id), "revoked");
+        // unknown devices get a distinct reason — debugging lives on it
+        assert_eq!(s.auth_failure(&DeviceId::random()), "unknown device");
+        // double-revoke is a no-op, not an error
+        assert!(s.revoke(&id));
+    }
+
+    /// devices.json is the only state the relay owns — a restart must
+    /// not resurrect revoked devices or lose live ones.
+    #[test]
+    fn registry_survives_reload() {
+        let (s, path) = shared();
+        let live = DeviceId::random();
+        let dead = DeviceId::random();
+        s.register(live, "laptop".into(), "h1".into());
+        s.register(dead, "old-phone".into(), "h2".into());
+        s.revoke(&dead);
+        drop(s);
+
+        let s2 = Shared::load(path).unwrap();
+        assert!(s2.check_auth(&live, "h1"), "live device survives restart");
+        assert!(!s2.check_auth(&dead, "h2"), "revoked stays revoked across restart");
+    }
+
+    /// Bootstrap is the family-creation window: armed only while NO
+    /// active device exists, closed the moment the founder registers.
+    /// A window that stayed open would be a permanent backdoor.
+    #[test]
+    fn bootstrap_window_closes_after_founder() {
+        let (s, _p) = shared();
+        assert!(s.bootstrap_session().is_some(), "empty relay arms bootstrap");
+        let founder = DeviceId::random();
+        s.register(founder, "founder".into(), "h".into());
+        assert!(s.bootstrap_session().is_none(), "founder closes the window");
+    }
+
+    /// All-revoked re-arms bootstrap — the family can be refounded
+    /// after everyone left, but ONLY then.
+    #[test]
+    fn all_revoked_rearms_bootstrap() {
+        let (s, path) = shared();
+        let id = DeviceId::random();
+        s.register(id, "x".into(), "h".into());
+        s.revoke(&id);
+        drop(s);
+        // reload: all devices revoked → bootstrap armed again
+        let s2 = Shared::load(path).unwrap();
+        assert!(s2.bootstrap_session().is_some());
+    }
+
+    #[test]
+    fn rename_persists() {
+        let (s, path) = shared();
+        let id = DeviceId::random();
+        s.register(id, "old".into(), "h".into());
+        s.rename(&id, "new".into());
+        drop(s);
+        let s2 = Shared::load(path).unwrap();
+        let list = s2.device_list();
+        assert_eq!(list.iter().find(|d| d.device_id == id).unwrap().name, "new");
+    }
+
+    /// family_name rides devices.json through the reserved key — a
+    /// reload must neither lose it nor mistake it for a device.
+    #[test]
+    fn family_name_roundtrips_and_is_not_a_device() {
+        let (s, path) = shared();
+        s.register(DeviceId::random(), "x".into(), "h".into());
+        *s.family_name.lock().unwrap() = Some("testfamily".into());
+        s.persist();
+        drop(s);
+        let s2 = Shared::load(path).unwrap();
+        assert_eq!(*s2.family_name.lock().unwrap(), Some("testfamily".into()));
+        assert_eq!(s2.device_list().len(), 1, "family_name must not parse as a device");
+    }
+}
