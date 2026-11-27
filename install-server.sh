@@ -56,14 +56,16 @@ EOF
 }
 
 dl() { # dl URL DEST
-    if [ -t 1 ]; then curl -fL --progress-bar "$1" -o "$2"
-    else curl -fsSL "$1" -o "$2"; fi
+    if [ -t 1 ]; then curl -fL --connect-timeout 15 --progress-bar "$1" -o "$2"
+    else curl -fsSL --connect-timeout 15 "$1" -o "$2"; fi
+    _rc=$?
     printf '\n'
+    return $_rc
 }
 
 # remote_etag URL — last ETag header from a HEAD request, empty on failure
 remote_etag() {
-    curl -fsSIL "$1" 2>/dev/null | tr -d '\r' \
+    curl -fsSIL --connect-timeout 10 "$1" 2>/dev/null | tr -d '\r' \
         | awk 'tolower($1) == "etag:" {e=$2} END {print e}'
 }
 
@@ -77,13 +79,19 @@ dl_cached() {
         ok "$_dest — already latest, skipping download"
         return 0
     fi
-    dl "$_url" "$_dest.new"
-    install -m 755 "$_dest.new" "$_dest" && rm -f "$_dest.new"
+    # a failed/partial download must never reach DEST — drop the staging file
+    if ! dl "$_url" "$_dest.new"; then rm -f "$_dest.new"; return 1; fi
+    if ! install -m 755 "$_dest.new" "$_dest"; then rm -f "$_dest.new"; return 1; fi
+    rm -f "$_dest.new"
     if [ -n "$_etag" ]; then printf '%s' "$_etag" > "$_etagf"; fi
     ok "$_dest"
 }
 
-have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
+# -r/-w on the device node always pass (it's 0666) — the real test is
+# whether it OPENS (ENXIO without a controlling terminal). `true` not `:`:
+# a failed redirect on a special builtin/compound cmd is fatal in POSIX sh,
+# while `true` just returns non-zero. 2>/dev/null first so the error is muted
+have_tty() { true 2>/dev/null < /dev/tty; }
 
 # ---- validators: print a friendly hint to stderr, return 1 on bad input
 v_domain() {
@@ -95,7 +103,7 @@ v_domain() {
 
 v_addr() {
     case "$1" in
-        \[*\]:*) host=${1%\]:*}; port=${1##*:} ;;          # [v6]:port
+        \[*\]:*) host=${1%\]:*}; host=${host#\[}; port=${1##*:} ;;   # [v6]:port
         *:*)     host=${1%:*};   port=${1##*:} ;;          # host:port / v4:port
         *)       host=""; port="" ;;
     esac
@@ -198,6 +206,8 @@ if [ -n "$DOMAIN" ] && [ "$PROXY_CFG" != "no" ]; then
         warn "no nginx/caddy found — relay stays plain ws, TLS is on you"
         PROXY=none
     fi
+    [ "$PROXY" = "none" ] && \
+        warn "no TLS proxy configured — the endpoint will be ws://, not wss://"
 fi
 
 case "$PROXY" in
@@ -213,6 +223,8 @@ fi
 v_domain "$DOMAIN" || exit 1
 v_addr "$ADDR"     || exit 1
 v_email "$EMAIL"   || exit 1
+# a | in the family name would split the summary box (it IFSes on |)
+FAMILY=$(printf '%s' "$FAMILY" | tr '|' ' ')
 
 # ---- binary
 case "$(uname -m)" in
@@ -229,7 +241,14 @@ dl_cached "$URL" "$PREFIX/murmurs"
 case "$PROXY" in
     nginx)
         step "nginx vhost for $DOMAIN"
-        vh="/etc/nginx/sites-available/$DOMAIN"
+        # Debian-layout (sites-available/enabled) vs conf.d (RHEL/Arch/default)
+        if [ -d /etc/nginx/sites-available ] && [ -d /etc/nginx/sites-enabled ]; then
+            vh="/etc/nginx/sites-available/$DOMAIN"
+            en="/etc/nginx/sites-enabled/$DOMAIN"
+        else
+            vh="/etc/nginx/conf.d/$DOMAIN.conf"
+            en=""
+        fi
         vh_tmp=$(mktemp)
         cat > "$vh_tmp" <<EOF
 server {
@@ -251,8 +270,9 @@ EOF
             rm -f "$vh_tmp"
             ok "$vh unchanged"
         else
+            mkdir -p "$(dirname "$vh")"
             mv "$vh_tmp" "$vh"
-            ln -sf "$vh" "/etc/nginx/sites-enabled/$DOMAIN"
+            [ -n "$en" ] && ln -sf "$vh" "$en"
             if nginx -t && systemctl reload nginx; then
                 ok "$vh enabled"
             else
@@ -264,7 +284,7 @@ EOF
             if command -v apt-get >/dev/null 2>&1 && \
                askyn y "certbot not installed — install certbot + nginx plugin via apt?"; then
                 if apt-get update -qq && \
-                   apt-get install -y -qq certbot python3-certbot-nginx >/dev/null; then
+                   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx >/dev/null; then
                     ok "certbot installed"
                 else
                     warn "apt install of certbot failed"
@@ -293,7 +313,11 @@ EOF
     caddy)
         step "caddy site for $DOMAIN"
         cf="/etc/caddy/Caddyfile"
-        if ! grep -q "^$DOMAIN" "$cf" 2>/dev/null; then
+        # domain-as-regex: escape dots, require a boundary so "example.com"
+        # doesn't match "myexample.com" — and only anchored site lines count
+        dom_esc=$(printf '%s' "$DOMAIN" | sed 's/\./\\./g')
+        if ! grep -Eq "^${dom_esc}([[:space:]{}]|$)" "$cf" 2>/dev/null; then
+            mkdir -p "$(dirname "$cf")"
             cat >> "$cf" <<EOF
 
 $DOMAIN {
@@ -301,8 +325,11 @@ $DOMAIN {
 }
 EOF
         fi
-        systemctl reload caddy 2>/dev/null || caddy reload --config "$cf" 2>/dev/null || true
-        ok "https://$DOMAIN — caddy issues the cert itself"
+        if systemctl reload caddy 2>/dev/null || caddy reload --config "$cf" 2>/dev/null; then
+            ok "https://$DOMAIN — caddy issues the cert itself"
+        else
+            warn "caddy reload failed — site appended to $cf but not live; run: systemctl reload caddy"
+        fi
         ;;
 esac
 
@@ -344,11 +371,32 @@ fi
 if [ -n "$was_active" ]; then systemctl restart murmurs; fi
 ok "murmurs.service enabled + started ($ADDR)"
 
-sleep 1
-code=$(journalctl -u murmurs -n 30 --no-pager 2>/dev/null \
-    | grep -o 'bootstrap code: [0-9A-Z-]*' | tail -1 || true)
+# the CLI is authoritative; journald scrape is only a fallback (it races
+# the journal flush and is empty entirely on non-journald logging setups).
+# the admin socket takes a beat after enable --now — retry briefly.
+code=""; _i=0
+while [ $_i -lt 5 ] && [ -z "$code" ]; do
+    out=$("$PREFIX/murmurs" bootstrap-code 2>/dev/null \
+        | sed "s/$(printf '\033')\\[[0-9;]*m//g" || true)
+    code=$(printf '%s' "$out" | grep -oE '[A-Z0-9]{4}-[A-Z0-9]{4}' | head -1 || true)
+    [ -n "$code" ] && break
+    printf '%s' "$out" | grep -q 'no bootstrap' && break   # family exists — no point retrying
+    sleep 1; _i=$((_i + 1))
+done
+if [ -z "$code" ]; then
+    code=$(journalctl -u murmurs -n 30 --no-pager 2>/dev/null \
+        | grep -o 'bootstrap code: [0-9A-Z-]*' | tail -1 || true)
+fi
 
-if [ -n "$DOMAIN" ]; then EP="wss://$DOMAIN"; else EP="ws://$ADDR"; fi
+# endpoint must reflect what actually got configured: wss only exists when
+# a proxy was set up; otherwise the relay speaks plain ws on its own addr
+case "$PROXY" in
+    nginx|caddy) EP="wss://$DOMAIN" ;;
+    *) case "$ADDR" in
+           127.0.0.1:*|localhost:*|\[::1\]:*) EP="ws://$ADDR" ;;
+           *) if [ -n "$DOMAIN" ]; then EP="ws://$DOMAIN:${ADDR##*:}"; else EP="ws://$ADDR"; fi ;;
+       esac ;;
+esac
 
 # vlen: visible length (strip ANSI escapes, count chars not bytes)
 vlen() { printf '%s' "$1" | sed "s/$(printf '\033')\\[[0-9;]*m//g" | wc -m; }

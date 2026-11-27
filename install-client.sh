@@ -46,14 +46,16 @@ EOF
 }
 
 dl() { # dl URL DEST
-    if [ -t 1 ]; then curl -fL --progress-bar "$1" -o "$2"
-    else curl -fsSL "$1" -o "$2"; fi
+    if [ -t 1 ]; then curl -fL --connect-timeout 15 --progress-bar "$1" -o "$2"
+    else curl -fsSL --connect-timeout 15 "$1" -o "$2"; fi
+    _rc=$?
     printf '\n'
+    return $_rc
 }
 
 # remote_etag URL — last ETag header from a HEAD request, empty on failure
 remote_etag() {
-    curl -fsSIL "$1" 2>/dev/null | tr -d '\r' \
+    curl -fsSIL --connect-timeout 10 "$1" 2>/dev/null | tr -d '\r' \
         | awk 'tolower($1) == "etag:" {e=$2} END {print e}'
 }
 
@@ -67,13 +69,19 @@ dl_cached() {
         ok "$_dest — already latest, skipping download"
         return 0
     fi
-    dl "$_url" "$_dest.new"
-    install -m 755 "$_dest.new" "$_dest" && rm -f "$_dest.new"
+    # a failed/partial download must never reach DEST — drop the staging file
+    if ! dl "$_url" "$_dest.new"; then rm -f "$_dest.new"; return 1; fi
+    if ! install -m 755 "$_dest.new" "$_dest"; then rm -f "$_dest.new"; return 1; fi
+    rm -f "$_dest.new"
     if [ -n "$_etag" ]; then printf '%s' "$_etag" > "$_etagf"; fi
     ok "$_dest"
 }
 
-have_tty() { [ -r /dev/tty ] && [ -w /dev/tty ]; }
+# -r/-w on the device node always pass (it's 0666) — the real test is
+# whether it OPENS (ENXIO without a controlling terminal). `true` not `:`:
+# a failed redirect on a special builtin/compound cmd is fatal in POSIX sh,
+# while `true` just returns non-zero. 2>/dev/null first so the error is muted
+have_tty() { true 2>/dev/null < /dev/tty; }
 
 v_url() {
     [ -z "$1" ] && return 0
@@ -138,6 +146,17 @@ hint_box() {
 }
 
 banner
+if [ "$(id -u)" -eq 0 ]; then
+    warn "running as root — this installer is per-user; files would land in /root"
+    warn "re-run as your normal user, without sudo"
+    printf '\n' >&2
+fi
+if ! have_tty; then
+    warn "no tty — questions are skipped (nothing gets paired)"
+    warn "to pair non-interactively: ... | sh -s -- --server wss://HOST --code XXXX-XXXX"
+    printf '\n' >&2
+fi
+
 case "$(uname -m)" in
     x86_64)        TARGET=x86_64-unknown-linux-gnu ;;
     aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
@@ -160,25 +179,32 @@ else
 fi
 
 # ---- shell completions — every binary prints its own via `completions`
-step "shell completions"
 _zfunc="$HOME/.zfunc"
 _bashcomp="$HOME/.local/share/bash-completion/completions"
 _fishcomp="$HOME/.config/fish/completions"
-mkdir -p "$_bashcomp" "$_fishcomp"
-[ -f "$HOME/.zshrc" ] && mkdir -p "$_zfunc"
-for tool in murmurd murmurctl murmurt; do
-    [ -x "$BIN/$tool" ] || continue
-    [ -f "$HOME/.zshrc" ] && "$BIN/$tool" completions zsh > "$_zfunc/_$tool" 2>/dev/null
-    "$BIN/$tool" completions bash > "$_bashcomp/$tool" 2>/dev/null
-    "$BIN/$tool" completions fish > "$_fishcomp/$tool.fish" 2>/dev/null
-done
+
+completions_for() { # completions_for TOOL
+    [ -x "$BIN/$1" ] || return 0
+    if [ -f "$HOME/.zshrc" ]; then
+        mkdir -p "$_zfunc"
+        "$BIN/$1" completions zsh > "$_zfunc/_$1" 2>/dev/null || rm -f "$_zfunc/_$1"
+    fi
+    mkdir -p "$_bashcomp" "$_fishcomp"
+    "$BIN/$1" completions bash > "$_bashcomp/$1" 2>/dev/null || rm -f "$_bashcomp/$1"
+    "$BIN/$1" completions fish > "$_fishcomp/$1.fish" 2>/dev/null || rm -f "$_fishcomp/$1.fish"
+}
+
+step "shell completions"
+for tool in murmurd murmurctl; do completions_for "$tool"; done
 ok "bash + fish completions installed"
 if [ -f "$HOME/.zshrc" ]; then
     if grep -q "zfunc" "$HOME/.zshrc" 2>/dev/null; then
         ok "zsh completions → $_zfunc (already in fpath)"
     elif askyn y "zsh: add ~/.zfunc to fpath in .zshrc for completions?"; then
-        printf '\n# murmur completions\nfpath+=~/.zfunc\n' >> "$HOME/.zshrc"
-        ok "fpath updated — open a new shell"
+        # fpath must be set BEFORE compinit runs — a trailing fpath+= alone
+        # does nothing, so append compinit too (running it twice is harmless)
+        printf '\n# murmur completions\nfpath+=~/.zfunc\nautoload -Uz compinit && compinit\n' >> "$HOME/.zshrc"
+        ok "fpath + compinit updated — open a new shell"
     fi
 fi
 
@@ -187,9 +213,10 @@ case ":$PATH:" in
     *":$BIN:"*) : ;;
     *)
         if askyn y "add $BIN to PATH in your shell rc files?"; then
-            line='export PATH="$HOME/.local/bin:$PATH"  # murmur'
+            line="export PATH=\"$BIN:\$PATH\"  # murmur"
             added=""
-            for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+            # .bash_profile shadows .profile for login shells — write both
+            for rc in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
                 [ -f "$rc" ] || continue
                 if ! grep -q '# murmur' "$rc"; then
                     printf '%s\n' "$line" >> "$rc"
@@ -197,6 +224,15 @@ case ":$PATH:" in
                     added=yes
                 fi
             done
+            # fish reads none of the above — it has its own config + fish_add_path
+            _fcfg="$HOME/.config/fish/config.fish"
+            if [ -f "$_fcfg" ]; then
+                if ! grep -q '# murmur' "$_fcfg"; then
+                    printf 'fish_add_path %s  # murmur\n' "$BIN" >> "$_fcfg"
+                    ok "PATH → $_fcfg"
+                    added=yes
+                fi
+            fi
             if [ -z "$added" ]; then
                 printf '%s\n' "$line" >> "$HOME/.profile"
                 ok "PATH → $HOME/.profile"
@@ -246,30 +282,42 @@ fi
 # murmurt embeds every island asset — scripts, fonts, snippets — and
 # marker-merges the waybar/hyprland configs itself. One binary install.
 if command -v waybar >/dev/null 2>&1 || [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
-    if askyn n "install the waybar island + player popup? (hyprland integration)"; then
+    # tty-guarded: an unattended run must not touch waybar/hyprland configs
+    if have_tty && askyn y "install the waybar island + player popup? (hyprland integration)"; then
         step "murmurt binary"
+        _murt=""
         if [ -n "$SRC" ]; then
-            [ -x "$SRC/murmurt" ] || die "$SRC/murmurt not found — build first: cargo build --release --manifest-path laptop/Cargo.toml"
-            install -m 755 "$SRC/murmurt" "$BIN/murmurt"
+            if [ -x "$SRC/murmurt" ]; then
+                install -m 755 "$SRC/murmurt" "$BIN/murmurt"
+                _murt=yes
+            else
+                warn "$SRC/murmurt not found — skipping island"
+            fi
+        elif dl_cached "https://github.com/$REPO/releases/latest/download/murmurt-$TARGET" "$BIN/murmurt"; then
+            _murt=yes
         else
-            dl_cached "https://github.com/$REPO/releases/latest/download/murmurt-$TARGET" "$BIN/murmurt"
-            chmod 755 "$BIN/murmurt"
+            # murmurt is optional — a missing/404 release asset must not kill
+            # the install before the pairing prompts below
+            warn "murmurt download failed — skipping island (it may not be in the latest release yet)"
         fi
-        ok "$BIN/murmurt"
-        step "murmurt install"
-        if "$BIN/murmurt" install; then
-            ok "island installed"
-        else
-            warn "murmurt install hit errors — check the output above"
+        if [ -n "$_murt" ]; then
+            completions_for murmurt
+            ok "$BIN/murmurt"
+            step "murmurt install"
+            if "$BIN/murmurt" install; then
+                ok "island installed"
+            else
+                warn "murmurt install hit errors — check the output above"
+            fi
+            box "${B}island installed${R0}" \
+                "" \
+                "verify the runtime deps:" \
+                "  ${D2}murmurt doctor${R0}" \
+                "remove it cleanly:" \
+                "  ${D2}murmurt uninstall${R0}" \
+                "" \
+                "restart waybar / reload hyprland to pick everything up"
         fi
-        box "${B}island installed${R0}" \
-            "" \
-            "verify the runtime deps:" \
-            "  ${D2}murmurt doctor${R0}" \
-            "remove it cleanly:" \
-            "  ${D2}murmurt uninstall${R0}" \
-            "" \
-            "restart waybar / reload hyprland to pick everything up"
     fi
 fi
 
@@ -302,10 +350,17 @@ post_pair() {
 
 # ---- join: args beat questions beat the hint box
 if [ $# -gt 0 ]; then
-    # --serverless founds a lan-only family here — the rest of the args
-    # (--name, --family) go straight to `murmurd init`.
-    if [ "$1" = "--serverless" ]; then
-        shift
+    # --serverless founds a lan-only family here — recognized anywhere in
+    # the args, the rest (--name, --family) go straight to `murmurd init`.
+    serverless=no; _nargs=$#
+    for a in "$@"; do
+        case "$a" in
+            --serverless) serverless=yes ;;
+            *) set -- "$@" "$a" ;;
+        esac
+    done
+    shift "$_nargs"
+    if [ "$serverless" = yes ]; then
         "$BIN/murmurd" init --kind serverless "$@" || die "init failed"
         post_pair "you founded a family"
         exit 0
@@ -337,23 +392,28 @@ fi
 if have_tty && askyn n "found a serverless family here? (lan only — no relay, ever)"; then
     NAME=$(ask "" "$(uname -n)" "device name")
     FAMN=$(ask "" "" "family name (optional)")
-    init_args="--kind serverless --name $NAME"
-    if [ -n "$FAMN" ]; then init_args="$init_args --family $FAMN"; fi
-    # shellcheck disable=SC2086
-    "$BIN/murmurd" init $init_args < /dev/tty || die "init failed"
+    if [ -n "$FAMN" ]; then
+        "$BIN/murmurd" init --kind serverless --name "$NAME" --family "$FAMN" < /dev/tty || die "init failed"
+    else
+        "$BIN/murmurd" init --kind serverless --name "$NAME" < /dev/tty || die "init failed"
+    fi
     post_pair "you founded a family"
     exit 0
 fi
 
-if have_tty && askyn n "join the family now?"; then
+# joining is what this installer is for — yes is the sane default;
+# empty answers on both follow-ups bail out cleanly to the hint box
+if have_tty && askyn y "join the family now?"; then
     SERVER=$(ask v_url "" "relay server URL — wss://domain or ws://ip:port")
     CODE=$(ask "" "" "invite code — XXXX-XXXX or a full invite string")
-    pair_args=""
-    if [ -n "$SERVER" ]; then pair_args="--server $SERVER"; fi
-    if [ -n "$CODE" ];   then pair_args="$pair_args --code $CODE"; fi
-    if [ -n "$pair_args" ]; then
-        # shellcheck disable=SC2086
-        "$BIN/murmurd" pair $pair_args < /dev/tty || die "pairing failed"
+    if [ -n "$SERVER$CODE" ]; then
+        if [ -n "$SERVER" ] && [ -n "$CODE" ]; then
+            "$BIN/murmurd" pair --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
+        elif [ -n "$SERVER" ]; then
+            "$BIN/murmurd" pair --server "$SERVER" < /dev/tty || die "pairing failed"
+        else
+            "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed"
+        fi
         post_pair
         exit 0
     fi
