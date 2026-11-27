@@ -162,8 +162,8 @@ fun StatusCard() {
                         pulses.add(GhostPulse(
                             t0 = now,
                             kind = kind,
-                            lift = (14..24).random().toFloat(),
-                            span = (45..85).random().toFloat() / 100f,
+                            crest = (0..2).random(),
+                            bulge = (60..130).random().toFloat() / 100f,
                         ))
                         pulses.removeAll { now - it.t0 > PULSE_MS }
                     }
@@ -199,6 +199,14 @@ fun StatusCard() {
                     val nowMs = System.currentTimeMillis()
                     val amp = 13.dp.toPx()
                     val wl = size.width / 3.2f
+                    // One event = one crest of the wave itself, bulging
+                    // upward. The ghost copies exactly one period of the
+                    // same sine between two zero crossings — so its ends
+                    // never leave the baseline at any phase — while its
+                    // middle swells with the envelope. The crest it
+                    // haunted stays put; what you see is the wave's own
+                    // echo stretched taller, dimmer, tinted by kind.
+                    val tau = (2f * PI).toFloat()
                     for (pulse in pulses) {
                         val p = (nowMs - pulse.t0) / PULSE_MS.toFloat()
                         if (p !in 0f..1f) continue
@@ -208,29 +216,35 @@ fun StatusCard() {
                             PulseKind.NOTIFY -> PULSE_NOTIFY
                             PulseKind.MEDIA -> PULSE_MEDIA
                         }
+                        // Zero crossings: tau·x/wl + phase = m·π. Collect
+                        // whole periods fully inside the width, haunt the
+                        // pulse's rolled one.
+                        val periods = mutableListOf<Pair<Float, Float>>()
+                        // x = (mπ − phase)·wl/τ is non-negative from
+                        // m ≥ phase/π — start one earlier and scan up.
+                        var m = kotlin.math.ceil(phase / Math.PI).toInt() - 1
+                        while (true) {
+                            val x0 = (m * Math.PI - phase).toFloat() * wl / tau
+                            val x1 = ((m + 2) * Math.PI - phase).toFloat() * wl / tau
+                            if (x1 < 0f) { m++; continue }
+                            if (x0 > size.width) break
+                            if (x0 >= 0f && x1 <= size.width) periods.add(x0 to x1)
+                            m++
+                        }
+                        if (periods.isEmpty()) continue
+                        val (x0, x1) = periods[pulse.crest % periods.size]
                         val ghostColor = lerp(
-                            color.copy(alpha = 0.34f * env),
-                            tint.copy(alpha = 0.34f * env),
+                            color.copy(alpha = 0.4f * env),
+                            tint.copy(alpha = 0.4f * env),
                             0.55f,
                         )
-                        // Hann-ish taper over a random-width central span
-                        // of the wave — outside the span the packet is
-                        // zero, so it reads as a piece torn off the wave.
-                        val span = pulse.span
-                        val lo = (1f - span) / 2f
                         drawPath(
                             wavePath(size.width, size.height / 2f,
-                                amplitude = amp,
+                                amplitude = amp * (1f + pulse.bulge * env),
                                 wavelength = wl,
                                 phase = phase,
-                                offsetY = -pulse.lift.dp.toPx() * env,
-                                ampWindow = { t ->
-                                    val u = (t - lo) / span
-                                    if (u in 0f..1f) {
-                                        val s = sin(PI.toFloat() * u)
-                                        s * s
-                                    } else 0f
-                                }),
+                                fromX = x0,
+                                toX = x1),
                             ghostColor,
                             style = Stroke(width = 3.dp.toPx()),
                         )
@@ -516,8 +530,10 @@ private const val PULSE_MS = 1400L
 private data class GhostPulse(
     val t0: Long,
     val kind: PulseKind,
-    val lift: Float,
-    val span: Float,
+    /** Which visible period to haunt (modulo however many fit). */
+    val crest: Int,
+    /** How far past the baseline amplitude the crest swells at peak. */
+    val bulge: Float,
 )
 
 // Shades of green — one family, distinguishable kinds.
