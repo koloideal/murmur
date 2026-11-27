@@ -478,7 +478,7 @@ fn spawn_link(
         tokio::spawn(async move {
             tokio::time::sleep(VERIFY_AFTER).await;
             if !validated.load(std::sync::atomic::Ordering::Relaxed) {
-                info!("lan: link down (unvalidated)");
+                info!("lan: link down ({dir:?} unvalidated)");
                 let _ = probe.shutdown(std::net::Shutdown::Both);
                 shared.lan_clear(&tx2);
             }
@@ -487,7 +487,7 @@ fn spawn_link(
     // Keepalives jump the data queue — a pong that waits behind a
     // media burst measures queue depth, not link latency.
     let (tx_hi, rx_hi) = mpsc::unbounded_channel::<Envelope>();
-    tokio::spawn(link_writer(shared.clone(), w, rx, rx_hi, tx.clone()));
+    tokio::spawn(link_writer(shared.clone(), w, rx, rx_hi, tx.clone(), dir));
     tokio::spawn(link_reader(
         shared.clone(),
         hub.clone(),
@@ -540,6 +540,7 @@ async fn link_writer(
     mut rx: mpsc::UnboundedReceiver<Envelope>,
     mut rx_hi: mpsc::UnboundedReceiver<Envelope>,
     tx: mpsc::UnboundedSender<Envelope>,
+    dir: LinkDir,
 ) {
     loop {
         // biased: keepalives are always drained before queued data.
@@ -552,7 +553,7 @@ async fn link_writer(
         let mut line = env.to_json();
         line.push('\n');
         if let Err(e) = w.write_all(line.as_bytes()).await {
-            info!("lan: link down (writer: {e})");
+            info!("lan: link down ({dir:?} writer: {e})");
             break;
         }
     }
@@ -582,26 +583,31 @@ async fn link_reader(
     const LINE_CAP: u64 = murmur_proto::MAX_ENVELOPE_JSON as u64 + 1;
     let mut br = BufReader::new(tokio::io::AsyncReadExt::take(r, LINE_CAP));
     let mut line = String::new();
+    // Tie-break hygiene kills loser sockets all the time — a death log
+    // that can't tell a loser reap from the winner dying reads as link
+    // flapping and once cost a full misdiagnosis. Every death names its
+    // direction and, once adopted, the peer.
+    let mut peer_tag = String::new();
     loop {
         line.clear();
         br.get_mut().set_limit(LINE_CAP);
         match tokio::time::timeout(LINK_IDLE, br.read_line(&mut line)).await {
             // The limit fired mid-line: a frame this big is broken or hostile.
             Ok(Ok(n)) if n as u64 == LINE_CAP && !line.ends_with('\n') => {
-                info!("lan: link down (frame over wire cap)");
+                info!("lan: link down ({dir:?}{peer_tag} frame over wire cap)");
                 break;
             }
             Ok(Ok(n)) if n > 0 => {}
             Ok(Ok(_)) => {
-                info!("lan: link down (peer closed)");
+                info!("lan: link down ({dir:?}{peer_tag} peer closed)");
                 break;
             }
             Ok(Err(e)) => {
-                info!("lan: link down (reader: {e})");
+                info!("lan: link down ({dir:?}{peer_tag} reader: {e})");
                 break;
             }
             Err(_) => {
-                info!("lan: link down (idle timeout)");
+                info!("lan: link down ({dir:?}{peer_tag} idle timeout)");
                 break;
             }
         }
@@ -643,6 +649,9 @@ async fn link_reader(
                 // A frame that opens proves family membership → adopt.
                 // Each peer owns its own map slot — a second device
                 // links alongside, never evicts.
+                if peer_tag.is_empty() {
+                    peer_tag = format!(" {} ", env.from);
+                }
                 if !shared.lan_peers().contains(&env.from) {
                     info!("lan: link up with {} ({dir:?})", env.from);
                     // Proven reachable → worth remembering for the
