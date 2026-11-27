@@ -115,7 +115,7 @@ pub struct Shared {
     /// Live LAN links keyed by peer — a star/mesh fast-path: several
     /// devices can each hold a direct link, unicast picks its peer,
     /// broadcast gets an early copy on every link.
-    lan: Mutex<HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>>,
+    lan: Mutex<HashMap<DeviceId, (mpsc::UnboundedSender<Envelope>, crate::lan::Transport)>>,
     /// This node's last measured round-trip per peer in ms
     /// (0 = unknown); each peer measures its own on its side.
     lan_rtt: Mutex<HashMap<DeviceId, u64>>,
@@ -232,12 +232,12 @@ impl Shared {
                 // Broadcast rides every live link — each peer gets its
                 // early copy; the relay copy follows as always.
                 Route::All => {
-                    for tx in lan.values() {
+                    for (tx, _) in lan.values() {
                         let _ = tx.send(env.clone());
                     }
                 }
                 Route::Device(d) => {
-                    if let Some(tx) = lan.get(d) {
+                    if let Some((tx, _)) = lan.get(d) {
                         let _ = tx.send(env.clone());
                     }
                 }
@@ -266,13 +266,13 @@ impl Shared {
     /// Link bookkeeping for [`crate::lan`]. Called on every valid
     /// frame — a no-op while the map already points at this channel,
     /// so it never tramples the link's measured RTT.
-    pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>) {
+    pub fn lan_adopt(&self, peer: DeviceId, tx: mpsc::UnboundedSender<Envelope>, transport: crate::lan::Transport) {
         {
             let mut lan = self.lan.lock().unwrap();
-            if matches!(lan.get(&peer), Some(t) if t.same_channel(&tx)) {
+            if matches!(lan.get(&peer), Some((t, _)) if t.same_channel(&tx)) {
                 return;
             }
-            lan.insert(peer, tx);
+            lan.insert(peer, (tx, transport));
             self.lan_rtt.lock().unwrap().insert(peer, 0);
         }
         // The link-up is a rendezvous: announce so the peer pins our
@@ -287,9 +287,19 @@ impl Shared {
     /// must ride a specific key (a re-key sealed under the peer's old
     /// key), not the current-key seal `send` always applies.
     pub(crate) fn lan_send(&self, peer: &DeviceId, env: Envelope) {
-        if let Some(tx) = self.lan.lock().unwrap().get(peer) {
+        if let Some((tx, _)) = self.lan.lock().unwrap().get(peer) {
             let _ = tx.send(env);
         }
+    }
+
+    /// Transport tag per linked peer — ctl shows how the link rides.
+    pub fn lan_transports(&self) -> Vec<(DeviceId, crate::lan::Transport)> {
+        self.lan
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, (_, t))| (*p, *t))
+            .collect()
     }
 
     /// Live peers — the ctl/island "on lan" truth.
@@ -311,10 +321,10 @@ impl Shared {
         let mut g = self.lan.lock().unwrap();
         let removed: Vec<DeviceId> = g
             .iter()
-            .filter(|(_, t)| t.same_channel(tx))
+            .filter(|(_, (t, _))| t.same_channel(tx))
             .map(|(p, _)| *p)
             .collect();
-        g.retain(|_, t| !t.same_channel(tx));
+        g.retain(|_, (t, _)| !t.same_channel(tx));
         let remaining: std::collections::HashSet<DeviceId> = g.keys().copied().collect();
         drop(g);
         self.lan_rtt

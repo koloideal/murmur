@@ -93,13 +93,9 @@ pub async fn run(shared: Arc<Shared>) {
                     port: LINK_PORT,
                     kind: DeviceKind::Phone,
                     trusted: true,
+                transport: crate::lan::Transport::Usb,
                 });
             }
-        }
-        {
-            let mut reg = usb_gateways().lock().unwrap();
-            reg.clear();
-            reg.extend(live.iter().map(|g| std::net::IpAddr::V4(*g)));
         }
         // Interfaces vanish -> the gateway set resets, so the next plug
         // re-dials even the same address.

@@ -43,6 +43,18 @@ const DIAL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// address is the scoping. `trusted` marks addresses proven reachable
 /// before (a remembered link, a manual dial): they skip the
 /// in-local-subnet guard that keeps relay gossip LAN-scoped.
+/// How a direct link was established — metadata for cost ordering and
+/// ctl display, not behaviour: all direct links are the same TCP+sealed
+/// envelope today, but the day BT/WebRTC arrives they slot in here
+/// instead of forking the link machinery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// wifi/ethernet LAN — broadcast-discovered or manually dialed
+    Lan,
+    /// usb tethering — the gateway-dial path usbwatch drives
+    Usb,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct DialHint {
     pub peer: Option<murmur_proto::DeviceId>,
@@ -50,6 +62,7 @@ pub struct DialHint {
     pub port: u16,
     pub kind: DeviceKind,
     pub trusted: bool,
+    pub transport: Transport,
 }
 
 pub async fn run(
@@ -219,6 +232,7 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
             port: tcp_port,
             kind,
             trusted: false,
+                transport: crate::lan::Transport::Lan,
         });
     }
 }
@@ -267,7 +281,7 @@ async fn dial_loop(
                     Some(peer) => info!("lan: dialed {addr} ({peer})"),
                     None => info!("lan: dialed {addr} (manual)"),
                 }
-                spawn_link(&shared, &hub, s);
+                spawn_link(&shared, &hub, s, hint.transport);
             }
             Err(e) => debug!("lan: dial {addr}: {e}"),
         }
@@ -300,6 +314,7 @@ async fn redial_loop(shared: Arc<Shared>) {
                 port: addr.port(),
                 kind,
                 trusted: true,
+                transport: Transport::Lan,
             });
         }
     }
@@ -313,7 +328,7 @@ async fn accept_loop(shared: &Arc<Shared>, hub: &Arc<Hub>, listener: &TcpListene
             Ok((s, addr)) => {
                 let _ = s.set_nodelay(true);
                 info!("lan: accepted {addr}");
-                spawn_link(shared, hub, s);
+                spawn_link(shared, hub, s, Transport::Lan); // acceptor: usb inference happens dial-side, laptops dial phones
             }
             Err(e) => {
                 warn!("lan: accept: {e}");
@@ -347,6 +362,7 @@ fn spawn_link(
     shared: &Arc<Shared>,
     hub: &Arc<Hub>,
     s: TcpStream,
+    transport: Transport,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
     // tokio::TcpStream has no try_clone — bounce through std to grab a
@@ -360,6 +376,7 @@ fn spawn_link(
         Err(_) => return,
     };
     let remote_ip = s.peer_addr().ok().map(|a| a.ip());
+    let transport = transport; // move-capture into the reader task
     let (r, w) = s.into_split();
     if let Ok(env) = Envelope::seal(
         shared.id,
@@ -401,6 +418,7 @@ fn spawn_link(
         tx_hi.clone(),
         validated,
         remote_ip,
+        transport,
     ));
     tokio::spawn(ping_loop(shared.clone(), tx_hi));
 }
@@ -476,6 +494,7 @@ async fn link_reader(
     tx_hi: mpsc::UnboundedSender<Envelope>,
     validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
     remote_ip: Option<std::net::IpAddr>,
+    transport: Transport,
 ) {
     let mut br = BufReader::new(r);
     let mut line = String::new();
@@ -536,7 +555,7 @@ async fn link_reader(
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, LINK_PORT));
                     }
                 }
-                shared.lan_adopt(env.from, tx.clone());
+                shared.lan_adopt(env.from, tx.clone(), transport);
                 // The peer's advertised lan_addr:tcp_port is the
                 // better truth — it's where IT accepts dials.
                 if let Message::LanBeacon {

@@ -153,8 +153,8 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "lan_rtt_ms": shared.lan_peers().iter()
                     .map(|i| (i.to_string(), shared.lan_rtt(i)))
                     .collect::<std::collections::HashMap<_, _>>(),
-                "lan_usb": shared.lan_addrs().iter()
-                    .filter(|(_, a)| crate::usbwatch::is_usb_gateway(&a.ip()))
+                "lan_usb": shared.lan_transports().iter()
+                    .filter(|(_, t)| *t == crate::lan::Transport::Usb)
                     .map(|(i, _)| i.to_string())
                     .collect::<Vec<_>>(),
                 "active_node": shared.active_node().map(|i| i.to_string()),
@@ -317,6 +317,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                         port,
                         kind: murmur_proto::DeviceKind::Phone,
                         trusted: true,
+                transport: crate::lan::Transport::Lan,
                     });
                     Res::ok(serde_json::json!({"dialing": format!("{ip}:{port}")}))
                 }

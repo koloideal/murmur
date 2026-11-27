@@ -158,6 +158,7 @@ async fn connect_once(
                                             port: *tcp_port,
                                             kind: *kind,
                                             trusted: false,
+                transport: crate::lan::Transport::Lan,
                                         });
                                     }
                                 }
