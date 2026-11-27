@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "murmurctl"
-version = "0.5.0"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "murmurd"
-version = "0.5.0"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "murmurt"
-version = "0.5.0"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "atspi",

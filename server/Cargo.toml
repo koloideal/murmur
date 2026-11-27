@@ -1,6 +1,6 @@
 [package]
 name = "murmurs"
-version = "0.5.0"
+version = "0.5.3"
 edition = "2024"
 license = "MIT"
 description = "murmur relay: auth, device registry, frame routing. Sees only ciphertext."
