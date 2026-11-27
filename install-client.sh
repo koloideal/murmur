@@ -137,8 +137,8 @@ box() {
 hint_box() {
     box "${B}installed${R0}" \
         "" \
-        "join later:   ${B}murmurd pair --server wss://YOUR.DOMAIN --code XXXX-XXXX${R0}" \
-        "              (full invite strings work too — server is inside)" \
+        "join later:   ${B}murmurd pair --code INVITE-OR-XXXX-XXXX${R0}" \
+        "              (add --server wss://DOMAIN only for a relay short code)" \
         "or found one: ${B}murmurd init --kind serverless --name THIS-HOST${R0}" \
         "              (lan only — no relay, ever)" \
         "" \
@@ -389,7 +389,35 @@ if [ $# -gt 0 ]; then
     exit 0
 fi
 
-if have_tty && askyn n "found a serverless family here? (lan only — no relay, ever)"; then
+# ---- join: one input question, follow-ups only for what it demands.
+# A full invite string carries endpoint + family kind inside it — the
+# joiner never has to know the topology. A bare XXXX-XXXX short code
+# needs one more bit of context: which relay (serverful) or none
+# (serverless — the LAN beacon finds the inviter).
+if have_tty && askyn y "got an invite or code from your family? (murmurctl invite on a member)"; then
+    CODE=$(ask "" "" "paste the invite string or XXXX-XXXX code")
+    if [ -n "$CODE" ]; then
+        # case-normalize for the short-code shape check — the value
+        # itself goes to murmurd untouched
+        _cu=$(printf '%s' "$CODE" | tr 'a-z' 'A-Z')
+        case "$_cu" in
+            [A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9])
+                SERVER=$(ask v_url "" "relay URL — wss://domain or ws://ip:port (empty = serverless, find on LAN)")
+                if [ -n "$SERVER" ]; then
+                    "$BIN/murmurd" pair --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
+                else
+                    "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed"
+                fi ;;
+            *)
+                "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed" ;;
+        esac
+        post_pair
+        exit 0
+    fi
+    warn "nothing entered — nothing paired"
+fi
+
+if have_tty && askyn n "found a serverless family on this machine? (lan only — no relay, ever)"; then
     NAME=$(ask "" "$(uname -n)" "device name")
     FAMN=$(ask "" "" "family name (optional)")
     if [ -n "$FAMN" ]; then
@@ -399,25 +427,6 @@ if have_tty && askyn n "found a serverless family here? (lan only — no relay, 
     fi
     post_pair "you founded a family"
     exit 0
-fi
-
-# joining is what this installer is for — yes is the sane default;
-# empty answers on both follow-ups bail out cleanly to the hint box
-if have_tty && askyn y "join the family now?"; then
-    SERVER=$(ask v_url "" "relay server URL — wss://domain or ws://ip:port")
-    CODE=$(ask "" "" "invite code — XXXX-XXXX or a full invite string")
-    if [ -n "$SERVER$CODE" ]; then
-        if [ -n "$SERVER" ] && [ -n "$CODE" ]; then
-            "$BIN/murmurd" pair --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
-        elif [ -n "$SERVER" ]; then
-            "$BIN/murmurd" pair --server "$SERVER" < /dev/tty || die "pairing failed"
-        else
-            "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed"
-        fi
-        post_pair
-        exit 0
-    fi
-    warn "nothing entered — nothing paired"
 fi
 
 hint_box
