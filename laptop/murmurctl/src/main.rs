@@ -2,7 +2,7 @@
 //! Sends one JSON line, prints human-readable output.
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -43,6 +43,8 @@ enum Cmd {
     /// Dial a LAN peer directly by ip[:port] — for networks where
     /// broadcast discovery can't pass (guest Wi-Fi, client isolation).
     Dial { addr: String },
+    /// Print shell completions (bash|zsh|fish) on stdout.
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -612,6 +614,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::Dial { addr } => {
             ask(serde_json::json!({"cmd": "dial", "addr": addr}))?;
             println!("dialing {addr} — `murmurctl status` shows the link");
+            Ok(())
+        }
+        Cmd::Completions { shell } => {
+            let mut cli = Cli::command();
+            let name = cli.get_name().to_string();
+            clap_complete::generate(shell, &mut cli, name, &mut std::io::stdout());
             Ok(())
         }
     }

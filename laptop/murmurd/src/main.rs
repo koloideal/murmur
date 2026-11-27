@@ -57,16 +57,21 @@ async fn main() -> anyhow::Result<()> {
     // neither starts the daemon.
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("run") => {}
         Some("init") => return config::init(&args[1..]),
         Some("pair") => return pair_join(&args[1..]).await,
         Some("install") => return install::install_user_unit(),
         Some("doctor") => return doctor().await,
+        Some("completions") => return print_completions(args.get(1).map(String::as_str)),
         Some("-h") | Some("--help") | Some("help") => {
             print_help();
             return Ok(());
         }
         Some(other) => anyhow::bail!("unknown command {other:?} — try `murmurd --help`"),
-        None => {}
+        None => {
+            print_help();
+            return Ok(());
+        }
     }
 
     // Single instance: the lock socket is bound for the process lifetime.
@@ -319,11 +324,12 @@ fn print_help() {
     println!("  {}", dm("the murmur client daemon"));
     println!();
     let rows: &[(&str, &str)] = &[
-        ("murmurd", "run the daemon"),
+        ("murmurd run", "run the daemon"),
         ("murmurd init", "name, server, credentials"),
         ("murmurd pair", "join via invite code"),
         ("murmurd install", "systemd user unit"),
         ("murmurd doctor", "check config + relay"),
+        ("murmurd completions", "shell completions on stdout"),
     ];
     println!("  {}", bd("commands"));
     for (c, d) in rows {
@@ -332,4 +338,63 @@ fn print_help() {
     println!();
     println!("  {}", dm("control a running daemon with murmurctl"));
     println!();
+}
+
+/// `murmurd completions <shell>` — hand-written, the command surface is
+/// five verbs; not worth pulling clap into the daemon for generation.
+fn print_completions(shell: Option<&str>) -> anyhow::Result<()> {
+    let shell = shell.unwrap_or("zsh");
+    let out = match shell {
+        "zsh" => r#"#compdef murmurd
+_murmurd() {
+  local -a cmds
+  cmds=(
+    'run:run the daemon'
+    'init:name, server, credentials'
+    'pair:join via invite code'
+    'install:systemd user unit'
+    'doctor:check config + relay'
+    'completions:shell completions on stdout'
+  )
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+  else
+    case $words[2] in
+      init) _arguments '--server[relay url]:url:' '--name[device name]:name:' '--kind[family kind]:kind:(serverful serverless)' ;;
+      pair) _arguments '--server[relay url]:url:' '--code[invite code]:code:' ;;
+      completions) _arguments '1:shell:(bash zsh fish)' ;;
+    esac
+  fi
+}
+_murmurd "$@"
+"#,
+        "bash" => r#"_murmurd() {
+  local cur prev cmds
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  cmds="run init pair install doctor completions"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "$cmds" -- "$cur"))
+  elif [ "${COMP_WORDS[1]}" = "completions" ]; then
+    COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+  elif [ "${COMP_WORDS[1]}" = "init" ] || [ "${COMP_WORDS[1]}" = "pair" ]; then
+    case "$prev" in
+      murmurd|init|pair) COMPREPLY=($(compgen -W "--server --name --kind --code" -- "$cur")) ;;
+    esac
+  fi
+}
+complete -F _murmurd murmurd
+"#,
+        "fish" => r#"complete -c murmurd -n '__fish_use_subcommand' -a run -d 'run the daemon'
+complete -c murmurd -n '__fish_use_subcommand' -a init -d 'name, server, credentials'
+complete -c murmurd -n '__fish_use_subcommand' -a pair -d 'join via invite code'
+complete -c murmurd -n '__fish_use_subcommand' -a install -d 'systemd user unit'
+complete -c murmurd -n '__fish_use_subcommand' -a doctor -d 'check config + relay'
+complete -c murmurd -n '__fish_use_subcommand' -a completions -d 'shell completions on stdout'
+complete -c murmurd -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
+"#,
+        other => anyhow::bail!("unknown shell {other:?} — bash|zsh|fish"),
+    };
+    print!("{out}");
+    Ok(())
 }

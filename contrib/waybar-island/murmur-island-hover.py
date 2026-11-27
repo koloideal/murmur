@@ -129,6 +129,23 @@ def set_submap(name):
     )
 
 
+LOG = os.path.expanduser("~/.cache/murmur-island-hover.log")
+
+
+def logline(msg):
+    try:
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+        # keep the log small
+        if os.path.getsize(LOG) > 30000:
+            with open(LOG) as f:
+                tail = f.readlines()[-200:]
+            with open(LOG, "w") as f:
+                f.writelines(tail)
+    except OSError:
+        pass
+
+
 def main():
     if subprocess.run(
         ["pgrep", "-f", "murmur-island-hover.py"], capture_output=True, text=True
@@ -143,6 +160,7 @@ def main():
         print("already running", file=sys.stderr)
         sys.exit(1)
 
+    logline("daemon start")
     rect = None
     rect_at = 0.0
     in_submap = False
@@ -166,14 +184,17 @@ def main():
                 if murmur_player_exists() and current_submap() == "default":
                     set_submap("murmur")
                     in_submap = True
+                    logline(f"enter rect={rect} pos={pos}")
             elif not inside and in_submap:
                 if current_submap() == "murmur":
                     set_submap("reset")
                 in_submap = False
+                logline("leave")
 
             time.sleep(0.1)
         except Exception as e:
             print(f"murmur-island-hover: {e}", file=sys.stderr)
+            logline(f"error: {e}")
             time.sleep(1.0)
 
 

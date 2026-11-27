@@ -159,6 +159,29 @@ else
     done
 fi
 
+# ---- shell completions — every binary prints its own via `completions`
+step "shell completions"
+_zfunc="$HOME/.zfunc"
+_bashcomp="$HOME/.local/share/bash-completion/completions"
+_fishcomp="$HOME/.config/fish/completions"
+mkdir -p "$_bashcomp" "$_fishcomp"
+[ -f "$HOME/.zshrc" ] && mkdir -p "$_zfunc"
+for tool in murmurd murmurctl murmurt; do
+    [ -x "$BIN/$tool" ] || continue
+    [ -f "$HOME/.zshrc" ] && "$BIN/$tool" completions zsh > "$_zfunc/_$tool" 2>/dev/null
+    "$BIN/$tool" completions bash > "$_bashcomp/$tool" 2>/dev/null
+    "$BIN/$tool" completions fish > "$_fishcomp/$tool.fish" 2>/dev/null
+done
+ok "bash + fish completions installed"
+if [ -f "$HOME/.zshrc" ]; then
+    if grep -q "zfunc" "$HOME/.zshrc" 2>/dev/null; then
+        ok "zsh completions → $_zfunc (already in fpath)"
+    elif askyn y "zsh: add ~/.zfunc to fpath in .zshrc for completions?"; then
+        printf '\n# murmur completions\nfpath+=~/.zfunc\n' >> "$HOME/.zshrc"
+        ok "fpath updated — open a new shell"
+    fi
+fi
+
 # ---- PATH
 case ":$PATH:" in
     *":$BIN:"*) : ;;
@@ -270,7 +293,7 @@ post_pair() {
         sleep 1; _i=$((_i + 1))
     done
 
-    box "${B}${C_GR}${1:-you're in the family}${R0}${FAM:+  ·  ${B}$FAM${R0}}" \
+    box "${B}${C_GR}${1:-"you're in the family"}${R0}${FAM:+  ·  ${B}$FAM${R0}}" \
         "" \
         "the phone isn't connected yet —" \
         "invite it from this machine:" \

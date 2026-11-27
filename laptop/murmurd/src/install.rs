@@ -16,7 +16,7 @@ pub fn install_user_unit() -> anyhow::Result<()> {
          PartOf=graphical-session.target\n\
          After=graphical-session.target\n\n\
          [Service]\n\
-         ExecStart={exe}\n\
+         ExecStart={exe} run\n\
          Restart=on-failure\n\
          RestartSec=5\n\n\
          [Install]\n\

@@ -216,6 +216,6 @@ pub async fn geometry() -> Result<()> {
             })
             .collect(),
     };
-    println!("{}", serde_json::to_string(&geo)?);
+    println!("{}", serde_json::to_string_pretty(&geo)?);
     Ok(())
 }
