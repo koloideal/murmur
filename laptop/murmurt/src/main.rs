@@ -6,7 +6,7 @@ mod install;
 use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "murmurt", version, about = "murmur island tooling", disable_help_flag = true)]
+#[command(name = "murmurt", version, about = "murmur theme — waybar island tooling", disable_help_flag = true)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -69,7 +69,7 @@ fn print_help() {
     for (l, t) in __art_off.iter().zip(TAG.lines()) {
         println!("  {}{}", paint("1;38;5;141", &format!("{l:<width$}", width = __aw)), paint("38;5;215", t));
     }
-    println!("  {}", dm("murmur tools - waybar island tooling"));
+    println!("  {}", dm("murmur theme - waybar island tooling"));
     println!();
     println!("  {}", bd("commands"));
     for (c, d) in [
