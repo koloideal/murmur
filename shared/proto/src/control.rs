@@ -17,6 +17,12 @@ pub enum Control {
         name: String,
         role: HelloRole,
         token_hex: Option<String>,
+        /// Protocol version the client speaks — absent in old clients,
+        /// which all spoke v1. The relay rejects a mismatch up front so
+        /// a version-skewed family fails loudly at connect instead of
+        /// silently dropping each other's frames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proto_v: Option<u8>,
     },
     HelloOk,
     HelloErr {

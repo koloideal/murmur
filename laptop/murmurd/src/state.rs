@@ -84,6 +84,10 @@ pub struct Shared {
     pub online: AtomicBool,
     /// The relay said this device is revoked / unknown.
     pub revoked: AtomicBool,
+    /// Peers (or the relay) seen speaking another protocol version —
+    /// surfaced in `murmurctl status` so a version-skewed family shows
+    /// as "peer X speaks v2" instead of going silently deaf.
+    pub proto_mismatch: Mutex<HashMap<DeviceId, u8>>,
 }
 
 impl Shared {
@@ -131,6 +135,7 @@ impl Shared {
             pair: Mutex::new(Pairing::default()),
             online: AtomicBool::new(false),
             revoked: AtomicBool::new(false),
+            proto_mismatch: Mutex::new(HashMap::new()),
         })
     }
 
@@ -225,6 +230,12 @@ impl Shared {
 
     pub fn dedupe(&self, from: DeviceId, seq: u64) -> bool {
         self.seen.lock().unwrap().check(from, seq)
+    }
+
+    /// Record a frame that arrived in another protocol version — the
+    /// relay's own frames have `from` = its sender id or a device id.
+    pub fn note_proto(&self, from: DeviceId, v: u8) {
+        self.proto_mismatch.lock().unwrap().insert(from, v);
     }
 
 

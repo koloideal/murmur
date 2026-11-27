@@ -375,13 +375,17 @@ class LanLink(
         var peerId: String? = null
         val r = s.getInputStream().bufferedReader()
         while (true) {
-            val read = runCatching { r.readLine() }
+            val read = runCatching { readLineBounded(r) }
             val line = read.getOrNull() ?: run {
                 Log.i(TAG, "link read ended (${read.exceptionOrNull()?.javaClass?.simpleName}: ${read.exceptionOrNull()?.message})")
                 break
             }
-            if (line.isNullOrEmpty()) continue
+            if (line.isEmpty()) continue
             val env = runCatching { Envelope.fromJson(line) }.getOrNull() ?: continue
+            if (env.protoMismatch()) {
+                Log.w(TAG, "${env.from} speaks proto v${env.v} — we speak v${Envelope.VERSION}; upgrade the peer")
+                continue
+            }
             val pt = runCatching {
                 key.open(android.util.Base64.decode(env.payload, android.util.Base64.NO_WRAP))
             }.getOrNull() ?: continue
@@ -432,6 +436,26 @@ class LanLink(
         }
         peerId?.let { if (links[it]?.sock === s) drop(it, "read ended") }
         runCatching { s.close() }
+    }
+
+    /** Links have no handshake — an unauthenticated LAN peer could feed
+     *  newline-free garbage forever and grow the reader's buffer without
+     *  bound. `readLine` can't cap itself, so we read chars manually:
+     *  null at EOF, the line at '\n', [OversizeFrame] past the wire cap. */
+    private class OversizeFrame : Exception("frame over wire cap")
+
+    private fun readLineBounded(r: java.io.BufferedReader): String? {
+        val sb = StringBuilder()
+        while (true) {
+            when (val c = r.read()) {
+                -1 -> return if (sb.isEmpty()) null else sb.toString()
+                '\n'.code -> return sb.toString()
+                else -> {
+                    if (sb.length >= Envelope.MAX_ENVELOPE_JSON) throw OversizeFrame()
+                    sb.append(c.toChar())
+                }
+            }
+        }
     }
 
     private companion object {

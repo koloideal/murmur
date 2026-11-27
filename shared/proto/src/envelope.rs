@@ -81,6 +81,12 @@ impl Envelope {
         msg: &Message,
     ) -> anyhow::Result<Self> {
         let pt = serde_json::to_vec(msg)?;
+        anyhow::ensure!(
+            pt.len() <= crate::MAX_PAYLOAD,
+            "message over wire cap ({}B > {}B) — dropped, never truncated",
+            pt.len(),
+            crate::MAX_PAYLOAD,
+        );
         Ok(Self {
             v: PROTO_VERSION,
             from,
@@ -97,12 +103,19 @@ impl Envelope {
         seq: u64,
         ctl: &crate::Control,
     ) -> anyhow::Result<Self> {
+        let payload = serde_json::to_vec(ctl)?;
+        anyhow::ensure!(
+            payload.len() <= crate::MAX_PAYLOAD,
+            "control frame over wire cap ({}B > {}B)",
+            payload.len(),
+            crate::MAX_PAYLOAD,
+        );
         Ok(Self {
             v: PROTO_VERSION,
             from,
             to,
             seq,
-            payload: serde_json::to_vec(ctl)?,
+            payload,
         })
     }
 
@@ -122,6 +135,18 @@ impl Envelope {
     }
 
     pub fn from_json(s: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            s.len() <= crate::MAX_ENVELOPE_JSON,
+            "envelope over wire cap ({}B > {}B)",
+            s.len(),
+            crate::MAX_ENVELOPE_JSON,
+        );
         Ok(serde_json::from_str(s)?)
+    }
+
+    /// Drop-check for ingress: a peer on a different protocol version
+    /// can't be reasoned with — its frames must die here, loudly.
+    pub fn proto_mismatch(&self) -> bool {
+        self.v != PROTO_VERSION
     }
 }

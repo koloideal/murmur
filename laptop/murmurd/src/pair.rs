@@ -510,6 +510,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
             name: name.into(),
             role: HelloRole::Pair,
             token_hex: None,
+            proto_v: Some(murmur_proto::PROTO_VERSION),
         })?
         .into(),
     ))

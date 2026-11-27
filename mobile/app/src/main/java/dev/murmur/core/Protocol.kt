@@ -37,8 +37,17 @@ data class Envelope(
         protoJson.decodeFromString<Control>(Base64.decode(payload, Base64.NO_WRAP).decodeToString())
     }.getOrNull()
 
+    /** Drop-check for ingress — a peer on another protocol generation
+     *  can't be reasoned with; its frames die loudly, not silently. */
+    fun protoMismatch(): Boolean = v != VERSION
+
     companion object {
-        fun fromJson(s: String): Envelope = protoJson.decodeFromString(s)
+        fun fromJson(s: String): Envelope {
+            require(s.length <= MAX_ENVELOPE_JSON) {
+                "envelope over wire cap (${s.length}B > ${MAX_ENVELOPE_JSON}B)"
+            }
+            return protoJson.decodeFromString(s)
+        }
         fun wrap(from: String, to: String, seq: Long, ctl: Control) = Envelope(
             v = VERSION,
             from = from,
@@ -53,6 +62,12 @@ data class Envelope(
         const val SERVER = "@server"
         const val ALL = "*"
         const val VERSION = 1
+        /** Mirror of murmur-proto: 4 MiB sealed payload cap. */
+        const val MAX_PAYLOAD = 4 * 1024 * 1024
+        /** Mirror of murmur-proto: JSON envelope cap (b64 inflates ~4/3). */
+        const val MAX_ENVELOPE_JSON = 6 * 1024 * 1024
+        /** Mirror of murmur-proto: clipboard payload cap — drop, never truncate. */
+        const val MAX_CLIP = 2 * 1024 * 1024
     }
 }
 
@@ -174,6 +189,9 @@ sealed class Control {
         val name: String,
         val role: String, // "auth" | "pair"
         val token_hex: String? = null,
+        /** Protocol generation we speak — the relay rejects a mismatch
+         *  up front instead of silently dropping our frames forever. */
+        val proto_v: Int? = null,
     ) : Control()
 
     @Serializable

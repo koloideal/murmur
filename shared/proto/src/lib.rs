@@ -41,3 +41,21 @@ pub const PROTO_VERSION: u8 = 1;
 
 /// Route used for control-plane envelopes (`to` field).
 pub const SERVER_ROUTE: &str = "@server";
+
+/// Hard cap on one sealed payload — 4 MiB of ciphertext. Anything
+/// larger is a bug or a DoS, never legitimate traffic: features cap
+/// their own data well below this (see [`MAX_CLIP`]). Enforced at
+/// [`Envelope::seal`], so a feature that overfills a message gets an
+/// error instead of pushing a giant frame through the family.
+pub const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
+
+/// Hard cap on one JSON-serialized envelope on the wire — the b64
+/// payload inflates ~4/3 plus the envelope skeleton. Enforced at every
+/// ingress: relay WS (`max_message_size`), client WS, LAN links,
+/// `Envelope::from_json`.
+pub const MAX_ENVELOPE_JSON: usize = 6 * 1024 * 1024;
+
+/// Largest clipboard payload a feature may sync — bounded under
+/// [`MAX_PAYLOAD`] because the data is b64'd inside the message before
+/// sealing. A bigger clip is dropped with a log, never truncated.
+pub const MAX_CLIP: usize = 2 * 1024 * 1024;

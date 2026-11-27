@@ -177,6 +177,11 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "key_epoch": shared.keys.read().unwrap().epoch,
                 "members": shared.roster.lock().unwrap().len(),
                 "presence": presence,
+                // Senders seen speaking another protocol version —
+                // empty while the family is version-aligned.
+                "proto_mismatch": shared.proto_mismatch.lock().unwrap().iter()
+                    .map(|(d, v)| (d.to_string(), v))
+                    .collect::<std::collections::HashMap<_, _>>(),
             }))
         }
         Req::Devices => {

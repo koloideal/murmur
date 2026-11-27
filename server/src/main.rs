@@ -969,8 +969,16 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+/// Socket-level ceiling — an over-cap frame dies at the WS layer
+/// (close 1009) instead of being read into memory first.
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(murmur_proto::MAX_ENVELOPE_JSON))
+        .max_frame_size(Some(murmur_proto::MAX_ENVELOPE_JSON))
+}
+
 async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await?;
+    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
     let (mut sink, mut source) = ws.split();
 
     // First message must be a Hello.
@@ -987,7 +995,28 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
             name,
             role,
             token_hex,
-        } => match role {
+            proto_v,
+        } => {
+            // Old clients omit proto_v — they all spoke v1. A mismatch
+            // gets rejected here, loudly, instead of silently dropping
+            // every frame the conn will ever send.
+            let v = proto_v.unwrap_or(1);
+            if v != murmur_proto::PROTO_VERSION {
+                let reason = format!(
+                    "proto v{v} unsupported — this relay speaks v{}",
+                    murmur_proto::PROTO_VERSION
+                );
+                send_ctl(
+                    &mut sink,
+                    &Control::HelloErr {
+                        reason: reason.clone(),
+                    },
+                )
+                .await
+                .ok();
+                bail!("{device_id}: {reason}");
+            }
+            match role {
             HelloRole::Auth => {
                 let token = token_hex
                     .and_then(|h| murmur_proto::AuthToken::from_hex(&h).ok())
@@ -1009,7 +1038,8 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 info!("pairing conn from {device_id} ({name})");
                 (device_id, true)
             }
-        },
+            }
+        }
         _ => bail!("expected Hello"),
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -1110,6 +1140,14 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<(
                 }
             };
             env.from = device_id; // never trust the client's claim
+
+            // Frames from another protocol generation can't be routed
+            // or reasoned about — drop them loudly.
+            if env.proto_mismatch() {
+                warn!("{device_id}: proto v{} frame dropped (relay speaks v{})",
+                    env.v, murmur_proto::PROTO_VERSION);
+                continue;
+            }
 
             if pairing {
                 // A pairing conn may send exactly one thing: a cleartext

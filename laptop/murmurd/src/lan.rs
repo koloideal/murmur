@@ -218,7 +218,10 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
         let Ok(env) = Envelope::from_json(std::str::from_utf8(&buf[..n]).unwrap_or("")) else {
             continue;
         };
-        if env.from == shared.id {
+        if env.from == shared.id || env.proto_mismatch() {
+            if env.proto_mismatch() {
+                shared.note_proto(env.from, env.v);
+            }
             continue;
         }
         let Ok(Message::LanBeacon { tcp_port, kind, .. }) =
@@ -496,11 +499,21 @@ async fn link_reader(
     remote_ip: Option<std::net::IpAddr>,
     transport: Transport,
 ) {
-    let mut br = BufReader::new(r);
+    // Links have no handshake — an unauthenticated LAN peer could feed
+    // newline-free garbage forever. `Take` bounds each line at the wire
+    // cap; a sender that exceeds it is broken or hostile → drop the link.
+    const LINE_CAP: u64 = murmur_proto::MAX_ENVELOPE_JSON as u64 + 1;
+    let mut br = BufReader::new(tokio::io::AsyncReadExt::take(r, LINE_CAP));
     let mut line = String::new();
     loop {
         line.clear();
+        br.get_mut().set_limit(LINE_CAP);
         match tokio::time::timeout(LINK_IDLE, br.read_line(&mut line)).await {
+            // The limit fired mid-line: a frame this big is broken or hostile.
+            Ok(Ok(n)) if n as u64 == LINE_CAP && !line.ends_with('\n') => {
+                info!("lan: link down (frame over wire cap)");
+                break;
+            }
             Ok(Ok(n)) if n > 0 => {}
             Ok(Ok(_)) => {
                 info!("lan: link down (peer closed)");
@@ -518,6 +531,12 @@ async fn link_reader(
         let Ok(env) = Envelope::from_json(line.trim_end()) else {
             continue;
         };
+        if env.proto_mismatch() {
+            shared.note_proto(env.from, env.v);
+            warn!("lan: {} speaks proto v{} — we speak v{}; upgrade the peer",
+                env.from, env.v, murmur_proto::PROTO_VERSION);
+            continue;
+        }
         match env.open(&shared.keys.read().unwrap().current) {
             Ok(msg) => {
                 validated.store(true, std::sync::atomic::Ordering::Relaxed);

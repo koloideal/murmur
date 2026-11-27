@@ -14,6 +14,14 @@ use tracing::{debug, info, warn};
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
 const REVOKED_RETRY: Duration = Duration::from_secs(1800);
 
+/// Wire-level ceiling — the relay enforces the same, so an over-cap
+/// message dies at the socket layer, not after allocation.
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(murmur_proto::MAX_ENVELOPE_JSON))
+        .max_frame_size(Some(murmur_proto::MAX_ENVELOPE_JSON))
+}
+
 pub async fn run(
     shared: Arc<Shared>,
     hub: Arc<Hub>,
@@ -45,7 +53,9 @@ async fn connect_once(
     out_rx: &mut mpsc::UnboundedReceiver<murmur_proto::Envelope>,
     lo_rx: &mut mpsc::UnboundedReceiver<(u64, murmur_proto::Envelope)>,
 ) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(&shared.cfg.server_url).await?;
+    let (ws, _) =
+        tokio_tungstenite::connect_async_with_config(&shared.cfg.server_url, Some(ws_config()), false)
+            .await?;
     let (mut sink, mut source) = ws.split();
 
     let hello = serde_json::to_string(&Control::Hello {
@@ -53,6 +63,7 @@ async fn connect_once(
         name: shared.cfg.name.clone(),
         role: HelloRole::Auth,
         token_hex: Some(shared.token_hex()),
+        proto_v: Some(murmur_proto::PROTO_VERSION),
     })?;
     sink.send(Ws::Text(hello.into())).await?;
 
@@ -115,11 +126,20 @@ async fn connect_once(
                         continue;
                     }
                 };
+                if env.proto_mismatch() {
+                    shared.note_proto(env.from, env.v);
+                    warn!("{} speaks proto v{} — we speak v{}; upgrade the peer",
+                        env.from, env.v, murmur_proto::PROTO_VERSION);
+                    continue;
+                }
                 // Cleartext control first: server replies (Devices, Error)
                 // and unicast pair frames. Anything that doesn't parse is
                 // an E2E payload.
                 match env.control_payload() {
                     Ok(ctl) => {
+                        if let Control::Error { reason } = &ctl {
+                            warn!("relay: {reason}");
+                        }
                         if let Control::Devices { family_name, .. } = &ctl {
                             *shared.family_name.lock().unwrap() = family_name.clone();
                             let mut s = shared.secrets.lock().unwrap();

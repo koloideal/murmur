@@ -175,6 +175,11 @@ class Relay(
                             return
                         }
                         runCatching { Envelope.fromJson(text) }.getOrNull()?.let {
+                            if (it.protoMismatch()) {
+                                android.util.Log.w("Relay",
+                                    "frame from ${it.from} speaks proto v${it.v} — we speak v${Envelope.VERSION}; upgrade the peer")
+                                return
+                            }
                             _incoming.tryEmit(it)
                         }
                     }

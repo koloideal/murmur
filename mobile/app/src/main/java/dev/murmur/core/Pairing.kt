@@ -97,6 +97,7 @@ suspend fun pair(
                         device_id = session,
                         name = deviceName,
                         role = "pair",
+                        proto_v = Envelope.VERSION,
                     ),
                 ),
             )
