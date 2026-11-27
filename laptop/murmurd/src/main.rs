@@ -145,6 +145,9 @@ fn instance_lock() -> anyhow::Result<std::os::unix::net::UnixListener> {
 /// Non-destructive: the relay check is a bare WS handshake, no auth —
 /// it never disturbs a running daemon's connection.
 async fn doctor() -> anyhow::Result<()> {
+    // Version first — "upgrade the peer" sends users here, and the
+    // answer to "am I current?" starts with what they're running.
+    println!("murmurd {} · proto v{}", env!("CARGO_PKG_VERSION"), murmur_proto::PROTO_VERSION);
     let mut bad = 0u32;
     let mut ok = |cond: bool, good: String, fix: &str| {
         if cond {

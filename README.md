@@ -68,8 +68,12 @@ phone hotspots and devices roaming between subnets:
 - **Clipboard anti-echo.** Each node tracks the hash of the last clip it
   sent or applied; applying a remote clip arms `expected_hash` so the
   local watcher doesn't rebroadcast it. Password-manager clips are
-  suppressed via the `x-kde-passwordManagerHint` MIME marker before they
-  ever leave the machine.
+  suppressed before they ever leave the machine — **but only when the
+  manager tags them**: the suppression keys on the
+  `x-kde-passwordManagerHint` MIME marker, which in practice means
+  KeePassXC. Bitwarden, 1Password, browser autofill and pass copy as
+  plain text, and their clips sync like any other text — treat the
+  clipboard feature accordingly (or disable it for the paranoid setup).
 - **Sequence dedup.** Per-sender monotone sequence numbers (seeded from
   wall clock at startup, so a restarted daemon never replays) — relays,
   reconnects and redundant transports may duplicate, never reorder or
@@ -158,13 +162,17 @@ use the `wss://` URL.
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
-$ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
-bootstrap pairing — verification code: 452690       # verify: murmurs bootstrap-code
-$ systemctl --user start murmurd && murmurd doctor
 ```
 
-The first device to use the bootstrap code becomes the founder and mints
-the family key locally.
+The installer asks the first question itself — found a new family or
+join one — and walks the pairing interactively (for a relay family:
+`--server wss://murmur.example.org --code T45K-TP6D`; non-interactive
+flags are in the script header). The first device to use the bootstrap
+code becomes the founder and mints the family key locally. Afterwards:
+
+```console
+$ systemctl --user start murmurd && murmurd doctor
+```
 
 **3. Phone:** grab `murmur-android.apk` from
 [Releases](https://github.com/koloideal/murmur/releases)
@@ -180,6 +188,22 @@ and scan with the phone. LAN-only, nothing ever leaves your network.
 
 Prefer building yourself? `cargo build --release` in `server/` or
 `laptop/`, `./gradlew assembleDebug` in `mobile/`.
+
+**Updating.** The laptop/relay sides have no self-updater on purpose —
+updating is re-running the same installer, which pulls the current
+release binaries over the old ones (config, keys and family membership
+live outside the binary paths and survive):
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh   # laptop
+$ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-server.sh | sudo sh  # relay
+$ systemctl --user restart murmurd
+```
+
+When a protocol generation bumps, `murmurctl status` and the phone's
+status card both say "proto mismatch — upgrade the peer" instead of
+leaving you guessing at a silent offline. The phone side updates from
+Releases — Obtainium tracks them automatically.
 
 ## Scope & limits
 
