@@ -62,16 +62,37 @@ def media_rect():
                 break
         if not frame:
             return None
-        labels = []
-        iter_labels(frame, labels)
-        for idx, label in enumerate(labels):
-            name = label.get_name() or ""
-            if name.startswith("murmur ") and idx + 1 < len(labels):
-                media = labels[idx + 1]
-                if not (media.get_name() or "").strip():
-                    return None
-                ext = media.get_extents(Atspi.CoordType.SCREEN)
-                return (ext.x, ext.y, ext.x + ext.width, ext.y + ext.height)
+        raw = []
+        iter_labels(frame, raw)
+        # Hidden modules linger in the tree as empty labels teleported
+        # offscreen (x ≈ INT_MIN) — drop them before any geometry math.
+        # The island's modules render edge-to-edge, so after sorting by x
+        # the contiguous run starting at the status label is the island;
+        # the media label is the one whose text ends with the wave glyph.
+        entries = []
+        for label in raw:
+            try:
+                ext = label.get_extents(Atspi.CoordType.SCREEN)
+                if ext.x < -100000:
+                    continue
+                entries.append((ext.x, ext.x + ext.width, ext.y,
+                                ext.y + ext.height, label.get_name() or ""))
+            except Exception:
+                pass
+        entries.sort()
+        status_idx = next(
+            (i for i, e in enumerate(entries) if e[4].startswith("murmur ")),
+            None,
+        )
+        if status_idx is None:
+            return None
+        run_end = entries[status_idx][1]
+        for e in entries[status_idx + 1:]:
+            if e[0] - run_end > 4:
+                break  # gap → outside the island pill
+            run_end = max(run_end, e[1])
+            if e[4].rstrip().endswith("∿"):
+                return (e[0], e[2], e[1], e[3])
     except Exception:
         return None
     return None
