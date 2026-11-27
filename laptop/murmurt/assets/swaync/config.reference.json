@@ -35,7 +35,7 @@
     "title": {
       "text": "Notification Center",
       "clear-all-button": true,
-      "button-text": "\udb80\uddb4 Clear All"
+      "button-text": "󰆴 Clear All"
     },
     "dnd": {
       "text": "Do Not Disturb"
@@ -49,33 +49,33 @@
       "image-radius": 7
     },
     "volume": {
-      "label": "\udb81\udd7e",
+      "label": "󰕾",
       "show-per-app": true
     },
     "buttons-grid": {
       "actions": [
         {
-          "label": "\udb82\udd04",
+          "label": "󰤄",
           "command": "systemctl suspend"
         },
         {
-          "label": "\udb81\udd7e",
+          "label": "󰕾",
           "command": "swayosd-client --output-volume mute-toggle"
         },
         {
-          "label": "\udb80\udf6c",
+          "label": "󰍬",
           "command": "swayosd-client --input-volume mute-toggle"
         },
         {
-          "label": "\udb81\udda9",
+          "label": "󰖩",
           "command": "$HOME/.local/bin/shved/rofi-menus/wifi-menu.sh"
         },
         {
-          "label": "\udb80\udcaf",
+          "label": "󰂯",
           "command": "blueman-manager"
         },
         {
-          "label": "\uf03d",
+          "label": "",
           "command": "obs"
         }
       ]
@@ -96,5 +96,6 @@
       "urgency": "Low",
       "override-urgency": "normal"
     }
-  }
+  },
+  "notification-inline-replies": true
 }
