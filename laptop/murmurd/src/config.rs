@@ -316,3 +316,68 @@ fn write_new(path: &std::path::Path, contents: &str, mode: u32) -> anyhow::Resul
 fn write_new(path: &std::path::Path, contents: &str, _mode: u32) -> anyhow::Result<()> {
     std::fs::write(path, contents).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fixtures below serialize exactly the fields each historical
+    /// release wrote. Every field added since carries `serde(default)`
+    /// or is an Option — an upgrade must never strand a paired device.
+    /// When a future field can't be defaulted, these tests are the
+    /// tripwire that forces a real migration instead of a silent break.
+
+    /// config.toml as written before `family_kind`, notification
+    /// policies and lock-proc lists existed (v0.3 era).
+    const V03_CONFIG: &str = r##"
+        server_url = "wss://murmur.example.org"
+        name = "old-laptop"
+        idle_timeout_secs = 120
+    "##;
+
+    /// secrets.toml as a v0.3 pair wrote it: identity, rotation epoch,
+    /// revoked list and family name all postdate it.
+    const V03_SECRETS: &str = r##"
+        device_id = "0011223344556677"
+        auth_token_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        family_key_hex = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    "##;
+
+    #[test]
+    fn v03_config_loads_with_defaults() {
+        let c: Config = toml::from_str(V03_CONFIG).expect("v0.3 config must still parse");
+        assert_eq!(c.server_url, "wss://murmur.example.org");
+        assert_eq!(c.name, "old-laptop");
+        assert_eq!(c.idle_timeout_secs, 120); // preserved, not reset
+        assert_eq!(c.family_kind, murmur_proto::FamilyKind::Serverful);
+        assert!(c.clipboard_mime_deny.contains(&"x-kde-passwordManagerHint".to_string()));
+        assert!(!c.lock_procs.is_empty());
+    }
+
+    #[test]
+    fn v03_secrets_load_and_resolve() {
+        let s: Secrets = toml::from_str(V03_SECRETS).expect("v0.3 secrets must still parse");
+        assert_eq!(s.device_id().unwrap().to_string(), "0011223344556677");
+        assert_eq!(s.family_key().unwrap().0.len(), 32);
+        assert_eq!(s.key_epoch, 0); // pre-rotation device
+        assert!(s.old_keys_hex.is_empty() && s.revoked.is_empty());
+        assert!(s.identity_hex.is_none()); // generated on first start
+    }
+
+    /// A secret written by a NEWER build (fields we don't know yet)
+    /// must also load — downgrade tolerance is the same mechanism.
+    #[test]
+    fn forward_secret_fields_are_ignored() {
+        let s: Secrets = toml::from_str(
+            r##"
+            device_id = "0011223344556677"
+            auth_token_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            family_key_hex = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+            key_epoch = 3
+            future_field = "from a newer release"
+        "##,
+        )
+        .expect("unknown fields must be tolerated");
+        assert_eq!(s.key_epoch, 3);
+    }
+}

@@ -96,8 +96,10 @@ so the phone stops being a special case anywhere in the stack:
   widgets work unmodified. Position is extrapolated locally between
   updates with `Seeked` signals on correction; album art is served as
   content-hashed `file://` URLs.
-- **Clipboard** via `ext-data-control-v1` — real selection events, not
-  polling; `text/plain`, `text/uri-list`, `image/png`.
+- **Clipboard** via data-control — real selection events, not polling;
+  `ext-data-control-v1` with a `wlr-data-control-v1` fallback (same
+  wire protocol, older name). `text/plain`, `text/uri-list`,
+  `image/png`.
 - **Notifications** through `org.freedesktop.Notifications`: dismissal
   is mapped bidirectionally (closing a notification anywhere — including
   on the phone — closes it everywhere, with anti-loop guards).
@@ -178,6 +180,27 @@ and scan with the phone. LAN-only, nothing ever leaves your network.
 
 Prefer building yourself? `cargo build --release` in `server/` or
 `laptop/`, `./gradlew assembleDebug` in `mobile/`.
+
+## Scope & limits
+
+Deliberate v1 boundaries — the interesting ones are marked in
+[DESIGN.md](DESIGN.md):
+
+- **Compositor matrix.** Clipboard sync needs a data-control
+  compositor: Hyprland, sway/wlroots and KDE Plasma all qualify
+  (`ext-data-control-v1`, or its `wlr-data-control-v1` ancestor on
+  older versions). GNOME ships neither — the clipboard feature idles
+  there while everything else works; `murmurd doctor` reports exactly
+  which protocols your session exposes. Presence needs
+  `ext-idle-notify-v1` (same compositor set, plus a lock-process
+  heuristic for wlroots lockers).
+- **LAN discovery is IPv4 broadcast only.** Cross-VLAN segments and
+  IPv6-only networks won't auto-find each other — `murmurctl dial <ip>`
+  and the relay path still reach those peers.
+- **Live-only, bounded.** No offline queues, no notification history,
+  no file transfer: a frame is delivered now or not at all. Payloads
+  are capped (4 MiB sealed / 2 MiB clipboard) — oversized data is
+  dropped with a log, never truncated.
 
 ## 📌 Design
 

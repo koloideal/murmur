@@ -8,6 +8,11 @@ gradle at it via `org.gradle.java.home`. If that directory is ever missing: down
 `https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse`
 and unpack it there.
 
+The system SDK at `/opt/android-sdk` is root-owned and empty (no build-tools,
+no licenses). A working SDK lives in `~/.local/android-sdk` — point gradle at
+it via env: `ANDROID_HOME=~/.local/android-sdk ANDROID_SDK_ROOT=~/.local/android-sdk`
+(shell profile still exports the /opt path, so pass it per-command).
+
 Verify with: `cd mobile && ./gradlew testDebugUnitTest compileDebugKotlin`
 
 ## Verify Rust side
