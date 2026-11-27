@@ -8,7 +8,31 @@ permissions:
   contents: write
 
 jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test — proto vectors, murmurd, murmurs
+        run: |
+          cargo test --manifest-path shared/proto/Cargo.toml
+          cargo test --manifest-path laptop/Cargo.toml
+          cargo test --manifest-path server/Cargo.toml
+
+  test-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: gradle unit tests — golden vectors, election parity
+        run: cd mobile && ./gradlew testDebugUnitTest
+
   server:
+    needs: [test-rust, test-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +51,7 @@ jobs:
           files: murmurs-*-linux-musl
 
   laptop:
+    needs: [test-rust, test-android]
     # Native runners per arch — no cross toolchain to babysit.
     strategy:
       matrix:
@@ -51,6 +76,7 @@ jobs:
           files: "*-${{ matrix.target }}"
 
   android:
+    needs: [test-rust, test-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
