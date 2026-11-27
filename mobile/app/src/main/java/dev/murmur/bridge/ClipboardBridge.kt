@@ -48,6 +48,14 @@ object ClipboardBridge {
         Log.d("ClipboardBridge", "applied ${data.size}B ${msg.mime}")
     }
 
+    /** Empty the clipboard — the laptop user erased it there, so it
+     *  stops existing here too. clearPrimaryClip is API 28+, we're 26+. */
+    fun applyClear(ctx: Context) {
+        runCatching {
+            ctx.getSystemService(ClipboardManager::class.java).clearPrimaryClip()
+        }.onSuccess { Log.d("ClipboardBridge", "cleared") }
+    }
+
     /** Write the PNG under cacheDir/clips and hand out a FileProvider Uri. */
     private fun cacheImage(ctx: Context, png: ByteArray): android.net.Uri {
         val dir = File(ctx.cacheDir, "clips").apply { mkdirs() }

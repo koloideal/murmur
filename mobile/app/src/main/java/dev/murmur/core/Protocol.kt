@@ -164,6 +164,13 @@ sealed class Msg {
         val ts: Long,
     ) : Msg()
 
+    @Serializable
+    @SerialName("clipboard_clear")
+    data class ClipboardClear(
+        val origin: String,
+        val ts: Long,
+    ) : Msg()
+
     /** Long-term identity pubkey, announced after every connect.
      *  `name` carries roster gossip a serverless family has no relay
      *  registry for — absent in old frames. */

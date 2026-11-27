@@ -40,6 +40,7 @@ fun Msg.tag(): String = when (this) {
     is Msg.MediaState -> "media_state"
     is Msg.MediaCommand -> "media_command"
     is Msg.Clipboard -> "clipboard"
+    is Msg.ClipboardClear -> "clipboard"
     is Msg.Identity -> "identity"
     is Msg.LanBeacon -> "lan_beacon"
     is Msg.LanPing -> "lan_ping"

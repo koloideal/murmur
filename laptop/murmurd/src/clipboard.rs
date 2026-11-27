@@ -68,11 +68,31 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let mut suppress: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // Last hash we broadcast — repeated local events are deduped.
     let mut last_sent: Option<u64> = None;
+    // Clear anti-echo: the watcher's Lost after our own clear-apply is
+    // consumed once.
+    let mut clear_echo = false;
 
     loop {
         tokio::select! {
             ev = events.recv() => {
                 let Some(ev) = ev else { return Ok(()) };
+                // A genuinely emptied selection (wl-copy --clear, the
+                // island gesture, the source app dying with its
+                // unpersisted offer) syncs as a clear — the privacy
+                // promise "I erased it" only holds if it erases everywhere.
+                if matches!(ev, wlclip::ClipEvent::Lost) {
+                    if clear_echo {
+                        clear_echo = false;
+                        continue; // the watcher's answer to our own apply
+                    }
+                    tracing::debug!("clip → broadcast clear");
+                    let msg = Message::ClipboardClear {
+                        origin: shared.id,
+                        ts: crate::state::now_ts(),
+                    };
+                    let _ = shared.send(Route::All, &msg);
+                    continue;
+                }
                 let wlclip::ClipEvent::Data { mime, offered, data } = ev else { continue };
                 let hash = hash_clip(&data);
                 // Consume exactly one matching suppression — the echo is
@@ -114,6 +134,30 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             }
             m = inbox.recv() => {
                 let Some((from, msg)) = m else { return Ok(()) };
+                if let Message::ClipboardClear { origin, .. } = &*msg {
+                    // Same gating as the content being erased: a phone's
+                    // clear is honored only on the clip target, laptop
+                    // clears are peer sync. Our own broadcast coming back
+                    // around is not a reason to clear twice.
+                    // Relay families bounce broadcasts back to the
+                    // sender; anything wearing our own id is that echo.
+                    if *origin == shared.id {
+                        continue;
+                    }
+                    let phone_origin = shared.roster.lock().unwrap()
+                        .get(origin)
+                        .is_some_and(|m| m.kind == murmur_proto::DeviceKind::Phone);
+                    if phone_origin && !shared.is_clip_target() {
+                        continue;
+                    }
+                    tracing::debug!("clip ← apply clear from {origin}");
+                    clear_echo = true;
+                    let _ = from;
+                    if cmds.send(wlclip::ClipCmd::Clear).is_err() {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 let Message::Clipboard { hash, mime, data_b64, explicit, .. } = (*msg).clone() else {
                     continue;
                 };

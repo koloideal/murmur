@@ -96,6 +96,16 @@ pub enum Message {
         ts: u64,
     },
 
+    /// The clipboard was emptied on `origin` — user ran wl-copy --clear,
+    /// the island's clear gesture, or the source app exited taking its
+    /// unpersisted selection with it. Same gating as the content it
+    /// removes: phone-origin clears apply only on the clip target,
+    /// laptop-origin ones are peer sync and apply everywhere.
+    ClipboardClear {
+        origin: DeviceId,
+        ts: u64,
+    },
+
     /// Authed device → "*" after every (re)connect: its long-term X25519
     /// identity pubkey. Peers pin the first key per device (TOFU), and
     /// only from frames that opened under the *current* family key.
@@ -162,6 +172,7 @@ impl Message {
             Message::MediaState { .. } => "media_state",
             Message::MediaCommand { .. } => "media_command",
             Message::Clipboard { .. } => "clipboard",
+            Message::ClipboardClear { .. } => "clipboard",
             Message::Identity { .. } => "identity",
             Message::LanBeacon { .. } => "lan_beacon",
             Message::LanPing { .. } => "lan_ping",

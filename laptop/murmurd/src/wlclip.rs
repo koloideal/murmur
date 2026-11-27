@@ -63,6 +63,7 @@ pub enum ClipEvent {
 
 pub enum ClipCmd {
     Set { mime: String, data: Vec<u8> },
+    Clear,
 }
 
 /// Mimes we ask for, most-preferred first — png last since it's the
@@ -110,6 +111,15 @@ enum Backend {
 }
 
 impl Backend {
+    /// Empty the selection — the compositor broadcasts Selection(None)
+    /// to every watcher, exactly as wl-copy --clear would.
+    fn clear(&self) {
+        match self {
+            Backend::Ext { device, .. } => device.set_selection(None),
+            Backend::Wlr { device, .. } => device.set_selection(None),
+        }
+    }
+
     /// Own the selection; `mimes` are offered in order, the returned
     /// source must outlive the paste requests it serves.
     fn set(&self, qh: &QueueHandle<State>, mimes: Vec<String>) -> AnySource {
@@ -531,23 +541,33 @@ pub fn spawn() -> anyhow::Result<(
                     ready.clear_ready();
                 }
                 cmd = cmds_rx.recv() => {
-                    let Some(ClipCmd::Set { mime, data }) = cmd else {
-                        return;
-                    };
-                    // Offer the received mime; for text also offer the
-                    // charset-annotated twin — pasters ask for either.
-                    let mut mimes = vec![mime.clone()];
-                    if mime.starts_with("text/plain") && mime != "text/plain;charset=utf-8" {
-                        mimes.push("text/plain;charset=utf-8".into());
-                    } else if mime == "text/plain;charset=utf-8" {
-                        mimes.push("text/plain".into());
+                    let Some(cmd) = cmd else { return };
+                    match cmd {
+                        ClipCmd::Set { mime, data } => {
+                            // Offer the received mime; for text also offer the
+                            // charset-annotated twin — pasters ask for either.
+                            let mut mimes = vec![mime.clone()];
+                            if mime.starts_with("text/plain") && mime != "text/plain;charset=utf-8" {
+                                mimes.push("text/plain;charset=utf-8".into());
+                            } else if mime == "text/plain;charset=utf-8" {
+                                mimes.push("text/plain".into());
+                            }
+                            let source = backend.set(&qh, mimes);
+                            if let Err(e) = queue.flush() {
+                                tracing::warn!("wlclip: flush: {e}");
+                                return;
+                            }
+                            state.source = Some((source, mime, data));
+                        }
+                        ClipCmd::Clear => {
+                            backend.clear();
+                            if let Err(e) = queue.flush() {
+                                tracing::warn!("wlclip: flush: {e}");
+                                return;
+                            }
+                            state.source = None;
+                        }
                     }
-                    let source = backend.set(&qh, mimes);
-                    if let Err(e) = queue.flush() {
-                        tracing::warn!("wlclip: flush: {e}");
-                        return;
-                    }
-                    state.source = Some((source, mime, data));
                 }
             }
         }

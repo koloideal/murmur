@@ -98,10 +98,20 @@ class ClipboardFeature(
     override val consumes = setOf("clipboard")
 
     override fun onMessage(from: String, msg: Msg) {
-        val clip = msg as Msg.Clipboard
-        android.util.Log.d("ClipboardBridge", "clip from ${clip.origin} active=${activeDevice()}")
-        if (clip.origin == activeDevice() && secrets.clipEnabled && secrets.clipRecv) {
-            ClipboardBridge.apply(ctx, clip)
+        when (msg) {
+            is Msg.Clipboard -> {
+                android.util.Log.d("ClipboardBridge", "clip from ${msg.origin} active=${activeDevice()}")
+                if (msg.origin == activeDevice() && secrets.clipEnabled && secrets.clipRecv) {
+                    ClipboardBridge.apply(ctx, msg)
+                }
+            }
+            // Same gate as the content it erases — only the active node's
+            // clear is honored, anything else is some idle laptop's hygiene.
+            is Msg.ClipboardClear ->
+                if (msg.origin == activeDevice() && secrets.clipEnabled && secrets.clipRecv) {
+                    ClipboardBridge.applyClear(ctx)
+                }
+            else -> Unit
         }
     }
 }
