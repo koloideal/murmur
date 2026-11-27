@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-proto"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "murmurctl"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "murmurd"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -957,12 +957,13 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "zbus",
 ]
 
 [[package]]
 name = "murmurt"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "atspi",
@@ -1893,6 +1894,19 @@ dependencies = [
  "bitflags",
  "wayland-backend",
  "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols-wlr"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb04e52f7836d7c7976c78ca0250d61e33873c34156a2a1fc9474828ec268234"
+dependencies = [
+ "bitflags",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wayland-scanner",
 ]
 

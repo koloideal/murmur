@@ -1,6 +1,6 @@
 [package]
 name = "murmurt"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "murmur tools: install, doctor and geometry probe for the waybar island"

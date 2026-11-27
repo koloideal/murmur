@@ -43,6 +43,14 @@ enum Cmd {
     /// Dial a LAN peer directly by ip[:port] — for networks where
     /// broadcast discovery can't pass (guest Wi-Fi, client isolation).
     Dial { addr: String },
+    /// Remove every murmur artifact from this machine: the daemon unit,
+    /// island bits, pairing secrets, completions, PATH markers, binaries.
+    /// Does not need a running daemon — that's when people uninstall.
+    Uninstall {
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print shell completions (bash|zsh|fish) on stdout.
     Completions { shell: clap_complete::Shell },
 }
@@ -196,6 +204,7 @@ fn print_help(p: &Paint) {
             format!("  {} rotate the family key", c("rotate")),
             format!("  {} self-revoke a device", c("revoke")),
             format!("  {} dial a LAN peer by ip[:port]", c("dial")),
+            format!("  {} remove every murmur artifact (--yes)", c("uninstall")),
         ],
         vec![
             String::new(),
@@ -329,6 +338,17 @@ fn cmd_status() -> anyhow::Result<()> {
             d["members"].as_u64().unwrap_or(0)
         )),
     );
+
+    // Peers speaking another protocol generation — a family silently
+    // half-deaf is the worst failure mode, so it goes loud right here.
+    if let Some(mm) = d["proto_mismatch"].as_object().filter(|m| !m.is_empty()) {
+        let list = mm
+            .iter()
+            .map(|(id, v)| format!("{id} (v{})", v.as_u64().unwrap_or(0)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {}", p.yellow(format!("proto   mismatch: {list} — upgrade the peer")));
+    }
 
     let selfid = d["self"].as_str().unwrap_or_default();
     match d["active_node"].as_str() {
@@ -800,6 +820,7 @@ fn dispatch(cmd: Cmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::Uninstall { yes } => cmd_uninstall(yes),
         Cmd::Completions { shell } => {
             let mut cli = Cli::command();
             let name = cli.get_name().to_string();
@@ -807,4 +828,229 @@ fn dispatch(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+// ---------- uninstall: every murmur artifact, nothing left behind ----------
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// $XDG_<var>/murmur with the standard ~/.<fallback> default.
+fn murmur_xdg(var: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(fallback))
+        .join("murmur")
+}
+
+struct Rm<'a> {
+    p: &'a Paint,
+}
+impl Rm<'_> {
+    /// rm a file, printing what happened; absent files are quiet.
+    fn file(&self, path: &PathBuf) {
+        if path.exists() || path.is_symlink() {
+            match std::fs::remove_file(path) {
+                Ok(()) => println!("  {} {}", self.p.green("✓"), self.p.dim(path.display())),
+                Err(e) => println!("  {} {} ({e})", self.p.red("✗"), path.display()),
+            }
+        }
+    }
+    /// rm -rf a dir, same semantics.
+    fn dir(&self, path: &PathBuf) {
+        if path.is_dir() {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => println!("  {} {}", self.p.green("✓"), self.p.dim(path.display())),
+                Err(e) => println!("  {} {} ({e})", self.p.red("✗"), path.display()),
+            }
+        }
+    }
+}
+
+/// Lines the installer writes into shell rc files all carry `# murmur`;
+/// the zsh completions block hides two payload lines under its marker.
+/// Rewrites each rc file minus our lines; returns true if it changed.
+fn strip_rc_markers(path: &PathBuf) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut out = String::with_capacity(content.len());
+    let mut skip_payload = 0u8;
+    for line in content.split_inclusive('\n') {
+        let bare = line.trim_end_matches('\n');
+        if bare.contains("# murmur completions") {
+            skip_payload = 2; // fpath+= + compinit ride under this marker
+            continue;
+        }
+        if skip_payload > 0 {
+            skip_payload -= 1;
+            continue;
+        }
+        if bare.contains("# murmur") {
+            continue;
+        }
+        out.push_str(line);
+    }
+    if out == content {
+        return false;
+    }
+    std::fs::write(path, out).is_ok()
+}
+
+/// Every path murmur can leave behind on a laptop-class install.
+/// murmurt's own `uninstall` handles waybar/hyprland marker blocks —
+/// we shell out to it when it's around, then sweep the files ourselves.
+fn cmd_uninstall(yes: bool) -> anyhow::Result<()> {
+    let p = Paint::new();
+    let home = home_dir();
+    let bin = home.join(".local/bin");
+    let xdg_cfg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let xdg_data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+
+    let unit_dir = xdg_cfg.join("systemd/user");
+    let unit = unit_dir.join("murmurd.service");
+    let wants = unit_dir.join("graphical-session.target.wants/murmurd.service");
+
+    let bins = ["murmurd", "murmurctl", "murmurt"]
+        .map(|b| bin.join(b));
+    let island = [
+        "murmur-island.py",
+        "murmur-island-hover.py",
+        "murmur-player.py",
+        "murmur-player-toggle.sh",
+    ]
+    .map(|b| bin.join(b));
+    let dbus = xdg_data.join("dbus-1/services/murmur.player.service");
+    let fonts = xdg_data.join("fonts/murmur");
+    let dirs = [
+        murmur_xdg("XDG_CONFIG_HOME", ".config"),
+        murmur_xdg("XDG_DATA_HOME", ".local/share"),
+        murmur_xdg("XDG_CACHE_HOME", ".cache"),
+    ];
+    let comps: Vec<PathBuf> = ["murmurd", "murmurctl", "murmurt"]
+        .iter()
+        .flat_map(|t| {
+            [
+                home.join(format!(".zfunc/_{t}")),
+                xdg_data.join(format!("bash-completion/completions/{t}")),
+                xdg_cfg.join(format!("fish/completions/{t}.fish")),
+            ]
+        })
+        .collect();
+    let rcs = [
+        home.join(".bash_profile"),
+        home.join(".profile"),
+        home.join(".bashrc"),
+        home.join(".zshrc"),
+        xdg_cfg.join("fish/config.fish"),
+    ];
+
+    if !yes {
+        println!("  {}", p.bold("this removes every murmur artifact:"));
+        let mut any = false;
+        let mut listing: Vec<PathBuf> = vec![
+            unit.clone(), wants.clone(), dbus.clone(), fonts.clone(), sock_path(),
+        ];
+        listing.extend(dirs.iter().cloned());
+        listing.extend(bins.iter().cloned());
+        listing.extend(island.iter().cloned());
+        listing.extend(comps.iter().cloned());
+        for c in &listing {
+            if c.exists() || c.is_symlink() {
+                println!("    {}", p.dim(c.display()));
+                any = true;
+            }
+        }
+        for f in &rcs {
+            if std::fs::read_to_string(f)
+                .map(|s| s.contains("# murmur"))
+                .unwrap_or(false)
+            {
+                println!("    {} {}", p.dim(f.display()), p.dim("(murmur lines)"));
+                any = true;
+            }
+        }
+        if !any {
+            println!("    {}", p.dim("nothing found — already clean"));
+            return Ok(());
+        }
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("not a tty — re-run with --yes to confirm removal");
+        }
+        print!("  {} ", p.accent("remove all of the above? (secrets included — re-pair required) [y/N]"));
+        std::io::stdout().flush()?;
+        let mut a = String::new();
+        std::io::stdin().read_line(&mut a)?;
+        if !matches!(a.trim().to_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("aborted — nothing removed");
+        }
+    }
+
+    let rm = Rm { p: &p };
+    println!("\n  {}", p.bold("stopping + removing the daemon unit"));
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", "murmurd.service"])
+        .status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    rm.file(&wants);
+    rm.file(&unit);
+    rm.file(&sock_path());
+
+    println!("  {}", p.bold("island (waybar/hyprland)"));
+    // murmurt uninstall restores .murmurt-bak configs — run it when present;
+    // spawn failure == absent: ~/.local/bin first, then a bare PATH lookup
+    let murt_ok = [bin.join("murmurt"), PathBuf::from("murmurt")].iter().any(|m| {
+        std::process::Command::new(m)
+            .arg("uninstall")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    if !murt_ok {
+        println!(
+            "  {} no murmurt (or it failed) — sweeping its files; strip any murmur marker blocks in waybar/hyprland configs by hand",
+            p.yellow("!")
+        );
+    }
+    for f in &island {
+        rm.file(f);
+    }
+    rm.file(&dbus);
+    rm.dir(&fonts);
+
+    println!("  {}", p.bold("state, config, cache"));
+    for d in &dirs {
+        rm.dir(d);
+    }
+
+    println!("  {}", p.bold("shell completions + PATH markers"));
+    for f in &comps {
+        rm.file(f);
+    }
+    for f in &rcs {
+        if strip_rc_markers(f) {
+            println!("  {} {} {}", p.green("✓"), p.dim(f.display()), p.dim("(murmur lines removed)"));
+        }
+    }
+
+    println!("  {}", p.bold("binaries"));
+    for f in &bins {
+        rm.file(&PathBuf::from(format!("{}.etag", f.display())));
+        rm.file(f);
+    }
+
+    println!(
+        "\n  {} murmur is gone — open a new shell (PATH/completions) and restart waybar if it had the island",
+        p.green("✓")
+    );
+    Ok(())
 }
