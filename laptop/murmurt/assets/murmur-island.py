@@ -438,6 +438,7 @@ def media_live():
 # landed" feedback — then the text settles into the dim separator tone.
 
 CLIP_FRESH_SEC = 4.0
+CLIP_TTL_SEC = 10.0
 CLIP_POLL = 1.0
 CLIP_NAME_LEN = 10
 
@@ -460,6 +461,8 @@ def clip_frame(clip: dict | None, names: dict, now: float) -> dict:
     dim = _hex(_mix(bg, fg, 0.55))
     ts = clip.get("ts") or 0
     age = now - ts
+    if age >= CLIP_TTL_SEC:
+        return {"text": "", "class": "hidden", "tooltip": ""}
     if age < CLIP_FRESH_SEC:
         k = (math.sin(now * 3.0) + 1) / 2 * max(0.0, 1 - age / CLIP_FRESH_SEC)
     else:
