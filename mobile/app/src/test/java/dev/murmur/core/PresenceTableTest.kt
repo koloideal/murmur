@@ -43,11 +43,38 @@ class PresenceTableTest {
     }
 
     @Test
-    fun idleAndLockedDontElect() {
+    fun idleIsElectedWhenNoActiveExists() {
+        // The phone-in-hand flow: the laptop idles untouched, and clips
+        // must still flow — the strict-active filter was the clipboard
+        // death bug. Idle beats nothing; locked is the last resort.
         val t = table()
         t.record("aaa", "idle", now)
         t.record("bbb", "locked", now)
-        assertNull(t.activeDevice())
+        assertEquals("aaa", t.activeDevice())
+    }
+
+    @Test
+    fun lockedAloneStillRoutes() {
+        val t = table()
+        t.record("bbb", "locked", now)
+        assertEquals("bbb", t.activeDevice())
+    }
+
+    @Test
+    fun activeBeatsIdleBeatsLocked() {
+        val t = table()
+        t.record("aaa", "active", now - 30)
+        t.record("bbb", "idle", now)
+        t.record("ccc", "locked", now)
+        assertEquals("aaa", t.activeDevice())
+    }
+
+    @Test
+    fun idleBeatsLockedEvenWhenOlder() {
+        val t = table()
+        t.record("aaa", "idle", now - 30)
+        t.record("bbb", "locked", now)
+        assertEquals("aaa", t.activeDevice())
     }
 
     @Test
