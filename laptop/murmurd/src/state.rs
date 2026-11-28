@@ -233,6 +233,14 @@ impl Shared {
         if !self.dedupe(from, seq) {
             return false;
         }
+        if let Message::Leaving { .. } = msg {
+            // Deliberate goodbye — un-hear instead of refreshing, so
+            // `devices` flips offline now rather than after the silence
+            // window. The sender's links die with its process anyway.
+            self.last_frame.lock().unwrap().remove(&from);
+            self.last_rtt.lock().unwrap().remove(&from);
+            return true;
+        }
         self.last_frame
             .lock()
             .unwrap()

@@ -477,4 +477,33 @@ mod tests {
             assert!(!b.heard_recently(&DeviceId([77; 8]), std::time::Duration::from_secs(30)));
         });
     }
+
+    #[test]
+    fn leaving_unhears_instantly_and_still_counts_as_seen() {
+        with_env(|| {
+            // Pause/exit: the goodbye flips liveness off NOW — not after
+            // the 30s silence window — and its (from, seq) is consumed
+            // like any first frame so it still floods exactly once.
+            let family = FamilyKey::random();
+            let (a, mut a_out, mut a_lo, _d1) = node(1, &family);
+            let (b, _o, _l, _d2) = node(2, &family);
+            let hub = Hub::new();
+            a.send(Route::All, &Message::Presence { state: PresenceState::Active, ts: 1 })
+                .unwrap();
+            let env = pump_one(&mut a_out, &mut a_lo).unwrap();
+            let key = b.keys.read().unwrap().current.clone();
+            let msg = env.open(&key).unwrap();
+            assert!(b.ingest(&hub, env.from, env.seq, &msg));
+            assert!(b.heard_recently(&env.from, std::time::Duration::from_secs(30)));
+
+            a.send(Route::All, &Message::Leaving { ts: 2 }).unwrap();
+            let env = pump_one(&mut a_out, &mut a_lo).unwrap();
+            let msg = env.open(&key).unwrap();
+            assert!(matches!(msg, Message::Leaving { .. }));
+            assert!(b.ingest(&hub, env.from, env.seq, &msg));
+            assert!(!b.heard_recently(&env.from, std::time::Duration::from_secs(30)));
+            // the same goodbye seen again is a dupe — never re-floods
+            assert!(!b.ingest(&hub, env.from, env.seq, &msg));
+        });
+    }
 }

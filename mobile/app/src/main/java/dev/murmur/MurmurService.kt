@@ -353,6 +353,16 @@ class MurmurService : Service() {
     }
 
     override fun onDestroy() {
+        // Goodbye BEFORE the teardown: receivers un-hear us instantly
+        // instead of showing a stale "online" through the 30s silence
+        // window. TCP ordering delivers it ahead of the socket close —
+        // as long as the writer loops get a beat to flush before the
+        // scope dies (a crash never runs this — the window stays as
+        // the crash fallback, by design).
+        if (::secrets.isInitialized && ::lan.isInitialized && secrets.deviceId != null) {
+            runCatching { send(Msg.Leaving(System.currentTimeMillis() / 1000)) }
+            Thread.sleep(150)
+        }
         synchronized(notifLock) { destroyed = true }
         scope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -516,7 +526,19 @@ class MurmurService : Service() {
             if (!seenSeq.add(env.from to env.seq)) return
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
-        lastHeard[env.from] = System.currentTimeMillis()
+        // Deliberate goodbye — un-hear instead of refreshing, so the
+        // family card flips offline now rather than after the silence
+        // window. Falls through to the flood below so transit members
+        // un-hear too.
+        if (msg is Msg.Leaving) {
+            lastHeard.remove(env.from)
+            heardRtt.remove(env.from)
+            if (serverless) {
+                status.update { it.copy(devices = localDevices(lan.peersFlow.value)) }
+            }
+        } else {
+            lastHeard[env.from] = System.currentTimeMillis()
+        }
         // Mesh RTT: a pong addressed to us echoes OUR ping's ts —
         // same-clock subtraction, honest for direct and transit alike.
         // Anything else (ping ts, transit pong) is cross-clock noise.

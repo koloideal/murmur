@@ -45,5 +45,6 @@ fun Msg.tag(): String = when (this) {
     is Msg.LanBeacon -> "lan_beacon"
     is Msg.LanPing -> "lan_ping"
     is Msg.LanPong -> "lan_pong"
+    is Msg.Leaving -> "leaving"
     is Msg.KeyRotate -> "key_rotate"
 }

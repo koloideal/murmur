@@ -138,6 +138,12 @@ pub enum Message {
         lan_addr: Option<String>,
     },
 
+    /// A node is going away deliberately (user paused/exited, daemon
+    /// stopping) — receivers un-hear it instantly instead of waiting
+    /// out the silence window. Best effort: crashes can't send one,
+    /// so the heard window stays as the crash fallback.
+    Leaving { ts: u64 },
+
     /// LAN-link keepalive: each side pings over the link; the peer
     /// echoes `LanPong` with the same timestamp — RTT is measured by
     /// the pinger on its own clock (no cross-device skew). Handled
@@ -175,6 +181,7 @@ impl Message {
             Message::ClipboardClear { .. } => "clipboard",
             Message::Identity { .. } => "identity",
             Message::LanBeacon { .. } => "lan_beacon",
+            Message::Leaving { .. } => "leaving",
             Message::LanPing { .. } => "lan_ping",
             Message::LanPong { .. } => "lan_pong",
             Message::KeyRotate { .. } => "key_rotate",

@@ -309,13 +309,37 @@ fn cache_art(b64: &str) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// The bus can drop our well-known name without dropping the
+/// connection (observed in the wild: connection alive, name silently
+/// released — player gone until a daemon restart). The watchdog
+/// re-requests it; a dead connection escalates to a full rebuild via
+/// the outer loop.
 async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     let shared = ctx.shared;
     let mut inbox = ctx.inbox.expect("feature declares wants");
     let st = Arc::new(Mutex::new(Media::default()));
 
-    // No session bus (headless, ssh) — the feature idles instead of
-    // killing the daemon, like the other adapter-backed features.
+    loop {
+        match serve(&shared, &st, &mut inbox).await {
+            ServeEnd::InboxClosed => return Ok(()),
+            ServeEnd::Broken(e) => {
+                warn!("mpris: {e:#} — re-serving in 5s");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+enum ServeEnd {
+    InboxClosed,
+    Broken(anyhow::Error),
+}
+
+async fn serve(
+    shared: &Arc<Shared>,
+    st: &Arc<Mutex<Media>>,
+    inbox: &mut crate::feature::Inbox,
+) -> ServeEnd {
     let conn: anyhow::Result<zbus::Connection> = async {
         Ok(zbus::connection::Builder::session()
             .context("session bus")?
@@ -334,25 +358,90 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     .await;
     let conn = match conn {
         Ok(c) => c,
-        Err(e) => {
-            warn!("mpris feature disabled: {e:#}");
-            while inbox.recv().await.is_some() {}
-            return Ok(());
-        }
+        // No session bus (headless, ssh) — retry slowly; the bus may
+        // simply not be up yet at boot.
+        Err(e) => return ServeEnd::Broken(e),
     };
     info!("mpris: serving {BUS_NAME}");
 
     let emitter: SignalEmitter<'static> =
         match conn.object_server().interface::<_, Player>(PATH).await {
             Ok(i) => i.signal_emitter().clone(),
-            Err(e) => {
-                warn!("mpris feature disabled: {e:#}");
-                while inbox.recv().await.is_some() {}
-                return Ok(());
-            }
+            Err(e) => return ServeEnd::Broken(e.into()),
         };
 
-    while let Some((from, msg)) = inbox.recv().await {
+    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
+    watchdog.tick().await; // first tick is immediate — swallow it
+
+    loop {
+        tokio::select! {
+            msg = inbox.recv() => {
+                let Some((from, msg)) = msg else { return ServeEnd::InboxClosed };
+                handle_state(&conn, &emitter, st, from, &msg).await;
+            }
+            _ = watchdog.tick() => {
+                use zbus::fdo::{DBusProxy, RequestNameFlags, RequestNameReply};
+                let res: anyhow::Result<RequestNameReply> = async {
+                    let proxy = DBusProxy::new(&conn).await?;
+                    Ok(proxy
+                        .request_name(
+                            BUS_NAME.try_into()?,
+                            RequestNameFlags::DoNotQueue.into(),
+                        )
+                        .await?)
+                }
+                .await;
+                match res {
+                    // Ours already, or just re-acquired — either way the
+                    // name is back where playerctl can find it.
+                    Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {}
+                    // Someone else holds it — don't fight, retry next tick.
+                    Ok(_) => debug!("mpris: {BUS_NAME} owned elsewhere"),
+                    Err(e) => return ServeEnd::Broken(e),
+                }
+
+                // The media source left the mesh — its last snapshot
+                // must not keep "playing" on the bar forever. A goodbye
+                // un-hears instantly; a crash takes the silence window.
+                let stale = {
+                    let m = st.lock().await;
+                    m.src.is_some_and(|src| {
+                        !shared.heard_recently(&src, std::time::Duration::from_secs(30))
+                    })
+                };
+                if stale {
+                    {
+                        let mut m = st.lock().await;
+                        m.src = None;
+                        m.status = PlayStatus::Stopped;
+                        m.title.clear();
+                        m.artist.clear();
+                        m.album.clear();
+                        m.pos_ms = 0;
+                        m.dur_ms = 0;
+                        m.art_path = None;
+                    }
+                    if let Ok(iface) =
+                        conn.object_server().interface::<_, Player>(PATH).await
+                    {
+                        let player_iface = iface.get().await;
+                        let _ = player_iface.playback_status_changed(&emitter).await;
+                        let _ = player_iface.metadata_changed(&emitter).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_state(
+    conn: &zbus::Connection,
+    emitter: &SignalEmitter<'static>,
+    st: &Arc<Mutex<Media>>,
+    from: DeviceId,
+    msg: &Message,
+) {
+    {
         let Message::MediaState {
             player,
             title,
@@ -367,7 +456,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             ..
         } = (*msg).clone()
         else {
-            continue;
+            return;
         };
         debug!("mpris: {player} {title:?} {status:?} from {from}");
         // Art decode+write outside the state lock — a big PNG must not
@@ -402,17 +491,16 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
             (sh, lp)
         };
         let Ok(iface) = conn.object_server().interface::<_, Player>(PATH).await else {
-            continue;
+            return;
         };
         let player_iface = iface.get().await;
-        let _ = player_iface.playback_status_changed(&emitter).await;
-        let _ = player_iface.metadata_changed(&emitter).await;
+        let _ = player_iface.playback_status_changed(emitter).await;
+        let _ = player_iface.metadata_changed(emitter).await;
         if sh_changed {
-            let _ = player_iface.shuffle_changed(&emitter).await;
+            let _ = player_iface.shuffle_changed(emitter).await;
         }
         if lp_changed {
-            let _ = player_iface.loop_status_changed(&emitter).await;
+            let _ = player_iface.loop_status_changed(emitter).await;
         }
     }
-    Ok(())
 }

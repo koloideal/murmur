@@ -196,6 +196,13 @@ sealed class Msg {
     @SerialName("lan_pong")
     data class LanPong(val ts: Long) : Msg()
 
+    /** Deliberate goodbye (pause/exit) — receivers drop the sender's
+     *  liveness instantly instead of waiting out the heard window.
+     *  Best effort: a crash can't send one — the window stays for that. */
+    @Serializable
+    @SerialName("leaving")
+    data class Leaving(val ts: Long) : Msg()
+
     /** New family key, sealed once per member to its identity key. */
     @Serializable
     @SerialName("key_rotate")
