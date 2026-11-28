@@ -104,7 +104,7 @@ pub async fn run(
             unreachable!();
         }
     };
-    // SO_REUSEADDR: `murmurd pair` listens for an inviter's pair beacon
+    // SO_REUSEADDR: `murmurd join` listens for an inviter's pair beacon
     // on the same port — a second bind only works if this socket opted
     // in. Linux delivers broadcast datagrams to every bound socket, so
     // both readers see what they need.
@@ -143,7 +143,53 @@ pub async fn run(
     tokio::spawn(dial_loop(shared.clone(), hub.clone(), dial_rx));
     tokio::spawn(crate::usbwatch::run(shared.clone()));
     tokio::spawn(redial_loop(shared.clone()));
+    seed_dialer(shared.clone());
     accept_loop(&shared, &hub, &listener).await
+}
+
+/// Dial `lan_seeds` — the inviter address(es) a join learned at pair
+/// time. Discovery broadcast may never arrive on firewalled or
+/// AP-isolated networks, yet the seed is a proven-reachable peer: keep
+/// calling until the link lands or a boot window (~3min) expires.
+/// The hint is marked `Phone` so the direction rule always lets us
+/// initiate — the side holding the address is the side that must
+/// call; a losing simultaneous dial is closed by the tie-break.
+fn seed_dialer(shared: Arc<Shared>) {
+    let seeds: Vec<(murmur_proto::DeviceId, std::net::IpAddr)> = shared
+        .cfg
+        .lan_seeds
+        .iter()
+        .filter_map(|s| {
+            let (id, ip) = s.split_once('@')?;
+            Some((id.parse().ok()?, ip.parse().ok()?))
+        })
+        .collect();
+    if seeds.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        for _ in 0..18 {
+            let mut any_pending = false;
+            for (id, ip) in &seeds {
+                if shared.lan_peers().contains(id) {
+                    continue;
+                }
+                any_pending = true;
+                let _ = shared.lan_dial.send(DialHint {
+                    peer: Some(*id),
+                    addr: *ip,
+                    port: LINK_PORT,
+                    kind: DeviceKind::Phone,
+                    trusted: true,
+                    transport: Transport::Lan,
+                });
+            }
+            if !any_pending {
+                break;
+            }
+            tokio::time::sleep(DIAL_EVERY).await;
+        }
+    });
 }
 
 /// Periodic sealed-beacon broadcast — proves family membership to anyone
@@ -678,7 +724,13 @@ async fn link_reader(
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, *tcp_port));
                     }
                 }
-                shared.ingest(&hub, env.from, env.seq, &msg);
+                // First-seen frames also flood onward to our other
+                // links — the serverless mesh is multi-hop (phone ⇄
+                // usb-laptop ⇄ wifi-laptop), so a frame's only route
+                // to some members may pass through us.
+                if shared.ingest(&hub, env.from, env.seq, &msg) {
+                    shared.lan_forward(&env, &tx);
+                }
             }
             Err(e) => {
                 // Same stale-member recovery as the relay path: an old

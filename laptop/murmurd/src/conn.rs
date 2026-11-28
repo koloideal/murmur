@@ -40,7 +40,7 @@ pub async fn run(
         // of hammering the relay every minute.
         let revoked = shared.revoked.load(std::sync::atomic::Ordering::Relaxed);
         if revoked {
-            warn!("this device was revoked — re-pair it: murmurd pair --code …");
+            warn!("this device was revoked — re-pair it: murmurd join --code …");
         }
         tokio::time::sleep(if revoked { REVOKED_RETRY } else { backoff }).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);

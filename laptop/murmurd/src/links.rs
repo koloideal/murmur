@@ -5,7 +5,7 @@
 //! fields themselves sit next to the other shared state.
 
 use crate::state::Shared;
-use murmur_proto::{DeviceId, Envelope};
+use murmur_proto::{DeviceId, Envelope, Route};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -172,5 +172,34 @@ impl Shared {
     /// Snapshot for the redial loop and `murmurctl status`.
     pub fn lan_addrs(&self) -> HashMap<DeviceId, std::net::SocketAddr> {
         self.lan_addrs.lock().unwrap().clone()
+    }
+
+    /// Flood an inbound link frame to every *other* live link — the
+    /// serverless mesh is multi-hop: a phone USB-linked to one laptop
+    /// must still reach a second laptop on wifi. The sealed envelope
+    /// rides as-is (`from` stays the origin — no re-wrap needed), the
+    /// caller forwards only first-seen frames (dedupe already ran),
+    /// and the arrival socket plus the origin's own link are skipped.
+    /// Loops terminate: every node forwards each (from, seq) at most
+    /// once, later copies die in dedupe.
+    pub(crate) fn lan_forward(
+        &self,
+        env: &Envelope,
+        arrived: &mpsc::UnboundedSender<Envelope>,
+    ) {
+        match &env.to {
+            // Addressed to us — dispatched already; Route::Server is
+            // relay business a LAN flood can never complete.
+            Route::Device(d) if *d == self.id => return,
+            Route::Server => return,
+            _ => {}
+        }
+        let lan = self.lan.lock().unwrap();
+        for (peer, (tx, ..)) in lan.iter() {
+            if *peer == env.from || tx.same_channel(arrived) {
+                continue;
+            }
+            let _ = tx.send(env.clone());
+        }
     }
 }

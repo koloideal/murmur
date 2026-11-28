@@ -64,6 +64,11 @@ pub struct Config {
     /// reachable — the mirrored phone notification covers them.
     #[serde(default = "default_hide_twins")]
     pub notify_hide_twins_if_online: Vec<String>,
+    /// `"deviceid@ip"` entries learned at pair time — the inviter's
+    /// dial address. `lan` dials them on startup so a freshly joined
+    /// device links even where discovery broadcast can't pass.
+    #[serde(default)]
+    pub lan_seeds: Vec<String>,
 }
 
 fn default_idle() -> u64 {
@@ -98,6 +103,7 @@ impl Default for Config {
             lock_procs: default_lock_procs(),
             notify_suppress_if_running: Default::default(),
             notify_hide_twins_if_online: default_hide_twins(),
+            lan_seeds: Vec::new(),
         }
     }
 }

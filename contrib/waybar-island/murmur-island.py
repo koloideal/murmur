@@ -164,7 +164,7 @@ def status_tooltip(st: dict | None) -> str:
         return "murmurd unreachable — systemctl --user status murmurd"
     tip = [
         f"{st['name']} · {st['self']}",
-        "revoked — re-pair: murmurd pair --code …"
+        "revoked — re-pair: murmurd join --code …"
         if st["revoked"]
         else ("online" if st["online"] else "offline"),
         f"relay  {st['server']}  ·  epoch {st['epoch']}"

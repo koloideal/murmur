@@ -141,7 +141,7 @@ box() {
 hint_box() {
     box "${B}installed${R0}" \
         "" \
-        "join later:   ${B}murmurd pair --code INVITE-OR-XXXX-XXXX${R0}" \
+        "join later:   ${B}murmurd join --code INVITE-OR-XXXX-XXXX${R0}" \
         "              relay code → --server wss://DOMAIN" \
         "              broadcast blocked → --server INVITER-IP" \
         "or found one: ${B}murmurd init --kind serverless --name THIS-HOST${R0}" \
@@ -410,9 +410,9 @@ if [ $# -gt 0 ]; then
     # murmurd's SAS prompt reads stdin — hand it the real terminal,
     # not the exhausted curl pipe.
     if have_tty; then
-        "$BIN/murmurd" pair "$@" < /dev/tty || die "pairing failed"
+        "$BIN/murmurd" join "$@" < /dev/tty || die "pairing failed"
     else
-        "$BIN/murmurd" pair "$@" || die "pairing failed"
+        "$BIN/murmurd" join "$@" || die "pairing failed"
     fi
     post_pair
     exit 0
@@ -460,12 +460,12 @@ if have_tty && askyn y "got an invite or code from your family? (murmurctl invit
             [A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9])
                 SERVER=$(ask v_url "" "relay URL or inviter ip[:port] — wss://domain / ws://ip:port (empty = serverless, find on LAN)")
                 if [ -n "$SERVER" ]; then
-                    "$BIN/murmurd" pair --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
+                    "$BIN/murmurd" join --server "$SERVER" --code "$CODE" < /dev/tty || die "pairing failed"
                 else
-                    "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed"
+                    "$BIN/murmurd" join --code "$CODE" < /dev/tty || die "pairing failed"
                 fi ;;
             *)
-                "$BIN/murmurd" pair --code "$CODE" < /dev/tty || die "pairing failed" ;;
+                "$BIN/murmurd" join --code "$CODE" < /dev/tty || die "pairing failed" ;;
         esac
         post_pair
         exit 0

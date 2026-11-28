@@ -327,7 +327,7 @@ fn cmd_status() -> anyhow::Result<()> {
     if revoked {
         println!(
             "  {}",
-            p.red("this machine was removed from the family — re-pair: murmurd pair --code …"),
+            p.red("this machine was removed from the family — re-pair: murmurd join --code …"),
         );
     }
     println!(
@@ -489,14 +489,14 @@ fn cmd_invite() -> anyhow::Result<()> {
             println!(
                 "  {}",
                 p.dim(format!(
-                    "laptop: murmurd pair --server {server} --code {short}"
+                    "laptop: murmurd join --server {server} --code {short}"
                 ))
             );
         } else {
             // Serverless: `server` carries `host:port` of the one-shot
             // listener, and a LAN pair beacon makes the short code
             // resolvable without a relay — it's what a laptop feeds
-            // to `murmurd pair --code`.
+            // to `murmurd join --code`.
             println!("  code      {}", p.bold(short));
             println!("  direct    {}", server);
             println!("  {}", p.dim("lan only — expires in 10 minutes"));
@@ -506,13 +506,13 @@ fn cmd_invite() -> anyhow::Result<()> {
             );
             println!(
                 "  {}",
-                p.dim(format!("laptop: murmurd pair --code {short}"))
+                p.dim(format!("laptop: murmurd join --code {short}"))
             );
             // Beacon-free fallback for wi-fi that isolates clients or
             // subnets where broadcast can't pass.
             println!(
                 "  {}",
-                p.dim(format!("        or direct: murmurd pair --code {short} --server {server}"))
+                p.dim(format!("        or direct: murmurd join --code {short} --server {server}"))
             );
         }
     }

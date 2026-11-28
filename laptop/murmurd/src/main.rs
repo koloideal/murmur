@@ -53,16 +53,17 @@ async fn main() -> anyhow::Result<()> {
 
     // rustls needs an explicit crypto provider — tokio-tungstenite pulls
     // it featureless, so ring is wired in murmurd's own Cargo.toml. Must
-    // run before `pair` too — it opens a wss connection of its own.
+    // run before `join` too — it opens a wss connection of its own.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // `murmurd init` / `murmurd pair` — one-shot provisioning paths,
+    // `murmurd init` / `murmurd join` — one-shot provisioning paths,
     // neither starts the daemon.
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") => {}
         Some("init") => return config::init(&args[1..]),
-        Some("pair") => return pair_join(&args[1..]).await,
+        // `pair` stays a hidden alias — old invites and scripts print it.
+        Some("join") | Some("pair") => return pair_join(&args[1..]).await,
         Some("install") => return install::install_user_unit(),
         Some("doctor") => return doctor().await,
         Some("completions") => return print_completions(args.get(1).map(String::as_str)),
@@ -173,13 +174,13 @@ async fn doctor() -> anyhow::Result<()> {
                     c.family_kind,
                     c.name,
                 ),
-                "config.toml missing or server_url is not ws(s):// — run `murmurd pair` or `murmurd init`",
+                "config.toml missing or server_url is not ws(s):// — run `murmurd join` or `murmurd init`",
             );
         }
         None => ok(
             false,
             String::new(),
-            "no config.toml — provision first: `murmurd pair --code …` or `murmurd init`",
+            "no config.toml — provision first: `murmurd join --code …` or `murmurd init`",
         ),
     }
 
@@ -290,7 +291,7 @@ async fn doctor() -> anyhow::Result<()> {
     }
 }
 
-/// `murmurd pair --code <invite> [--name X]` — join the family through an
+/// `murmurd join --code <invite> [--name X]` — join the family through an
 /// invite issued by `murmurctl invite` on an existing device.
 async fn pair_join(args: &[String]) -> anyhow::Result<()> {
     fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -300,7 +301,7 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
             .map(String::as_str)
     }
     let code = flag(args, "--code")
-        .context("usage: murmurd pair --code CODE [--server URL] [--name NAME]")?;
+        .context("usage: murmurd join --code CODE [--server URL] [--name NAME]")?;
     let server = flag(args, "--server").map(str::to_owned);
     let name = flag(args, "--name")
         .map(str::to_owned)
@@ -318,6 +319,10 @@ async fn pair_join(args: &[String]) -> anyhow::Result<()> {
         family_kind: paired.kind,
         server_url: paired.server_url,
         name,
+        lan_seeds: paired
+            .seed
+            .map(|(id, ip)| vec![format!("{id}@{ip}")])
+            .unwrap_or_default(),
         ..config::Config::default()
     };
     let secrets = config::Secrets {
@@ -359,7 +364,7 @@ fn print_help() {
     let rows: &[(&str, &str)] = &[
         ("murmurd run", "run the daemon"),
         ("murmurd init", "name, server, credentials"),
-        ("murmurd pair", "join via invite code"),
+        ("murmurd join", "join via invite code"),
         ("murmurd install", "systemd user unit"),
         ("murmurd doctor", "check config + relay"),
         ("murmurd completions", "shell completions on stdout"),
@@ -384,7 +389,7 @@ _murmurd() {
   cmds=(
     'run:run the daemon'
     'init:name, server, credentials'
-    'pair:join via invite code'
+    'join:join via invite code'
     'install:systemd user unit'
     'doctor:check config + relay'
     'completions:shell completions on stdout'
@@ -394,7 +399,7 @@ _murmurd() {
   else
     case $words[2] in
       init) _arguments '--server[relay url]:url:' '--name[device name]:name:' '--kind[family kind]:kind:(serverful serverless)' ;;
-      pair) _arguments '--server[relay url]:url:' '--code[invite code]:code:' ;;
+      join|pair) _arguments '--server[relay url]:url:' '--code[invite code]:code:' ;;
       completions) _arguments '1:shell:(bash zsh fish)' ;;
     esac
   fi
@@ -405,14 +410,14 @@ _murmurd "$@"
   local cur prev cmds
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  cmds="run init pair install doctor completions"
+  cmds="run init join install doctor completions"
   if [ "$COMP_CWORD" -eq 1 ]; then
     COMPREPLY=($(compgen -W "$cmds" -- "$cur"))
   elif [ "${COMP_WORDS[1]}" = "completions" ]; then
     COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
-  elif [ "${COMP_WORDS[1]}" = "init" ] || [ "${COMP_WORDS[1]}" = "pair" ]; then
+  elif [ "${COMP_WORDS[1]}" = "init" ] || [ "${COMP_WORDS[1]}" = "join" ] || [ "${COMP_WORDS[1]}" = "pair" ]; then
     case "$prev" in
-      murmurd|init|pair) COMPREPLY=($(compgen -W "--server --name --kind --code" -- "$cur")) ;;
+      murmurd|init|join|pair) COMPREPLY=($(compgen -W "--server --name --kind --code" -- "$cur")) ;;
     esac
   fi
 }
@@ -420,7 +425,7 @@ complete -F _murmurd murmurd
 "#,
         "fish" => r#"complete -c murmurd -n '__fish_use_subcommand' -a run -d 'run the daemon'
 complete -c murmurd -n '__fish_use_subcommand' -a init -d 'name, server, credentials'
-complete -c murmurd -n '__fish_use_subcommand' -a pair -d 'join via invite code'
+complete -c murmurd -n '__fish_use_subcommand' -a join -d 'join via invite code'
 complete -c murmurd -n '__fish_use_subcommand' -a install -d 'systemd user unit'
 complete -c murmurd -n '__fish_use_subcommand' -a doctor -d 'check config + relay'
 complete -c murmurd -n '__fish_use_subcommand' -a completions -d 'shell completions on stdout'

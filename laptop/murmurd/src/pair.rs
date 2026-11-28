@@ -9,7 +9,7 @@
 //!   `PairAccept` (joiner can now show the same SAS); `pair confirm`
 //!   registers the device on the server and ships `PairData`.
 //!
-//! Joiner side (`murmurd pair --code`): one-shot [`join`] — handshake,
+//! Joiner side (`murmurd join --code`): one-shot [`join`] — handshake,
 //! print the SAS, wait for `PairData`, hand the secrets to provisioning.
 
 use std::collections::HashMap;
@@ -28,6 +28,10 @@ pub struct Pairing {
     /// PairHello reaches `pair::handle_ctl`, which moves it into the
     /// fresh `Pending`.
     pub pair_reply: HashMap<DeviceId, mpsc::UnboundedSender<Envelope>>,
+    /// The joiner's socket source ip, staged alongside `pair_reply` —
+    /// at confirm time it's the only proven LAN dial address for the
+    /// brand-new member, so `pair_confirm` feeds it to the dialer.
+    pub pair_addr: HashMap<DeviceId, std::net::IpAddr>,
 }
 
 /// How long an invite/pending stays around without progress.
@@ -50,6 +54,9 @@ pub struct Pending {
     /// Serverless pairing: the joiner's direct socket writer — its
     /// PairAccept/PairData ride this instead of the (absent) relay.
     pub reply: Option<mpsc::UnboundedSender<Envelope>>,
+    /// The joiner's source ip from its pair socket — becomes the new
+    /// member's first remembered dial address at confirm.
+    pub addr: Option<std::net::IpAddr>,
 }
 
 /// Shared daemon state: identity, key, presence table, outbound queue.
@@ -122,6 +129,7 @@ fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
             // A serverless PairHello arrived over a direct socket —
             // its reply channel was staged by `serve_pair`.
             let reply = pair.pair_reply.remove(&from);
+            let addr = pair.pair_addr.remove(&from);
             pair.pending.insert(
                 from,
                 Pending {
@@ -130,6 +138,7 @@ fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
                     name: name.clone(),
                     created: entry.created,
                     reply,
+                    addr,
                 },
             );
             info!("pairing pending: {from} ({name}) — `murmurctl pair` to confirm");
@@ -155,6 +164,7 @@ fn sweep_pairing(shared: &Shared) {
         .copied()
         .collect();
     pair.pair_reply.retain(|s, _| live.contains(s));
+    pair.pair_addr.retain(|s, _| live.contains(s));
 }
 
 // ---------- serverless invite listener ----------
@@ -184,6 +194,7 @@ pub(crate) async fn pair_listen(shared: Arc<Shared>, listener: TcpListener) {
 /// channel *before* the frame hits `ctl_events`, so `pair_accept`/
 /// `pair_confirm` answers land back on the wire that asked.
 async fn serve_pair(shared: Arc<Shared>, s: TcpStream) {
+    let joiner_ip = s.peer_addr().ok().map(|a| a.ip());
     let (r, mut w) = s.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
     tokio::spawn(async move {
@@ -210,12 +221,11 @@ async fn serve_pair(shared: Arc<Shared>, s: TcpStream) {
             continue;
         };
         if let Control::PairHello { .. } = ctl {
-            shared
-                .pair
-                .lock()
-                .unwrap()
-                .pair_reply
-                .insert(env.from, tx.clone());
+            let mut pair = shared.pair.lock().unwrap();
+            pair.pair_reply.insert(env.from, tx.clone());
+            if let Some(ip) = joiner_ip {
+                pair.pair_addr.insert(env.from, ip);
+            }
         }
         let _ = shared.ctl_events.send((env.from, ctl));
     }
@@ -302,13 +312,13 @@ async fn pair_beacon_wait(session: DeviceId) -> anyhow::Result<String> {
     .await
     .context(
         "no invite answering on this lan — re-run `murmurctl invite` if it expired; \
-         client-isolating wi-fi needs `murmurd pair --code CODE --server <inviter-ip>`",
+         client-isolating wi-fi needs `murmurd join --code CODE --server <inviter-ip>`",
     )?
 }
 
 impl Shared {
     /// `murmurctl invite`: mint a session, keep our DH key, hand back the
-    /// code the new device feeds to `murmurd pair --code` (or scans as
+    /// code the new device feeds to `murmurd join --code` (or scans as
     /// a QR on the phone). In a serverless family the invite carries a
     /// direct `host:port` the joiner dials — the listener is permanent,
     /// bound at daemon start.
@@ -475,6 +485,28 @@ impl Shared {
                 let _ = self.out.send(env);
             }
         }
+        // The joiner binds its link listener moments after PairData —
+        // remember its address and nudge the dialer through that boot
+        // window. Phones never dial out, and on broadcast-filtered
+        // LANs nobody else will teach us this route.
+        if let Some(ip) = pending.addr {
+            let addr = std::net::SocketAddr::new(ip, crate::lan::LINK_PORT);
+            self.lan_addr_set(device_id, addr);
+            let dial = self.lan_dial.clone();
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let _ = dial.send(crate::lan::DialHint {
+                        peer: Some(device_id),
+                        addr: ip,
+                        port: crate::lan::LINK_PORT,
+                        kind: murmur_proto::DeviceKind::Phone,
+                        trusted: true,
+                        transport: crate::lan::Transport::Lan,
+                    });
+                }
+            });
+        }
         Ok(device_id)
     }
 }
@@ -490,9 +522,13 @@ pub struct Paired {
     pub key_epoch: u64,
     pub kind: murmur_proto::FamilyKind,
     pub family_name: Option<String>,
+    /// Inviter's `(device_id, ip)` on a direct join — the only peer the
+    /// fresh device provably knows. Provisioning writes it to
+    /// `lan_seeds` so the first daemon start links without broadcast.
+    pub seed: Option<(DeviceId, std::net::IpAddr)>,
 }
 
-/// `murmurd pair --code <invite|XXXX-XXXX> [--server URL]`: claim the
+/// `murmurd join --code <invite|XXXX-XXXX> [--server URL]`: claim the
 /// session, exchange pubkeys, show the SAS, wait for `PairData`.
 /// A full invite carries the endpoint; a short code derives the
 /// session and resolves it via `--server` or a LAN pair beacon.
@@ -646,6 +682,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
                         key_epoch: blob.key_epoch,
                         kind: blob.kind,
                         family_name: blob.family_name,
+                        seed: None,
                     });
                 }
                 _ => {}
@@ -657,7 +694,7 @@ pub async fn join(code: &str, name: &str, server: Option<&str>) -> anyhow::Resul
     .context("pairing timed out — the inviter didn't confirm in time")?
 }
 
-/// `murmurd pair --code XXXX-XXXX` with no server: the inviter's LAN
+/// `murmurd join --code XXXX-XXXX` with no server: the inviter's LAN
 /// pair beacon tells us where to dial — the serverless stand-in for
 /// the relay's session lookup.
 async fn join_lan_code(session: DeviceId, name: &str) -> anyhow::Result<Paired> {
@@ -743,6 +780,13 @@ async fn join_direct(addr: &str, session: DeviceId, name: &str) -> anyhow::Resul
                         key_epoch: blob.key_epoch,
                         kind: blob.kind,
                         family_name: blob.family_name,
+                        // env.from is the inviter — it also owns the
+                        // socket we dialed, so its ip is a proven LAN
+                        // dial target for the daemon's first start.
+                        seed: addr
+                            .parse::<std::net::SocketAddr>()
+                            .ok()
+                            .map(|a| (env.from, a.ip())),
                     });
                 }
                 _ => {}

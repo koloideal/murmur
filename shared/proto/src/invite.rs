@@ -1,7 +1,7 @@
 //! Invite bundle: what a new device needs to start pairing — where the
 //! server is and which device invited it. Encoded as a single opaque
 //! string (base64url of JSON) that travels over a QR code, a paste, or a
-//! `murmurd pair --code` argument. Contains no secrets: worst case someone
+//! `murmurd join --code` argument. Contains no secrets: worst case someone
 //! shows up as an extra pending pairing that gets SAS-rejected.
 
 use crate::DeviceId;

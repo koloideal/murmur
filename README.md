@@ -180,7 +180,7 @@ $ systemctl --user start murmurd && murmurd doctor
 the invite carries the server URL itself.
 
 **4. More laptops:** `murmurctl invite` on any member, then
-`murmurd pair --code …` on the new one.
+`murmurd join --code …` on the new one.
 
 **Serverless instead?** Skip the relay entirely — on the first laptop:
 `murmurd init --kind serverless --name my-laptop`, then `murmurctl invite`

@@ -6,7 +6,19 @@ commits that shipped in each release.
 ## [Unreleased]
 
 ### Added
-- `murmurd pair --code CODE --server HOST[:PORT]` — direct dial to the
+- `murmurd join` is the new name of `murmurd pair` (kept as a hidden
+  alias) — joins the family; `murmurctl pair` stays the inviter-side
+  accept/confirm, so the two commands no longer collide.
+- Multi-hop LAN mesh: first-seen link frames flood onward to a node's
+  other links, so members reach each other through a transit peer
+  (phone ⇄ usb/wifi-laptop ⇄ second laptop). Sealed envelopes ride
+  as-is; dedupe makes loops terminate.
+- Pair-time peer seeds: the joiner persists the inviter's address as
+  `lan_seeds` in config.toml and the daemon dials it at startup; the
+  inviter remembers the joiner's pair-socket address and nudges the
+  dialer through its boot window. A fresh join links even where
+  discovery broadcast can never pass (host firewalls, AP isolation).
+- `murmurd join --code CODE --server HOST[:PORT]` — direct dial to the
   inviter's pair listener, bypassing LAN broadcast entirely (AP
   isolation, filtered subnets). `tcp://` prefix and bare host accepted.
 - `murmurctl invite` prints the direct-dial fallback for serverless.

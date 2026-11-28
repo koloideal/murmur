@@ -941,7 +941,7 @@ async fn serve(args: &[String]) -> anyhow::Result<()> {
     if let Some(code) = shared.bootstrap.lock().unwrap().as_ref().map(|b| b.code.clone()) {
         info!(
             "family is empty — bootstrap code: {code}\n\
-             first device to `murmurd pair --server <this-url> --code {code}` becomes the founder"
+             first device to `murmurd join --server <this-url> --code {code}` becomes the founder"
         );
     }
 

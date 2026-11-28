@@ -53,6 +53,7 @@ mod tests {
             lock_procs: vec![],
             notify_suppress_if_running: Default::default(),
             notify_hide_twins_if_online: vec![],
+            lan_seeds: vec![],
         };
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lo_tx, lo_rx) = tokio::sync::mpsc::unbounded_channel();

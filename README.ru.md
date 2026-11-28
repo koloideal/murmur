@@ -155,7 +155,7 @@ $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-ser
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/koloideal/murmur/main/install-client.sh | sh
-$ murmurd pair --server wss://murmur.example.org --code T45K-TP6D
+$ murmurd join --server wss://murmur.example.org --code T45K-TP6D
 bootstrap pairing — verification code: 452690       # сверка: murmurs bootstrap-code
 $ systemctl --user start murmurd && murmurd doctor
 ```
@@ -169,7 +169,7 @@ $ systemctl --user start murmurd && murmurd doctor
 инвайт несёт URL сервера в себе.
 
 **4. Ещё ноутбуки:** `murmurctl invite` на любом члене семьи, затем
-`murmurd pair --code …` на новом.
+`murmurd join --code …` на новом.
 
 **Serverless?** Пропусти релей совсем — на первом ноутбуке:
 `murmurd init --kind serverless --name my-laptop`, затем `murmurctl invite`

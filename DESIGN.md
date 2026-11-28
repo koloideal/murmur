@@ -46,7 +46,7 @@ Arch/Hyprland через домашний сервер-релей. Без общ
 1. На существующем устройстве `murmurctl invite` генерирует session id и
    эфемерный X25519-ключ, выводит invite-бандл `{server_url, inviter_id,
    session}` — QR или строка. Сервер сессий не знает: матчмейкинга нет.
-2. Новое устройство (`murmurd pair --code …` или скан в приложении)
+2. Новое устройство (`murmurd join --code …` или скан в приложении)
    подключается `role=pair`, заявляя session как свой conn-id, генерирует
    свой эфемерный ключ и шлёт `PairHello{pubkey, name}` → inviter'у.
    Pair-коннекты изолированы: только Pair*-фреймы, только unicast.
