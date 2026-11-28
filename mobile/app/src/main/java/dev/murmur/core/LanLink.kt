@@ -31,7 +31,7 @@ class LanLink(
     private val selfId: String,
     private val key: FamilyKey,
     private val scope: CoroutineScope,
-    private val onMsg: (Envelope) -> Unit,
+    private val onMsg: (Envelope, Socket) -> Unit,
     /** Persists [peerAddrs] — a service restart must not forget the
      *  only rendezvous a filtered network leaves us. */
     private val prefs: android.content.SharedPreferences? = null,
@@ -42,6 +42,10 @@ class LanLink(
      *  surfaces it; silently dropping is how "offline" goes unexplained. */
     private val onProtoMismatch: (peer: String, v: Int) -> Unit = { _, _ -> },
     private val sendRelay: (Msg) -> Unit = {},
+    /** Binds outbound LAN sockets to the wifi/ethernet network — under
+     *  a killswitch VPN the tunnel table has no LAN route and every
+     *  dial dies EHOSTUNREACH while inbound still works. */
+    private val ctx: android.content.Context? = null,
 ) {
     /** Which end of the socket we are — the simultaneous-dial
      *  tie-break needs it. */
@@ -174,9 +178,31 @@ class LanLink(
             for (p in links.keys) writeQ.trySend(Write(p, bytes))
             true
         } else {
-            if (!links.containsKey(to)) return false
+            val link = links[to]
+            if (link == null) {
+                // No direct link — flood every link: a transit peer's
+                // forward path still carries it the last hop.
+                if (links.isEmpty()) return false
+                for (p in links.keys) writeQ.trySend(Write(p, bytes))
+                return true
+            }
             writeQ.trySend(Write(to, bytes))
             true
+        }
+    }
+
+    /** Flood an inbound frame to every *other* live link — the mesh
+     *  is multi-hop: a laptop USB-linked to one peer must still reach
+     *  a second laptop on wifi. The sealed envelope rides as-is (`from`
+     *  stays the origin); callers forward only first-seen frames, so
+     *  each node relays every (from, seq) at most once — loops die in
+     *  dedupe at the next hop. */
+    fun forward(env: Envelope, arrived: Socket) {
+        if (env.to == Envelope.SERVER || env.to == selfId) return
+        val bytes = (env.toJson() + "\n").toByteArray()
+        for ((peer, l) in links) {
+            if (peer == env.from || l.sock === arrived) continue
+            writeQ.trySend(Write(peer, bytes))
         }
     }
 
@@ -249,8 +275,12 @@ class LanLink(
         val sock = run {
             var s: DatagramSocket? = null
             while (s == null) {
-                s = runCatching { DatagramSocket().apply { broadcast = true } }
-                    .onFailure { Log.w(TAG, "beacon socket: $it") }.getOrNull()
+                s = runCatching {
+                    DatagramSocket().apply {
+                        broadcast = true
+                        ctx?.let { LanNet.bindSocket(it, this) }
+                    }
+                }.onFailure { Log.w(TAG, "beacon socket: $it") }.getOrNull()
                 if (s == null) delay(SOCKET_RETRY_MS)
             }
             s
@@ -308,9 +338,12 @@ class LanLink(
         if (links.isEmpty()) return
         val addrs = lanIfAddrs() ?: return
         for ((peer, l) in links) {
-            val local = l.sock.localAddress?.hostAddress ?: continue
-            if (addrs.none { it.first == local }) {
-                drop(peer, "local addr $local gone")
+            val local = l.sock.localAddress ?: continue
+            // adb-forwarded links live on loopback — interface churn
+            // can't kill a cable.
+            if (local.isLoopbackAddress) continue
+            if (addrs.none { it.first == local.hostAddress }) {
+                drop(peer, "local addr ${local.hostAddress} gone")
             }
         }
     }
@@ -379,6 +412,7 @@ class LanLink(
                 if (links[peer]?.dir == winnerDir(peer) || !started) continue
                 val s = runCatching {
                     Socket().apply {
+                        ctx?.let { LanNet.bindSocket(it, addr.hostString, this) }
                         connect(InetSocketAddress(addr.hostString, addr.port), DIAL_TIMEOUT_MS)
                         tcpNoDelay = true
                     }
@@ -425,13 +459,22 @@ class LanLink(
             val pt = runCatching {
                 key.open(android.util.Base64.decode(env.payload, android.util.Base64.NO_WRAP))
             }.getOrNull() ?: continue
+            if (env.from == selfId) {
+                // Our own sealed frame came back: we dialed our own
+                // listener. A peer can never be us — drop, don't
+                // register a ghost link.
+                Log.i(TAG, "link read ended ($dir, self-echo)")
+                break
+            }
             val msg = runCatching {
                 protoJson.decodeFromString(Msg.serializer(), pt.decodeToString())
             }.getOrNull() ?: continue
-            // Every frame that opens proves family membership → adopt
-            // this socket under its sender. A reconnect from the same
-            // peer replaces the stale link; different peers coexist.
-            if (peerId != env.from) {
+            // The FIRST openable frame names the socket's owner — it
+            // is always the wire peer: only adopted links ever receive
+            // flooded traffic, so no forwarded frame can arrive first.
+            // Later frames naming other senders are mesh transit —
+            // ingest them without touching the registration.
+            if (peerId == null) {
                 peerId = env.from
                 val winner = winnerDir(env.from)
                 links[env.from]?.let { existing ->
@@ -479,7 +522,7 @@ class LanLink(
                 }
                 else -> {}
             }
-            onMsg(env)
+            onMsg(env, s)
         }
         peerId?.let { if (links[it]?.sock === s) drop(it, "read ended") }
         runCatching { s.close() }

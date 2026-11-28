@@ -56,6 +56,7 @@ sealed interface PairStage {
 suspend fun pair(
     inviteCode: String,
     deviceName: String,
+    ctx: android.content.Context,
     serverUrl: String? = null,
     onStage: (PairStage) -> Unit = {},
     onSas: suspend (code: String) -> Boolean,
@@ -69,7 +70,7 @@ suspend fun pair(
         if (invite.kind == "serverless") {
             // `serverUrl` is `host:port` of the inviter's ephemeral
             // listener — dial it directly; there is no relay.
-            return pairLan(invite.serverUrl, invite.session, deviceName, onStage, onSas)
+            return pairLan(invite.serverUrl, invite.session, deviceName, ctx, onStage, onSas)
         }
         session = invite.session
         url = invite.serverUrl
@@ -252,20 +253,41 @@ private const val ZERO_ID = "0000000000000000"
 suspend fun pairLanCode(
     code: String,
     deviceName: String,
+    ctx: android.content.Context,
     onStage: (PairStage) -> Unit = {},
     onSas: suspend (code: String) -> Boolean,
 ): Provisioning {
+    val session = lanCodeSession(code)
+    val addr = try {
+        awaitPairBeacon(ctx, session)
+    } catch (e: TimeoutCancellationException) {
+        throw PairingException("no laptop answering that code on this lan")
+    }
+    return pairLan(addr, session, deviceName, ctx, onStage, onSas)
+}
+
+/** `XXXX-XXXX` + the inviter's `host[:port]` typed by hand — the
+ *  phone-side twin of `murmurd join --code X --server ip`. Broadcast
+ *  never leaves some LANs (AP client isolation, VPN killswitches), so
+ *  the beacon can't be the only way to resolve a typed code. */
+suspend fun pairLanDirect(
+    code: String,
+    addr: String,
+    deviceName: String,
+    ctx: android.content.Context,
+    onStage: (PairStage) -> Unit = {},
+    onSas: suspend (code: String) -> Boolean,
+): Provisioning {
+    val withPort = if (':' in addr) addr else "$addr:17895"
+    return pairLan(withPort, lanCodeSession(code), deviceName, ctx, onStage, onSas)
+}
+
+private fun lanCodeSession(code: String): String {
     val norm = code.filter { it != '-' }.uppercase()
     val digest = java.security.MessageDigest
         .getInstance("SHA-256")
         .digest(norm.toByteArray())
-    val session = digest.take(8).joinToString("") { "%02x".format(it) }
-    val addr = try {
-        awaitPairBeacon(session)
-    } catch (e: TimeoutCancellationException) {
-        throw PairingException("no laptop answering that code on this lan")
-    }
-    return pairLan(addr, session, deviceName, onStage, onSas)
+    return digest.take(8).joinToString("") { "%02x".format(it) }
 }
 
 private const val BEACON_PORT = 17893
@@ -274,9 +296,13 @@ private const val BEACON_WAIT_MS = 120_000L
 /** Listen on the beacon port for the inviter's `{"t":"murmur-pair"}`
  *  datagram matching our session — the laptop broadcasts it while the
  *  invite lives. */
-private suspend fun awaitPairBeacon(session: String): String = withContext(Dispatchers.IO) {
+private suspend fun awaitPairBeacon(
+    ctx: android.content.Context,
+    session: String,
+): String = withContext(Dispatchers.IO) {
     val sock = java.net.DatagramSocket(null).apply {
         reuseAddress = true
+        LanNet.bindSocket(ctx, this)
         bind(java.net.InetSocketAddress(BEACON_PORT))
     }
     try {
@@ -311,6 +337,7 @@ private suspend fun pairLan(
     addr: String,
     session: String,
     deviceName: String,
+    ctx: android.content.Context,
     onStage: (PairStage) -> Unit,
     onSas: suspend (code: String) -> Boolean,
 ): Provisioning {
@@ -322,6 +349,7 @@ private suspend fun pairLan(
 
     val socket = withContext(Dispatchers.IO) {
         java.net.Socket().apply {
+            LanNet.bindSocket(ctx, host, this)
             connect(java.net.InetSocketAddress(host, port), CONNECT_MS)
             tcpNoDelay = true
         }

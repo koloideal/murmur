@@ -170,8 +170,18 @@ impl Shared {
                     }
                 }
                 Route::Device(d) => {
-                    if let Some((tx, ..)) = lan.get(d) {
-                        let _ = tx.send(env.clone());
+                    match lan.get(d) {
+                        Some((tx, ..)) => {
+                            let _ = tx.send(env.clone());
+                        }
+                        // No direct link — flood every link: transit
+                        // nodes forward first-seen frames, so a peer
+                        // two hops away still gets its reply/notify.
+                        None => {
+                            for (tx, ..) in lan.values() {
+                                let _ = tx.send(env.clone());
+                            }
+                        }
                     }
                 }
                 _ => {}

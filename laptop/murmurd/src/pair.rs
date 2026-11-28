@@ -488,8 +488,10 @@ impl Shared {
         // The joiner binds its link listener moments after PairData —
         // remember its address and nudge the dialer through that boot
         // window. Phones never dial out, and on broadcast-filtered
-        // LANs nobody else will teach us this route.
-        if let Some(ip) = pending.addr {
+        // LANs nobody else will teach us this route. Loopback means the
+        // join tunneled in (adb reverse, NAT) — dialing that would be
+        // our own listener, a self-link is worse than no seed.
+        if let Some(ip) = pending.addr.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
             let addr = std::net::SocketAddr::new(ip, crate::lan::LINK_PORT);
             self.lan_addr_set(device_id, addr);
             let dial = self.lan_dial.clone();

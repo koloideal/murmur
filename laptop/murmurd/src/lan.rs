@@ -499,7 +499,7 @@ fn spawn_link(
         Ok(v) => v,
         Err(_) => return,
     };
-    let remote_ip = s.peer_addr().ok().map(|a| a.ip());
+    let remote_addr = s.peer_addr().ok();
     let transport = transport; // move-capture into the reader task
     let (r, w) = s.into_split();
     if let Ok(env) = Envelope::seal(
@@ -541,7 +541,7 @@ fn spawn_link(
         tx.clone(),
         tx_hi.clone(),
         validated,
-        remote_ip,
+        remote_addr,
         transport,
         dir,
     ));
@@ -619,7 +619,7 @@ async fn link_reader(
     tx: mpsc::UnboundedSender<Envelope>,
     tx_hi: mpsc::UnboundedSender<Envelope>,
     validated: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    remote_ip: Option<std::net::IpAddr>,
+    remote_addr: Option<SocketAddr>,
     transport: Transport,
     dir: LinkDir,
 ) {
@@ -634,6 +634,9 @@ async fn link_reader(
     // flapping and once cost a full misdiagnosis. Every death names its
     // direction and, once adopted, the peer.
     let mut peer_tag = String::new();
+    // The wire peer's id, claimed by the first openable frame —
+    // forwarded mesh frames carry other senders but must not adopt.
+    let mut owner: Option<murmur_proto::DeviceId> = None;
     loop {
         line.clear();
         br.get_mut().set_limit(LINE_CAP);
@@ -668,6 +671,14 @@ async fn link_reader(
         }
         match env.open(&shared.keys.read().unwrap().current) {
             Ok(msg) => {
+                if env.from == shared.id {
+                    // A frame we sealed came back over a link: we
+                    // dialed our own listener (loopback seed, `dial
+                    // 127.0.0.1`, a tunnel's source addr). A peer can
+                    // never be us — drop, don't register a ghost.
+                    info!("lan: link down ({dir:?} self-echo)");
+                    break;
+                }
                 validated.store(true, std::sync::atomic::Ordering::Relaxed);
                 // Link-local keepalives are transport chatter — pong
                 // replies and RTT records never reach dedupe/features.
@@ -692,25 +703,48 @@ async fn link_reader(
                     }
                     _ => {}
                 }
-                // A frame that opens proves family membership → adopt.
-                // Each peer owns its own map slot — a second device
-                // links alongside, never evicts.
-                if peer_tag.is_empty() {
+                // The socket's owner is whoever sent its FIRST
+                // openable frame — and that's guaranteed to be the
+                // wire peer: only adopted sockets ever receive flooded
+                // traffic, so no forwarded frame can arrive first.
+                // Frames claiming any other sender afterwards are
+                // forwarded mesh traffic — ingest them, but never
+                // re-adopt the socket under a transit origin's id.
+                if owner.is_none() {
+                    owner = Some(env.from);
                     peer_tag = format!(" {} ", env.from);
-                }
-                if !shared.lan_peers().contains(&env.from) {
                     info!("lan: link up with {} ({dir:?})", env.from);
                     // Proven reachable → worth remembering for the
-                    // beacon-free redial path.
-                    if let Some(ip) = remote_ip {
+                    // beacon-free redial path. Outbound dials record
+                    // the port that answered (an adb forward's local
+                    // port IS the rendezvous); inbound sockets carry an
+                    // ephemeral source port, so only their ip survives.
+                    if dir == LinkDir::Outbound {
+                        if let Some(a) = remote_addr {
+                            if !(a.ip().is_loopback() && a.port() == LINK_PORT) {
+                                shared.lan_addr_set(env.from, a);
+                            }
+                        }
+                    } else if let Some(ip) = remote_addr
+                        .map(|a| a.ip())
+                        .filter(|ip| !ip.is_loopback())
+                    {
                         shared.lan_addr_set(env.from, SocketAddr::new(ip, LINK_PORT));
                     }
+                    if shared.lan_adopt(env.from, tx.clone(), transport, dir)
+                        == crate::links::AdoptOutcome::Rejected
+                    {
+                        info!("lan: {} link down (tie-break loser)", env.from);
+                        break;
+                    }
                 }
-                if shared.lan_adopt(env.from, tx.clone(), transport, dir)
-                    == crate::links::AdoptOutcome::Rejected
-                {
-                    info!("lan: {} link down (tie-break loser)", env.from);
-                    break;
+                if owner != Some(env.from) {
+                    // Forwarded frame — no link bookkeeping, just
+                    // dedupe + dispatch + onward flood.
+                    if shared.ingest(&hub, env.from, env.seq, &msg) {
+                        shared.lan_forward(&env, &tx);
+                    }
+                    continue;
                 }
                 // The peer's advertised lan_addr:tcp_port is the
                 // better truth — it's where IT accepts dials.

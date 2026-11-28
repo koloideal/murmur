@@ -83,11 +83,16 @@ object PairingController {
                     answer.await()
                 }
                 val prov = if (byCode) {
-                    pairLanCode(input, secrets.deviceName, onStage, onSas)
+                    if (server.isNotBlank()) {
+                        pairLanDirect(input, server.trim(), secrets.deviceName, appCtx, onStage, onSas)
+                    } else {
+                        pairLanCode(input, secrets.deviceName, appCtx, onStage, onSas)
+                    }
                 } else {
                     pair(
                         input,
                         secrets.deviceName,
+                        appCtx,
                         serverUrl = if (short) server.trim() else null,
                         onStage = onStage,
                         onSas = onSas,

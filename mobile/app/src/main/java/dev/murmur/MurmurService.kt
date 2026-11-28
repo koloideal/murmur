@@ -169,10 +169,12 @@ class MurmurService : Service() {
         identity = secrets.identity()
         media = MediaBridge(this, ::send, scope)
         lan = LanLink(
-            secrets.deviceId!!, key, scope, { onEnvelope(it) },
+            secrets.deviceId!!, key, scope, { env, sock -> onEnvelope(env, sock) },
             prefs = getSharedPreferences("lan", MODE_PRIVATE),
             onProtoMismatch = ::noteProtoMismatch,
-        ) { send(it) }
+            ctx = this,
+            sendRelay = { send(it) },
+        )
         status.value = Status(
             provisioned = true,
             running = true,
@@ -457,7 +459,7 @@ class MurmurService : Service() {
         status.update { it.copy(protoMismatch = it.protoMismatch + (peer to v)) }
     }
 
-    private fun onEnvelope(env: Envelope) {
+    private fun onEnvelope(env: Envelope, lanSrc: java.net.Socket? = null) {
         // Cleartext control replies (Devices) — handled before decrypt.
         env.controlPayload()?.let { ctl ->
             if (ctl is Control.Devices) {
@@ -496,6 +498,11 @@ class MurmurService : Service() {
             if (!seenSeq.add(env.from to env.seq)) return
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
+
+        // First-seen LAN frame — flood it onward to our other links:
+        // the serverless mesh is multi-hop, another member may only be
+        // reachable through us.
+        if (lanSrc != null) lan.forward(env, lanSrc)
 
         // Tag-dispatch to the wired features — same invariant as
         // murmurd: dedupe happened above, features see a frame once.

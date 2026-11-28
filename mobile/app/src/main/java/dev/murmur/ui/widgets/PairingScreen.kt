@@ -97,6 +97,7 @@ fun PairingScreen() {
     var code by rememberSaveable { mutableStateOf("") }
     var invite by rememberSaveable { mutableStateOf("") }
     var server by rememberSaveable { mutableStateOf(secrets.serverUrl.ifEmpty { "wss://" }) }
+    var lanAddr by rememberSaveable { mutableStateOf("") }
     var scanning by remember { mutableStateOf(false) }
     var localHint by remember { mutableStateOf<String?>(null) }
     /** Family kind the user picked on the split screen — null = the
@@ -107,8 +108,8 @@ fun PairingScreen() {
 
     val codeReady = code.length == 8
 
-    fun runPairing(input: String, short: Boolean = false, byCode: Boolean = false) {
-        PairingController.start(ctx, input, short = short, byCode = byCode, server = server)
+    fun runPairing(input: String, short: Boolean = false, byCode: Boolean = false, srv: String = server) {
+        PairingController.start(ctx, input, short = short, byCode = byCode, server = srv)
     }
 
     val cameraPerm = rememberLauncherForActivityResult(
@@ -300,7 +301,11 @@ fun PairingScreen() {
                             // The laptop's LAN pair beacon resolves the
                             // typed code to its `host:port` — a serverless
                             // family still needs no server field and no
-                            // untypeable full-invite blob.
+                            // untypeable full-invite blob. Broadcast can
+                            // die on real LANs though (AP client
+                            // isolation, VPN killswitches) — then the
+                            // inviter's ip is the direct fallback, same
+                            // as `murmurd join --server`.
                             ShortCodeField(
                                 code = code,
                                 onCode = { code = it },
@@ -310,6 +315,16 @@ fun PairingScreen() {
                                 "the laptop prints the code under the QR",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = lanAddr,
+                                onValueChange = { lanAddr = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("laptop ip — only if the code isn't found") },
+                                placeholder = { Text("192.168.31.214") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             )
                         } else if (inviteMode) {
                             OutlinedTextField(
@@ -353,7 +368,7 @@ fun PairingScreen() {
                         Button(
                             onClick = {
                                 when {
-                                    kind == "serverless" -> runPairing("$code", byCode = true)
+                                    kind == "serverless" -> runPairing("$code", byCode = true, srv = lanAddr)
                                     inviteMode -> runPairing(invite.trim())
                                     else -> runPairing("$code", short = true)
                                 }

@@ -46,6 +46,14 @@ fun DevicesCard() {
     // The device list hides self by design, but then an all-offline
     // roster reads like the phone itself is down — show "me" up top.
     val me = status.devices.firstOrNull { it.device_id == selfId }
+    // Cloned installs share a hostname — two "ohmyarch" rows are
+    // indistinguishable without a disambiguating id tail.
+    val nameCounts = status.devices
+        .filter { !it.revoked }
+        .groupingBy { it.name }
+        .eachCount()
+    fun displayName(d: dev.murmur.core.DeviceInfo): String =
+        if ((nameCounts[d.name] ?: 0) > 1) "${d.name}·${d.device_id.take(4)}" else d.name
 
     AnimatedVisibility(
         visible = settled && !removed,
@@ -68,7 +76,7 @@ fun DevicesCard() {
                     )
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        "${d.name} (me)",
+                        "${displayName(d)} (me)",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f),
@@ -103,7 +111,7 @@ fun DevicesCard() {
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            d.name,
+                            displayName(d),
                             style = MaterialTheme.typography.bodyLarge,
                             color = if (d.online) MaterialTheme.colorScheme.onSurface
                             else MaterialTheme.colorScheme.onSurfaceVariant,
