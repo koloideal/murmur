@@ -493,7 +493,7 @@ impl Shared {
         // our own listener, a self-link is worse than no seed.
         if let Some(ip) = pending.addr.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
             let addr = std::net::SocketAddr::new(ip, crate::lan::LINK_PORT);
-            self.lan_addr_set(device_id, addr);
+            self.lan_addr_hint(device_id, addr);
             let dial = self.lan_dial.clone();
             tokio::spawn(async move {
                 for _ in 0..6 {

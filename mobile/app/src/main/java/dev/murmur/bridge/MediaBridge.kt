@@ -94,6 +94,20 @@ class MediaBridge(
         publishNow()
     }
 
+    /**
+     * The init-time `getActiveSessions` can come back empty while the
+     * system is still binding the notification listener (service start
+     * races the listener attach) — and nothing retries, so media stays
+     * dark until the next session change. Link-up is exactly when a
+     * fresh laptop needs state, so retry the bind then.
+     */
+    fun rebindIfDark() {
+        if (controller != null) return
+        bind(pick(runCatching {
+            manager.getActiveSessions(listenerName)
+        }.getOrNull()))
+    }
+
     private fun restartTicker() {
         ticker?.cancel()
         if (controller?.playbackState?.state != PlaybackState.STATE_PLAYING) return

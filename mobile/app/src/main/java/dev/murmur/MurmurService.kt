@@ -241,6 +241,7 @@ class MurmurService : Service() {
                     val arrived = p.keys - seenPeers
                     if (arrived.isNotEmpty()) {
                         arrived.forEach { announceIdentity(to = it) }
+                        media.rebindIfDark()
                         media.publishNow()
                     }
                 }

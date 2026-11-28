@@ -169,6 +169,18 @@ impl Shared {
         save_lan_addrs(&self.lan_addrs.lock().unwrap());
     }
 
+    /// A tentative rendezvous — a beacon's advertised addr or a
+    /// pair-time seed. Fills in while the peer is unlinked (the
+    /// remembered addr may be stale and needs replacing anyway), but
+    /// must not clobber the address a *live* link already proved: a
+    /// usb-linked phone still advertises its unreachable wifi addr.
+    pub fn lan_addr_hint(&self, peer: DeviceId, addr: std::net::SocketAddr) {
+        if self.lan_peers().contains(&peer) {
+            return;
+        }
+        self.lan_addr_set(peer, addr);
+    }
+
     /// Snapshot for the redial loop and `murmurctl status`.
     pub fn lan_addrs(&self) -> HashMap<DeviceId, std::net::SocketAddr> {
         self.lan_addrs.lock().unwrap().clone()

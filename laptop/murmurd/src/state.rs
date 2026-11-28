@@ -70,6 +70,12 @@ pub struct Shared {
     /// LAN and relay, so the second copy must collapse here instead of
     /// duplicating notifications/clips at the features.
     seen: Mutex<Seen>,
+    /// device → epoch-ms of the last *validated* frame we ingested,
+    /// direct or mesh-forwarded. Transit reachability for `devices`:
+    /// a phone never publishes Presence (it's not a laptop-election
+    /// candidate), so "offline" can't mean "no presence" — "the mesh
+    /// heard it recently" is the honest signal.
+    last_frame: Mutex<HashMap<DeviceId, u64>>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
     pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
@@ -130,6 +136,7 @@ impl Shared {
             lan_addrs: Mutex::new(load_lan_addrs()),
             lan_dial,
             seen: Mutex::new(Seen::default()),
+            last_frame: Mutex::new(HashMap::new()),
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
@@ -220,8 +227,26 @@ impl Shared {
         if !self.dedupe(from, seq) {
             return false;
         }
+        self.last_frame
+            .lock()
+            .unwrap()
+            .insert(from, crate::lan::now_ms());
         hub.dispatch(from, msg);
         true
+    }
+
+    /// The mesh heard from this device within `within` — any valid
+    /// frame counts (a peer's per-link ping floods onward, so transit
+    /// reachability keeps refreshing). Phones never emit Presence;
+    /// this is their only liveness signal.
+    pub(crate) fn heard_recently(&self, id: &DeviceId, within: std::time::Duration) -> bool {
+        self.last_frame
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|ts| {
+                crate::lan::now_ms().saturating_sub(*ts) < within.as_millis() as u64
+            })
     }
 
 

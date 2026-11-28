@@ -195,10 +195,18 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 let devices: Vec<_> = roster
                     .iter()
                     .map(|(id, m)| {
+                        // Reachable = a live link, or the mesh heard a
+                        // valid frame from them lately (a peer's pings
+                        // flood onward). Phones publish no Presence —
+                        // without the heard-window a transit-linked
+                        // phone reads "offline" while fully reachable.
+                        let reachable = peers.contains(id)
+                            || shared
+                                .heard_recently(id, std::time::Duration::from_secs(30));
                         serde_json::json!({
                             "device_id": id.to_string(),
                             "name": m.name.clone().unwrap_or_else(|| id.to_string()),
-                            "online": peers.contains(id),
+                            "online": reachable,
                             "revoked": revoked.contains(id),
                             "rtt_ms": peers.contains(id).then(|| shared.lan_rtt(id)),
                             "kind": m.kind,

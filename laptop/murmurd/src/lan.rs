@@ -387,8 +387,14 @@ async fn dial_loop(
             last_dial.insert(peer, now);
         }
         let addr = SocketAddr::new(hint.addr, hint.port);
-        match TcpStream::connect(addr).await {
-            Ok(s) => {
+        // One dialer serves every hint — an unbounded connect to a dead
+        // address (isolated-AP wifi, stale rendezvous) sits in SYN
+        // retry for ~2min and serializes every later hint behind it.
+        // Fail fast so a poisoned cache entry can't stall the queue.
+        match tokio::time::timeout(std::time::Duration::from_secs(4), TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(s)) => {
                 let _ = s.set_nodelay(true);
                 match hint.peer {
                     Some(peer) => info!("lan: dialed {addr} ({peer})"),
@@ -396,7 +402,8 @@ async fn dial_loop(
                 }
                 spawn_link(&shared, &hub, s, hint.transport, LinkDir::Outbound);
             }
-            Err(e) => debug!("lan: dial {addr}: {e}"),
+            Ok(Err(e)) => debug!("lan: dial {addr}: {e}"),
+            Err(_) => debug!("lan: dial {addr}: connect timeout"),
         }
     }
 }
@@ -550,7 +557,7 @@ fn spawn_link(
 
 /// Local epoch milliseconds — timestamps for `LanPing` echoes; RTT is
 /// computed on the pinger's clock only.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -746,8 +753,9 @@ async fn link_reader(
                     }
                     continue;
                 }
-                // The peer's advertised lan_addr:tcp_port is the
-                // better truth — it's where IT accepts dials.
+                // The peer's advertised lan_addr:tcp_port names where
+                // IT accepts dials — a hint, not proof: the live
+                // socket's remote addr wins while the link is up.
                 if let Message::LanBeacon {
                     lan_addr: Some(ip),
                     tcp_port,
@@ -755,7 +763,7 @@ async fn link_reader(
                 } = &msg
                 {
                     if let Ok(ip) = ip.parse::<std::net::IpAddr>() {
-                        shared.lan_addr_set(env.from, SocketAddr::new(ip, *tcp_port));
+                        shared.lan_addr_hint(env.from, SocketAddr::new(ip, *tcp_port));
                     }
                 }
                 // First-seen frames also flood onward to our other
