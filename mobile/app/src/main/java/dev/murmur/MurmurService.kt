@@ -81,6 +81,11 @@ class MurmurService : Service() {
      *  of murmurd's heard_recently. */
     private val lastHeard = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** One-way delivery latency to a transit member, measured off its
+     *  flooded LanPing ts — the counterpart of the per-link rttMs, which
+     *  only direct links ever get. */
+    private val heardRtt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** ElapsedRealtimeNanos of the in-flight ListDevices — its reply RTT
      *  is the "ping" the dashboard shows. */
     private val listSentAt = java.util.concurrent.atomic.AtomicLong()
@@ -113,7 +118,7 @@ class MurmurService : Service() {
                 // the window — transit members never hold a socket here.
                 online = peers.containsKey(id) ||
                     (lastHeard[id]?.let { now - it < HEARD_MS } == true),
-                rtt_ms = peers[id],
+                rtt_ms = peers[id] ?: heardRtt[id],
             )
         }
         return rows + DeviceInfo(
@@ -511,6 +516,13 @@ class MurmurService : Service() {
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
         lastHeard[env.from] = System.currentTimeMillis()
+        // A transit member's flooded ping is its send-time stamp —
+        // now - ts is the honest "how far" when no direct link's RTT
+        // exists.
+        if (msg is Msg.LanPing) {
+            heardRtt[env.from] =
+                (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
+        }
         // A transit member's liveness just refreshed — the roster row
         // can't wait for the next peersFlow emission (its socket set
         // didn't change), so re-render now.

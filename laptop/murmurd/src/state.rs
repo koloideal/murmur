@@ -76,6 +76,10 @@ pub struct Shared {
     /// candidate), so "offline" can't mean "no presence" — "the mesh
     /// heard it recently" is the honest signal.
     last_frame: Mutex<HashMap<DeviceId, u64>>,
+    /// One-way delivery latency to a member measured off its flooded
+    /// LanPing ts — the transit counterpart of `lan_rtt` (which only
+    /// direct links have).
+    last_rtt: Mutex<HashMap<DeviceId, u64>>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
     pub ctl_events: broadcast::Sender<(DeviceId, Control)>,
@@ -137,6 +141,7 @@ impl Shared {
             lan_dial,
             seen: Mutex::new(Seen::default()),
             last_frame: Mutex::new(HashMap::new()),
+            last_rtt: Mutex::new(HashMap::new()),
             ctl_events,
             presence: Mutex::new(HashMap::new()),
             pair: Mutex::new(Pairing::default()),
@@ -231,6 +236,14 @@ impl Shared {
             .lock()
             .unwrap()
             .insert(from, crate::lan::now_ms());
+        // A transit peer's flooded ping carries its own send ts — the
+        // only latency signal for a member we hold no link to.
+        if let Message::LanPing { ts } = msg {
+            self.last_rtt
+                .lock()
+                .unwrap()
+                .insert(from, crate::lan::now_ms().saturating_sub(*ts));
+        }
         hub.dispatch(from, msg);
         true
     }
@@ -247,6 +260,12 @@ impl Shared {
             .is_some_and(|ts| {
                 crate::lan::now_ms().saturating_sub(*ts) < within.as_millis() as u64
             })
+    }
+
+    /// One-way latency to a transit member off its flooded pings —
+    /// the `devices` fallback for members we hold no link RTT for.
+    pub(crate) fn heard_rtt(&self, id: &DeviceId) -> Option<u64> {
+        self.last_rtt.lock().unwrap().get(id).copied()
     }
 
 

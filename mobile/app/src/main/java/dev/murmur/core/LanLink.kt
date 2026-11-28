@@ -502,11 +502,16 @@ class LanLink(
             // Link-local keepalives stay in the transport — never reach
             // the service's dispatch/dedup.
             when (msg) {
-                is Msg.LanPing -> {
+                // The pong reply is link-local, the ping itself is
+                // not: it falls through to the service and floods
+                // onward like any Route::All frame — transit members
+                // need its origin ts for liveness and one-way latency.
+                is Msg.LanPing -> if (links.containsKey(env.from)) {
                     val pong = sealedEnv(Msg.LanPong(msg.ts))
                     hiQ.trySend(Write(env.from, (pong.toJson() + "\n").toByteArray()))
-                    continue
                 }
+                // Pongs stay link-local — a flooded pong stamps the
+                // wrong side's ts (it echoes the ping's clock).
                 is Msg.LanPong -> {
                     links[env.from]?.let {
                         it.rttMs = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)

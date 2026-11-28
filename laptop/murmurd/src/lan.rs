@@ -707,18 +707,26 @@ async fn link_reader(
                 // Link-local keepalives are transport chatter — pong
                 // replies and RTT records never reach dedupe/features.
                 match &msg {
+                    // The pong reply is link-local, the ping itself is
+                    // not: it falls through to ingest+flood like any
+                    // Route::All frame, so transit members still get
+                    // its origin ts for liveness and one-way latency.
                     Message::LanPing { ts } => {
-                        if let Ok(env) = Envelope::seal(
-                            shared.id,
-                            Route::All,
-                            shared.next_seq(),
-                            &shared.keys.read().unwrap().current,
-                            &Message::LanPong { ts: *ts },
-                        ) {
-                            let _ = tx_hi.send(env);
+                        if owner == Some(env.from) {
+                            if let Ok(env) = Envelope::seal(
+                                shared.id,
+                                Route::All,
+                                shared.next_seq(),
+                                &shared.keys.read().unwrap().current,
+                                &Message::LanPong { ts: *ts },
+                            ) {
+                                let _ = tx_hi.send(env);
+                            }
                         }
-                        continue;
                     }
+                    // Pongs stay link-local — a flooded pong would
+                    // stamp the wrong side's ts (it echoes the ping's
+                    // origin clock, not the pong sender's).
                     Message::LanPong { ts } => {
                         // The peer is already adopted at this point —
                         // the pong arrives after the beacon exchange.

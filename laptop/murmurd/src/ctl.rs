@@ -208,7 +208,8 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                             "name": m.name.clone().unwrap_or_else(|| id.to_string()),
                             "online": reachable,
                             "revoked": revoked.contains(id),
-                            "rtt_ms": peers.contains(id).then(|| shared.lan_rtt(id)),
+                            "rtt_ms": peers.contains(id).then(|| shared.lan_rtt(id))
+                                .or_else(|| shared.heard_rtt(id)),
                             "kind": m.kind,
                         })
                     })

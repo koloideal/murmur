@@ -39,6 +39,12 @@ commits that shipped in each release.
   for serverless and serverful families, with the live-run matrix.
 
 ### Fixed
+- Transit members now carry a latency reading too: a forwarded
+  LanPing keeps traveling the mesh (only the pong reply stays
+  link-local), and `now - ts` on arrival lands as the transit
+  counterpart of the per-link RTT — `murmurctl devices` and the
+  phone's family card show ms for members reachable only through a
+  sibling.
 - Android: transit-reachable members no longer show as offline in
   the device list — `lastHeard` marks any valid frame within 30 s
   (the phone's flooded pings), same rule the daemon's `devices`
