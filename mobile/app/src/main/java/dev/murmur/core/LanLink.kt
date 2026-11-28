@@ -52,7 +52,7 @@ class LanLink(
 ) {
     /** Which end of the socket we are — the simultaneous-dial
      *  tie-break needs it. */
-    private enum class Dir { Inbound, Outbound }
+    internal enum class Dir { Inbound, Outbound }
 
     /** One live link to a peer — socket + writer handle + last RTT. */
     private class Link(val sock: Socket, val out: OutputStream, val dir: Dir) {
@@ -63,8 +63,7 @@ class LanLink(
      *  device id survives a simultaneous dial; both sides compute this
      *  independently and close the same loser, so no crossing close
      *  order can flap the pair. Hex-string compare == byte compare. */
-    private fun winnerDir(peer: String): Dir =
-        if (peer < selfId) Dir.Inbound else Dir.Outbound
+    private fun winnerDir(peer: String): Dir = winnerDirOf(selfId, peer)
 
     private val links = ConcurrentHashMap<String, Link>()
 
@@ -567,8 +566,14 @@ class LanLink(
         }
     }
 
-    private companion object {
-        const val TAG = "LanLink"
+    companion object {
+        /** Pure tie-break, mirror-symmetric with murmurd: the socket
+         *  dialed by the smaller device id survives; hex-string compare
+         *  == byte compare. Visible for the JVM pinning tests. */
+        internal fun winnerDirOf(selfId: String, peer: String): Dir =
+            if (peer < selfId) Dir.Inbound else Dir.Outbound
+
+        private const val TAG = "LanLink"
         const val BEACON_PORT = 17893
         const val LINK_PORT = 17894
         const val BEACON_MS = 4000L

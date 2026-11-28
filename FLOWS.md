@@ -290,8 +290,37 @@ fast path (beacon'ы доезжают и через релей → `LanBeacon` �
 | Revoke serverful | `murmurs revoke --id` на релее против живой node-b | OK: сессия мгновенно сброшена; реконнект → `auth rejected: revoked` → «re-pair it» |
 | Wire-revoke чужого | `murmurctl revoke` на node-a | отказ по дизайну: «can only revoke self» — зафиксировано в §6 |
 
-Закодировано в `cargo test` (27/27): кандидатный порядок/promotion/cap
-F-11, dropped-маркер и мгновенный редиал F-10, per-addr rate-limit F-6,
-tie-break F-7, heard_recently F-8/F-18, адресная маршрутизация флуда
-(pong-инвариант: транзит да, self/@server нет), self-guard I-1,
-revoked-guard I-2, анти-echo F-15, ротация e2e F-20, wire-векторы proto.
+Закодировано в автотестах (все зелёные на коммите этого абзаца):
+
+- **murmurd 34/34** (`cargo test -p murmurd`): кандидатный порядок/
+  promotion/cap F-11, dropped-маркер и мгновенный редиал F-10, per-addr
+  rate-limit F-6, tie-break F-7, heard_recently F-8/F-18, адресная
+  маршрутизация флуда (pong-инвариант: транзит да, self/@server нет),
+  self-guard I-1, анти-echo F-15, ротация e2e F-20, dedupe-матрица
+  (twin/out-of-order/restart-gap/bounded), Leaving un-hears instantly.
+  Dial-гарды I-2/I-3/I-4/I-5 pinned в `peer_dial_permitted`: revoked
+  никогда не диалится, lower-id-initiates для laptops, phones диалятся
+  всегда, untrusted-вне-подсети отказ, winner-link-up отказ,
+  loser-link-up НЕ блокирует, rate-limit 10с и one-shot bypass по
+  dropped-маркеру; `ipv4_in_subnet` bitwise-матрица. Flap-settle: обе
+  ноды при худшем interleave сходятся на одном физическом сокете, loser
+  churn не эвиктит winner. Паринг: PairHello потребляет invite ровно
+  раз (retry игнорируется — F-4 gap pinned), confirm минтит свежий id и
+  повторный confirm падает; RegisterDevice+PairData на проводе.
+  Clipboard reverse-loop: echo-фрейм легитимно транзитит, но
+  `should_apply` по content-hash (не sender) убивает петлю.
+- **murmurs 12/12** (`cd server && cargo test`): реестр (auth/revoke/
+  persistence/bootstrap-window/rename/family_name) + wire-level на
+  живых TCP+WS: точные hello-ошибки (bad token/proto/revoked), pair-conn
+  не вытесняет живое устройство, cross-revoke отказ, admin-revoke убивает
+  живую сессию, push доезжает членам, pairing-conn взаперти до PairOpen,
+  auth-роутинг unicast/broadcast + перезапись `from`.
+- **proto 19/19**: golden wire-векторы byte-exact, SAS/MITM, DH-канал,
+  crossed-sessions, rekey wrong-recipient, caps, fuzz-light.
+- **mobile 20/20** (`./gradlew testDebugUnitTest`): golden-векторы на
+  Kotlin-стороне, PresenceTable, Dedupe-матрица (зеркало murmurd `Seen`
+  — twin/out-of-order/restart-gap/bounded/per-peer), tie-break mirror-
+  symmetry `winnerDirOf` против `winner_dir`.
+
+Не закодировано (живой прогон выше или не гоняли): F-12 DHCP-смена
+адреса end-to-end, ICMP RTT точность живьём, F-22 uninstall.

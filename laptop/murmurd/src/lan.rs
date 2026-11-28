@@ -290,8 +290,7 @@ fn in_local_subnet(ip: std::net::IpAddr) -> bool {
     };
     ifaces.iter().filter(|i| physical(&i.name)).any(|i| match &i.addr {
         if_addrs::IfAddr::V4(v4) if !v4.is_loopback() => {
-            let mask = u32::from(v4.netmask);
-            (u32::from(v4.ip) & mask) == (u32::from(ip) & mask)
+            ipv4_in_subnet(ip, v4.ip, v4.netmask)
         }
         _ => false,
     })
@@ -336,6 +335,56 @@ async fn beacon_recv(shared: Arc<Shared>, udp: Arc<UdpSocket>) -> anyhow::Result
     }
 }
 
+pub(crate) fn ipv4_in_subnet(
+    candidate: std::net::Ipv4Addr,
+    interface: std::net::Ipv4Addr,
+    netmask: std::net::Ipv4Addr,
+) -> bool {
+    let mask = u32::from(netmask);
+    (u32::from(interface) & mask) == (u32::from(candidate) & mask)
+}
+
+/// Deterministic gate for one discovered peer candidate. Everything here
+/// is deliberately side-effect-free except consuming the one-shot
+/// instant-redial marker at exactly the same point the old inline logic
+/// did — pinning this function pins the dial policy, not socket timing.
+pub(crate) fn peer_dial_permitted(
+    shared: &Shared,
+    peer: murmur_proto::DeviceId,
+    kind: DeviceKind,
+    addr: SocketAddr,
+    trusted: bool,
+    last_dial: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    // A revoked device keeps beaconing until its owner notices — dialing
+    // it is pure churn: the link can't ever validate.
+    if shared.keys.read().unwrap().revoked.contains(&peer) {
+        return false;
+    }
+    if kind != DeviceKind::Phone && shared.id > peer {
+        return false; // the lower-id side initiates
+    }
+    // Skip only when the *winner-direction* link is already up: a loser-
+    // direction registration is transient by design and must not starve
+    // the surviving socket.
+    let winner_up = {
+        let lan = shared.lan.lock().unwrap();
+        matches!(lan.get(&peer), Some((_, _, d)) if *d == winner_dir(shared.id, peer))
+    };
+    if winner_up || (!trusted && !in_local_subnet(addr.ip())) {
+        return false;
+    }
+    // A link that just died gets one immediate redial — the fast path
+    // should come back now, not a rate-limit window later.
+    if !shared.lan_redial_pending(&peer)
+        && last_dial.is_some_and(|t| now - t < DIAL_EVERY)
+    {
+        return false;
+    }
+    true
+}
+
 /// One dialer for both discovery paths — UDP beacons and relay-delivered
 /// `LanBeacon`s end up here. A request is skipped when the peer is
 /// already linked or its address isn't in any local subnet (a relay
@@ -358,36 +407,17 @@ async fn dial_loop(
     > = std::collections::HashMap::new();
     while let Some(hint) = rx.recv().await {
         if let Some(peer) = hint.peer {
-            // A revoked device keeps beaconing until its owner notices
-            // — dialing it is pure churn: the link can't ever validate.
-            if shared.keys.read().unwrap().revoked.contains(&peer) {
-                continue;
-            }
-            if hint.kind != DeviceKind::Phone && shared.id > peer {
-                continue; // the lower-id side initiates
-            }
-            // Skip only when the *winner-direction* link is already
-            // up: a loser-direction registration is transient by
-            // design and must not starve the surviving socket. The
-            // phone-half of this rule is what lets the winner ever
-            // form when both sides redial each other.
-            let winner_up = {
-                let lan = shared.lan.lock().unwrap();
-                matches!(lan.get(&peer), Some((_, _, d)) if *d == winner_dir(shared.id, peer))
-            };
-            if winner_up
-                || (!hint.trusted && !in_local_subnet(hint.addr))
-            {
-                continue;
-            }
             let key = (hint.peer, SocketAddr::new(hint.addr, hint.port));
             let now = std::time::Instant::now();
-            // A link that just died gets one immediate redial — the fast
-            // path should come back on the next beacon, not a rate-limit
-            // window later.
-            if !shared.lan_redial_pending(&peer)
-                && last_dial.get(&key).is_some_and(|t| now - *t < DIAL_EVERY)
-            {
+            if !peer_dial_permitted(
+                &shared,
+                peer,
+                hint.kind,
+                key.1,
+                hint.trusted,
+                last_dial.get(&key).copied(),
+                now,
+            ) {
                 continue;
             }
             last_dial.insert(key, now);

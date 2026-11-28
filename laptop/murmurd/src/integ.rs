@@ -291,6 +291,85 @@ mod tests {
     // ---- transport failover (F-10/F-11 in FLOWS.md) ------------------
 
     #[test]
+    fn dial_guards_revoked_direction_rate_limit_and_winner_link() {
+        use crate::lan::{LinkDir, Transport, peer_dial_permitted};
+        use murmur_proto::DeviceKind;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::{Duration, Instant};
+        with_env(|| {
+            let family = FamilyKey::random();
+            // me = 0x10; peer_big = 0x20 (I am lower — I dial laptops),
+            // peer_small = 0x01 (it dials me — I must not).
+            let (shared, _o, _l, _lan_rx) = node(0x10, &family);
+            let big = DeviceId([0x20; 8]);
+            let small = DeviceId([0x01; 8]);
+            // TEST-NET-3 — never inside a real interface's subnet, so
+            // the untrusted-subnet guard is deterministic on any host.
+            let nonlocal = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 17894);
+            let now = Instant::now();
+
+            // Untrusted hint from outside every local subnet: refused.
+            assert!(!peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, false, None, now));
+            // A trusted hint (usbwatch gateway, relay-verified gossip)
+            // bypasses the subnet guard — that's its entire purpose.
+            assert!(peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, None, now));
+
+            // Direction: laptops only dial bigger laptop ids.
+            assert!(peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, None, now));
+            assert!(!peer_dial_permitted(&shared, small, DeviceKind::Laptop, nonlocal, true, None, now));
+            // Phones never dial — every laptop dials every phone
+            // regardless of id ordering.
+            assert!(peer_dial_permitted(&shared, small, DeviceKind::Phone, nonlocal, true, None, now));
+
+            // Revoked members are never dialed, trusted or not.
+            shared.keys.write().unwrap().revoked.push(big);
+            assert!(!peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, None, now));
+            shared.keys.write().unwrap().revoked.clear();
+
+            // A live winner-direction link makes any dial pure churn.
+            let mk = || tokio::sync::mpsc::unbounded_channel().0;
+            shared.lan_adopt(big, mk(), Transport::Lan, LinkDir::Outbound);
+            assert!(!peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, None, now));
+            // But a loser-direction registration is transient — the flap
+            // window must not starve the surviving socket's redial.
+            shared.lan.lock().unwrap().clear();
+            shared.lan_adopt(big, mk(), Transport::Lan, LinkDir::Inbound);
+            assert!(peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, None, now));
+            shared.lan.lock().unwrap().clear();
+
+            // Rate limit: a dial inside the window is refused, outside
+            // the window is fine. The window is 10s in production.
+            let recent = now - Duration::from_secs(3);
+            assert!(!peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, Some(recent), now));
+            let old = now - Duration::from_secs(11);
+            assert!(peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, Some(old), now));
+
+            // The just-dropped marker overrides the rate limit exactly
+            // once — consuming it is part of the contract.
+            shared.lan_dropped.lock().unwrap().insert(big, now);
+            assert!(peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, Some(recent), now));
+            assert!(shared.lan_dropped.lock().unwrap().is_empty(), "marker is consumed");
+            assert!(!peer_dial_permitted(&shared, big, DeviceKind::Laptop, nonlocal, true, Some(recent), now));
+        });
+    }
+
+    #[test]
+    fn ipv4_subnet_match_is_bitwise_and_honest() {
+        use crate::lan::ipv4_in_subnet;
+        use std::net::Ipv4Addr;
+        let net = Ipv4Addr::new(192, 168, 31, 214);
+        let mask24 = Ipv4Addr::new(255, 255, 255, 0);
+        assert!(ipv4_in_subnet(Ipv4Addr::new(192, 168, 31, 166), net, mask24));
+        assert!(!ipv4_in_subnet(Ipv4Addr::new(192, 168, 32, 166), net, mask24));
+        // Non-contiguous edge: /32 matches only the interface itself.
+        let mask32 = Ipv4Addr::new(255, 255, 255, 255);
+        assert!(ipv4_in_subnet(net, net, mask32));
+        assert!(!ipv4_in_subnet(Ipv4Addr::new(192, 168, 31, 215), net, mask32));
+        // /0 matches everything — the degenerate DHCP case.
+        assert!(ipv4_in_subnet(Ipv4Addr::new(203, 0, 113, 7), net, Ipv4Addr::new(0, 0, 0, 0)));
+    }
+
+    #[test]
     fn hint_appends_alternate_set_promotes_to_front() {
         with_env(|| {
             let family = FamilyKey::random();
@@ -504,6 +583,196 @@ mod tests {
             assert!(!b.heard_recently(&env.from, std::time::Duration::from_secs(30)));
             // the same goodbye seen again is a dupe — never re-floods
             assert!(!b.ingest(&hub, env.from, env.seq, &msg));
+        });
+    }
+
+    #[test]
+    fn pair_hello_consumes_invite_exactly_once() {
+        use crate::pair::{InviteEntry, handle_ctl};
+        use murmur_proto::Control;
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (inviter, _o, _l, _lan) = node(0x10, &family);
+            let session = DeviceId([0x77; 8]);
+            inviter.pair.lock().unwrap().invites.insert(
+                session,
+                InviteEntry { key: PairKey::generate(), created: std::time::Instant::now() },
+            );
+            let joiner_key = PairKey::generate();
+            let hello = Control::PairHello {
+                pubkey_b64: joiner_key.public_b64(),
+                name: "newphone".into(),
+            };
+
+            // First hello: invite moves to pending.
+            handle_ctl(&inviter, session, hello.clone());
+            assert!(inviter.pair.lock().unwrap().invites.is_empty());
+            assert_eq!(inviter.pair.lock().unwrap().pending.len(), 1);
+
+            // The F-4 gap, pinned: a retry with the same code arrives
+            // after the invite was consumed — it must NOT silently
+            // resurrect or duplicate the session. Current honest
+            // behaviour: unknown session, ignored.
+            handle_ctl(&inviter, session, hello);
+            assert_eq!(inviter.pair.lock().unwrap().pending.len(), 1, "no duplicate pending");
+
+            // A hello for a session nobody invited is ignored entirely.
+            let stranger = DeviceId([0x55; 8]);
+            handle_ctl(&inviter, stranger, Control::PairHello {
+                pubkey_b64: PairKey::generate().public_b64(),
+                name: "stranger".into(),
+            });
+            assert_eq!(inviter.pair.lock().unwrap().pending.len(), 1);
+        });
+    }
+
+    #[test]
+    fn pair_confirm_consumes_pending_and_mints_fresh_id() {
+        use crate::pair::{InviteEntry, handle_ctl};
+        use murmur_proto::Control;
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (inviter, mut out, mut lo, _lan) = node(0x10, &family);
+            let session = DeviceId([0x77; 8]);
+            inviter.pair.lock().unwrap().invites.insert(
+                session,
+                InviteEntry { key: PairKey::generate(), created: std::time::Instant::now() },
+            );
+            let joiner_key = PairKey::generate();
+            handle_ctl(&inviter, session, Control::PairHello {
+                pubkey_b64: joiner_key.public_b64(),
+                name: "newphone".into(),
+            });
+
+            let new_id = inviter.pair_confirm(session).expect("confirm succeeds");
+            assert_ne!(new_id, session, "the joiner gets a fresh random device id");
+            assert_ne!(new_id, inviter.id);
+            assert!(inviter.pair.lock().unwrap().pending.is_empty(), "pending consumed");
+
+            // A second confirm of the same session fails loudly instead
+            // of minting a second device for one physical phone.
+            assert!(inviter.pair_confirm(session).is_err());
+
+            // The wire got a RegisterDevice (serverful node) and a
+            // PairData addressed to the session.
+            let mut saw_register = false;
+            let mut saw_pairdata = false;
+            while let Some(env) = pump_one(&mut out, &mut lo) {
+                if let Ok(ctl) = serde_json::from_slice::<murmur_proto::Control>(&env.payload) {
+                    match ctl {
+                        Control::RegisterDevice { device_id, .. } => {
+                            assert_eq!(device_id, new_id);
+                            saw_register = true;
+                        }
+                        Control::PairData { .. } => {
+                            assert_eq!(env.to, Route::Device(session));
+                            saw_pairdata = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(saw_register && saw_pairdata);
+        });
+    }
+
+    #[test]
+    fn simultaneous_dial_flap_settles_on_winner_direction() {
+        use crate::lan::{LinkDir, Transport, winner_dir};
+        use crate::links::AdoptOutcome;
+        with_env(|| {
+            let family = FamilyKey::random();
+            // Both nodes adopt both directions in the worst possible
+            // interleave — the flap observed live. Deterministic
+            // tie-break must converge both sides to the SAME surviving
+            // direction: the socket dialed by the lower id.
+            let family2 = family.clone();
+            let run_side = |me: u8, peer: DeviceId, first: LinkDir, second: LinkDir| {
+                let (n, _o, _l, _lan) = node(me, &family2);
+                let mk = || tokio::sync::mpsc::unbounded_channel().0;
+                // loser's socket arrives first (worst case), winner's second
+                let o1 = n.lan_adopt(peer, mk(), Transport::Lan, first);
+                let o2 = n.lan_adopt(peer, mk(), Transport::Lan, second);
+                let dir = n.lan.lock().unwrap().get(&peer).map(|(_, _, d)| *d);
+                (o1, o2, dir)
+            };
+            let a = DeviceId([0x01; 8]);
+            let b = DeviceId([0x20; 8]);
+            // Node A (lower id): its own outbound socket should win.
+            let (_o1, _o2, dir_a) = run_side(0x01, b, LinkDir::Inbound, LinkDir::Outbound);
+            // Node B: the inbound socket (dialed by A) should win.
+            let (_p1, _p2, dir_b) = run_side(0x20, a, LinkDir::Outbound, LinkDir::Inbound);
+            assert_eq!(dir_a, Some(winner_dir(a, b)));
+            assert_eq!(dir_b, Some(winner_dir(b, a)));
+            // Mirror-symmetric: both sides keep the same physical socket —
+            // A's outbound IS B's inbound.
+            assert_eq!(winner_dir(a, b), LinkDir::Outbound);
+            assert_eq!(winner_dir(b, a), LinkDir::Inbound);
+
+            // And once settled, further loser-direction probes are
+            // rejected without evicting the winner — no oscillation.
+            let (n, _o, _l, _lan) = node(0x01, &family);
+            let mk = || tokio::sync::mpsc::unbounded_channel().0;
+            n.lan_adopt(b, mk(), Transport::Lan, LinkDir::Outbound);
+            for _ in 0..8 {
+                assert_eq!(
+                    n.lan_adopt(b, mk(), Transport::Lan, LinkDir::Inbound),
+                    AdoptOutcome::Rejected
+                );
+                assert_eq!(
+                    n.lan.lock().unwrap().get(&b).map(|(_, _, d)| *d),
+                    Some(LinkDir::Outbound),
+                    "winner never evicted by loser churn"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn clipboard_echo_dies_at_every_hop_of_a_reverse_loop() {
+        // laptop→phone→laptop: A broadcasts clip, phone applies and its
+        // watcher rebroadcasts, A must not re-apply its own content when
+        // it comes back around. The pure decision is pinned in
+        // clipboard.rs unit tests — this pins the wire-level invariant:
+        // the echo frame IS a normal family frame (transits, dedupes),
+        // so suppression is the ONLY thing standing between a loop and
+        // silence, and it must key on content hash, never on sender.
+        use crate::clipboard::should_apply;
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (a, mut a_out, mut a_lo, _la) = node(1, &family);
+            let (b, mut b_out, mut b_lo, _lb) = node(2, &family);
+            let hub = Hub::new();
+            let data = b"loop-me-not";
+            let h = crate::clipboard::hash_clip(data);
+            use base64::Engine;
+            let clip = |origin| Message::Clipboard {
+                origin,
+                hash: h,
+                mime: "text/plain".into(),
+                data_b64: base64::engine::general_purpose::STANDARD.encode(data),
+                explicit: false,
+                ts: 1,
+            };
+
+            // A broadcasts; B ingests: foreign content applies.
+            a.send(Route::All, &clip(a.id)).unwrap();
+            let env = pump_one(&mut a_out, &mut a_lo).unwrap();
+            let key = b.keys.read().unwrap().current.clone();
+            let msg = env.open(&key).unwrap();
+            assert!(b.ingest(&hub, env.from, env.seq, &msg));
+            assert!(should_apply(h, false, None, true), "foreign clip applies at B");
+
+            // B's watcher rebroadcasts the same content; the frame
+            // rides back to A. A's last_sent is h — the echo must die
+            // EVEN THOUGH it wears B's origin and B's hash. Keying on
+            // sender would let the loop live.
+            b.send(Route::All, &clip(b.id)).unwrap();
+            let env2 = pump_one(&mut b_out, &mut b_lo).unwrap();
+            let key_a = a.keys.read().unwrap().current.clone();
+            let msg2 = env2.open(&key_a).unwrap();
+            assert!(a.ingest(&hub, env2.from, env2.seq, &msg2), "the echo frame itself is a legit delivery");
+            assert!(!should_apply(h, false, Some(h), true), "but applying it would ping-pong — refused");
         });
     }
 }

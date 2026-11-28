@@ -112,7 +112,7 @@ async fn run(ctx: FeatureCtx) -> anyhow::Result<()> {
     }
 }
 
-fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
+pub(crate) fn handle_ctl(shared: &Shared, from: DeviceId, ctl: Control) {
     let Control::PairHello { pubkey_b64, name } = ctl else {
         return;
     };

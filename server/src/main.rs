@@ -1497,4 +1497,295 @@ mod tests {
         assert_eq!(*s2.family_name.lock().unwrap(), Some("testfamily".into()));
         assert_eq!(s2.device_list().len(), 1, "family_name must not parse as a device");
     }
+
+    // ---------- live wire fixtures: real TCP+WS, in-process relay ----------
+
+    type TestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<TcpStream>,
+    >;
+
+    async fn start_test_relay(shared: Arc<Shared>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let _ = handle_conn(stream, shared).await;
+                });
+            }
+        });
+        addr
+    }
+
+    async fn ws_client(addr: SocketAddr) -> TestWs {
+        tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn read_text(ws: &mut TestWs) -> Option<String> {
+        loop {
+            match ws.next().await? {
+                Ok(Ws::Text(t)) => return Some(t.to_string()),
+                Ok(Ws::Ping(_)) | Ok(Ws::Pong(_)) | Ok(Ws::Binary(_)) | Ok(Ws::Frame(_)) => {}
+                Ok(Ws::Close(_)) => return None,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    async fn read_text_timeout(ws: &mut TestWs, ms: u64) -> Option<String> {
+        tokio::time::timeout(std::time::Duration::from_millis(ms), read_text(ws))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn say_hello(
+        ws: &mut TestWs,
+        id: DeviceId,
+        role: HelloRole,
+        token_hex: Option<String>,
+        proto_v: Option<u8>,
+    ) -> Control {
+        let hello = Control::Hello {
+            device_id: id,
+            name: format!("test-{id}"),
+            role,
+            token_hex,
+            proto_v,
+        };
+        ws.send(Ws::Text(serde_json::to_string(&hello).unwrap().into()))
+            .await
+            .unwrap();
+        let text = read_text_timeout(ws, 1000).await.expect("hello reply");
+        serde_json::from_str(&text).unwrap()
+    }
+
+    async fn authed_conn(addr: SocketAddr, id: DeviceId, token: &murmur_proto::AuthToken) -> TestWs {
+        let mut ws = ws_client(addr).await;
+        let reply = say_hello(
+            &mut ws,
+            id,
+            HelloRole::Auth,
+            Some(token.to_hex()),
+            Some(murmur_proto::PROTO_VERSION),
+        )
+        .await;
+        assert!(matches!(reply, Control::HelloOk), "auth failed: {reply:?}");
+        ws
+    }
+
+    async fn send_env(ws: &mut TestWs, env: &Envelope) {
+        ws.send(Ws::Text(env.to_json().into())).await.unwrap();
+    }
+
+    async fn read_env(ws: &mut TestWs, ms: u64) -> Envelope {
+        let text = read_text_timeout(ws, ms).await.expect("routed envelope");
+        Envelope::from_json(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn wire_auth_routes_unicast_broadcast_and_overwrites_from() {
+        let (shared, _path) = shared();
+        let shared = Arc::new(shared);
+        let (a, b, c) = (DeviceId([1; 8]), DeviceId([2; 8]), DeviceId([3; 8]));
+        let (ta, tb, tc) = (
+            murmur_proto::AuthToken::random(),
+            murmur_proto::AuthToken::random(),
+            murmur_proto::AuthToken::random(),
+        );
+        shared.register(a, "a".into(), ta.hash_hex());
+        shared.register(b, "b".into(), tb.hash_hex());
+        shared.register(c, "c".into(), tc.hash_hex());
+        let addr = start_test_relay(shared).await;
+        let mut wa = authed_conn(addr, a, &ta).await;
+        let mut wb = authed_conn(addr, b, &tb).await;
+        let mut wc = authed_conn(addr, c, &tc).await;
+
+        let fake = DeviceId([99; 8]);
+        let unicast = Envelope::control(fake, Route::device(b), 77, &Control::ListDevices).unwrap();
+        send_env(&mut wa, &unicast).await;
+        let got = read_env(&mut wb, 1000).await;
+        assert_eq!(got.from, a, "relay must overwrite forged from");
+        assert!(matches!(got.control_payload().unwrap(), Control::ListDevices));
+
+        let broadcast = Envelope::control(fake, Route::All, 78, &Control::ListDevices).unwrap();
+        send_env(&mut wa, &broadcast).await;
+        assert_eq!(read_env(&mut wb, 1000).await.from, a);
+        assert_eq!(read_env(&mut wc, 1000).await.from, a);
+        assert!(
+            read_text_timeout(&mut wa, 150).await.is_none(),
+            "broadcast must exclude its sender",
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_bad_token_proto_and_revoked_get_precise_hello_errors() {
+        let (shared, _path) = shared();
+        let shared = Arc::new(shared);
+        let id = DeviceId([11; 8]);
+        let token = murmur_proto::AuthToken::random();
+        shared.register(id, "laptop".into(), token.hash_hex());
+        let addr = start_test_relay(shared.clone()).await;
+
+        let mut bad = ws_client(addr).await;
+        let reply = say_hello(
+            &mut bad,
+            id,
+            HelloRole::Auth,
+            Some(murmur_proto::AuthToken::random().to_hex()),
+            Some(murmur_proto::PROTO_VERSION),
+        )
+        .await;
+        assert!(matches!(reply, Control::HelloErr { reason } if reason == "bad token"));
+
+        let mut wrong_proto = ws_client(addr).await;
+        let reply = say_hello(
+            &mut wrong_proto,
+            id,
+            HelloRole::Auth,
+            Some(token.to_hex()),
+            Some(murmur_proto::PROTO_VERSION + 1),
+        )
+        .await;
+        assert!(matches!(reply, Control::HelloErr { reason } if reason.contains("unsupported")));
+
+        assert!(shared.revoke(&id));
+        let mut dead = ws_client(addr).await;
+        let reply = say_hello(
+            &mut dead,
+            id,
+            HelloRole::Auth,
+            Some(token.to_hex()),
+            Some(murmur_proto::PROTO_VERSION),
+        )
+        .await;
+        assert!(matches!(reply, Control::HelloErr { reason } if reason == "revoked"));
+    }
+
+    #[tokio::test]
+    async fn wire_admin_revoke_kills_live_conn_and_push_reaches_members() {
+        let (shared, _path) = shared();
+        let shared = Arc::new(shared);
+        let (a, b) = (DeviceId([21; 8]), DeviceId([22; 8]));
+        let (ta, tb) = (murmur_proto::AuthToken::random(), murmur_proto::AuthToken::random());
+        shared.register(a, "a".into(), ta.hash_hex());
+        shared.register(b, "b".into(), tb.hash_hex());
+        let addr = start_test_relay(shared.clone()).await;
+        let mut wa = authed_conn(addr, a, &ta).await;
+        let mut wb = authed_conn(addr, b, &tb).await;
+
+        let out = admin_dispatch(&shared, AdminReq::Revoke { device_id: a });
+        assert_eq!(out["ok"], serde_json::json!(true));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1000), async {
+                while read_text(&mut wa).await.is_some() {}
+            })
+            .await
+            .is_ok(),
+            "revoked live connection must close",
+        );
+        let pushed = read_env(&mut wb, 1000).await;
+        let Control::Devices { devices, .. } = pushed.control_payload().unwrap() else {
+            panic!("expected Devices push");
+        };
+        let row = devices.iter().find(|d| d.device_id == a).unwrap();
+        assert!(row.revoked);
+        assert!(!row.online);
+
+        let mut again = ws_client(addr).await;
+        let reply = say_hello(
+            &mut again,
+            a,
+            HelloRole::Auth,
+            Some(ta.to_hex()),
+            Some(murmur_proto::PROTO_VERSION),
+        )
+        .await;
+        assert!(matches!(reply, Control::HelloErr { reason } if reason == "revoked"));
+    }
+
+    #[tokio::test]
+    async fn wire_pairing_conn_is_confined_until_pairopen_then_hello_forwards() {
+        let (shared, _path) = shared();
+        let shared = Arc::new(shared);
+        let inviter = DeviceId([31; 8]);
+        let token = murmur_proto::AuthToken::random();
+        shared.register(inviter, "inviter".into(), token.hash_hex());
+        let addr = start_test_relay(shared.clone()).await;
+        let mut inv = authed_conn(addr, inviter, &token).await;
+        let session = DeviceId([32; 8]);
+
+        let open = Envelope::control(inviter, Route::Server, 1, &Control::PairOpen { session }).unwrap();
+        send_env(&mut inv, &open).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut pair = ws_client(addr).await;
+        let reply = say_hello(&mut pair, session, HelloRole::Pair, None, Some(murmur_proto::PROTO_VERSION)).await;
+        assert!(matches!(reply, Control::HelloOk));
+
+        let forbidden = Envelope::control(session, Route::All, 2, &Control::ListDevices).unwrap();
+        send_env(&mut pair, &forbidden).await;
+        let forbidden_ctl = Envelope::control(session, Route::Server, 3, &Control::ListDevices).unwrap();
+        send_env(&mut pair, &forbidden_ctl).await;
+        assert!(read_text_timeout(&mut inv, 120).await.is_none());
+
+        let hello = Envelope::control(
+            session,
+            Route::Server,
+            4,
+            &Control::PairHello {
+                pubkey_b64: murmur_proto::PairKey::generate().public_b64(),
+                name: "joiner".into(),
+            },
+        )
+        .unwrap();
+        send_env(&mut pair, &hello).await;
+        let forwarded = read_env(&mut inv, 1000).await;
+        assert_eq!(forwarded.from, session);
+        assert!(matches!(
+            forwarded.control_payload().unwrap(),
+            Control::PairHello { ref name, .. } if name == "joiner"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wire_pair_conn_cannot_displace_live_device_and_cross_revoke_is_refused() {
+        let (shared, _path) = shared();
+        let shared = Arc::new(shared);
+        let (a, b) = (DeviceId([41; 8]), DeviceId([42; 8]));
+        let (ta, tb) = (murmur_proto::AuthToken::random(), murmur_proto::AuthToken::random());
+        shared.register(a, "a".into(), ta.hash_hex());
+        shared.register(b, "b".into(), tb.hash_hex());
+        let addr = start_test_relay(shared.clone()).await;
+        let mut wa = authed_conn(addr, a, &ta).await;
+        let _wb = authed_conn(addr, b, &tb).await;
+
+        let mut impostor = ws_client(addr).await;
+        let reply = say_hello(&mut impostor, a, HelloRole::Pair, None, Some(murmur_proto::PROTO_VERSION)).await;
+        assert!(matches!(
+            reply,
+            Control::HelloErr { reason } if reason == "device id already connected"
+        ));
+
+        let cross = Envelope::control(
+            a,
+            Route::Server,
+            1,
+            &Control::RevokeDevice { device_id: b },
+        )
+        .unwrap();
+        send_env(&mut wa, &cross).await;
+        let reply = read_env(&mut wa, 1000).await;
+        assert!(matches!(
+            reply.control_payload().unwrap(),
+            Control::Error { reason } if reason == "can only revoke self"
+        ));
+        assert!(!shared.devices.lock().unwrap()[&b].revoked);
+    }
+
 }

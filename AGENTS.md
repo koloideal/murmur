@@ -17,9 +17,12 @@ Verify with: `cd mobile && ./gradlew testDebugUnitTest compileDebugKotlin`
 
 ## Verify Rust side
 
-`cd laptop && cargo test -p murmurd` — 15 unit+integration tests (election,
-dedupe, anti-echo, in-memory duplex, key rotation e2e). Golden wire vectors:
-`cd shared/proto && cargo test` — byte-exact against frozen vectors.json.
+`cd laptop && cargo test` — murmurd has 34 unit+integration tests (election,
+dedupe, anti-echo, in-memory duplex, key rotation e2e, dial guards, pairing,
+flap settle). Run from the `laptop/` workspace root, not with `--manifest-path`.
+Golden wire vectors: `cd shared/proto && cargo test` — byte-exact against
+frozen vectors.json. Relay: `cd server && cargo test` — 12 tests incl.
+wire-level TCP+WS. Android: `cd mobile && ./gradlew testDebugUnitTest`.
 
 ## Daemon control
 

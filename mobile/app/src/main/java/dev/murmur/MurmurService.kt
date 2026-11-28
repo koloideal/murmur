@@ -71,8 +71,7 @@ class MurmurService : Service() {
      *  [lastSeq] keeps the check correct across a peer restart: its
      *  seq resets to 1, and a frame far below the high-water mark is
      *  fresh, not a duplicate — so the sender's window resets. */
-    private val seenSeq = LinkedHashSet<Pair<String, Long>>()
-    private val lastSeq = HashMap<String, Long>()
+    private val dedupe = dev.murmur.core.Dedupe()
 
     /** device id → last accepted frame, direct or mesh-forwarded.
      *  A transit-reachable member — a laptop we only reach through a
@@ -512,20 +511,7 @@ class MurmurService : Service() {
         // Broadcasts intentionally ride both LAN (early copy) and the
         // relay — the second copy collapses here. Dedupe only after a
         // successful open so forged frames can't poison the table.
-        synchronized(seenSeq) {
-            val last = lastSeq[env.from] ?: 0L
-            if (env.seq <= last && last - env.seq > RESTART_GAP) {
-                // seq jumped far backwards — the peer restarted; its
-                // stored entries predate the restart and would swallow
-                // fresh frames.
-                seenSeq.removeIf { it.first == env.from }
-                lastSeq[env.from] = env.seq
-            } else if (env.seq > last) {
-                lastSeq[env.from] = env.seq
-            }
-            if (!seenSeq.add(env.from to env.seq)) return
-            if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
-        }
+        if (!dedupe.accept(env.from, env.seq)) return
         // Deliberate goodbye — un-hear instead of refreshing, so the
         // family card flips offline now rather than after the silence
         // window. Falls through to the flood below so transit members
@@ -658,11 +644,9 @@ class MurmurService : Service() {
         private const val DEVICES_POLL_MS = 5_000L
         private const val ACTION_PAUSE = "dev.murmur.PAUSE"
         private const val ACTION_EXIT = "dev.murmur.EXIT"
-        private const val SEEN_MAX = 4096
         /** This far below the sender's high-water seq can't be an
          *  in-flight duplicate — the LAN early copy is never that late;
          *  it's a peer restart (seq resets to 1). */
-        private const val RESTART_GAP = 64L
         /** Links ping every 5s; 6 windows of silence = truly gone. The
          *  same value murmurd uses for heard_recently. */
         private const val HEARD_MS = 30_000L
