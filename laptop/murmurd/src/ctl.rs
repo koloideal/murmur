@@ -160,7 +160,7 @@ async fn dispatch(shared: &Arc<Shared>, req: Req) -> Res {
                 "revoked": shared.revoked.load(std::sync::atomic::Ordering::Relaxed),
                 "lan_peers": shared.lan_peers().iter().map(|i| i.to_string()).collect::<Vec<_>>(),
                 "lan_addrs": shared.lan_addrs().iter()
-                    .map(|(i, a)| (i.to_string(), a.to_string()))
+                    .map(|(i, a)| (i.to_string(), a.iter().map(|x| x.to_string()).collect::<Vec<_>>()))
                     .collect::<std::collections::HashMap<_, _>>(),
                 "lan_rtt_ms": shared.lan_peers().iter()
                     .map(|i| (i.to_string(), shared.lan_rtt(i)))

@@ -24,8 +24,25 @@ commits that shipped in each release.
 - `murmurctl invite` prints the direct-dial fallback for serverless.
 - Beacon wait heartbeats every 15 s with the fallback hint instead of
   a silent 2-minute hang; connect to the inviter has a 10 s timeout.
+- Transport failover candidate sets: each peer remembers up to four
+  dial addresses — the validated link's real remote addr sits at the
+  front, beacon/pair hints queue behind as alternates
+  (`lan_addrs.json` list form; the old flat `{id: "addr"}` still
+  loads). Losing a link emits dial hints for the whole set at once,
+  connects race in parallel in their own tasks, and the rate limit
+  moved to per (peer, addr) — a dead transport can't pace the live
+  one. Verified live: killing `adb`'s transport dropped the phone
+  link instantly and the restored forward re-linked 5 s later with
+  no user action.
+- `FLOWS.md` at the repo root pins every user flow — pairing,
+  transport failover, transit, multi-laptop-one-phone, revocation —
+  for serverless and serverful families, with the live-run matrix.
 
 ### Fixed
+- Android: transit-reachable members no longer show as offline in
+  the device list — `lastHeard` marks any valid frame within 30 s
+  (the phone's flooded pings), same rule the daemon's `devices`
+  table already used.
 - Second `murmurctl invite` inside the invite TTL died with
   "pair port busy": the serverless pair listener is now bound once at
   daemon start and lives permanently.

@@ -350,7 +350,12 @@ async fn dial_loop(
     hub: Arc<Hub>,
     mut rx: mpsc::UnboundedReceiver<DialHint>,
 ) {
-    let mut last_dial = std::collections::HashMap::new();
+    // Rate-limit per (peer, addr): a dead candidate must not pace its
+    // siblings — transports race each other, not queue behind a corpse.
+    let mut last_dial: std::collections::HashMap<
+        (Option<murmur_proto::DeviceId>, SocketAddr),
+        std::time::Instant,
+    > = std::collections::HashMap::new();
     while let Some(hint) = rx.recv().await {
         if let Some(peer) = hint.peer {
             // A revoked device keeps beaconing until its owner notices
@@ -375,36 +380,44 @@ async fn dial_loop(
             {
                 continue;
             }
+            let key = (hint.peer, SocketAddr::new(hint.addr, hint.port));
             let now = std::time::Instant::now();
             // A link that just died gets one immediate redial — the fast
             // path should come back on the next beacon, not a rate-limit
             // window later.
             if !shared.lan_redial_pending(&peer)
-                && last_dial.get(&peer).is_some_and(|t| now - *t < DIAL_EVERY)
+                && last_dial.get(&key).is_some_and(|t| now - *t < DIAL_EVERY)
             {
                 continue;
             }
-            last_dial.insert(peer, now);
+            last_dial.insert(key, now);
         }
         let addr = SocketAddr::new(hint.addr, hint.port);
-        // One dialer serves every hint — an unbounded connect to a dead
-        // address (isolated-AP wifi, stale rendezvous) sits in SYN
-        // retry for ~2min and serializes every later hint behind it.
-        // Fail fast so a poisoned cache entry can't stall the queue.
-        match tokio::time::timeout(std::time::Duration::from_secs(4), TcpStream::connect(addr))
+        // Each connect runs in its own task with a hard timeout: a dead
+        // candidate (isolated-AP wifi, stale rendezvous, killed adb
+        // forward) can stall nothing — candidates race in parallel and
+        // the first validated socket adopts.
+        let shared2 = shared.clone();
+        let hub2 = hub.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                TcpStream::connect(addr),
+            )
             .await
-        {
-            Ok(Ok(s)) => {
-                let _ = s.set_nodelay(true);
-                match hint.peer {
-                    Some(peer) => info!("lan: dialed {addr} ({peer})"),
-                    None => info!("lan: dialed {addr} (manual)"),
+            {
+                Ok(Ok(s)) => {
+                    let _ = s.set_nodelay(true);
+                    match hint.peer {
+                        Some(peer) => info!("lan: dialed {addr} ({peer})"),
+                        None => info!("lan: dialed {addr} (manual)"),
+                    }
+                    spawn_link(&shared2, &hub2, s, hint.transport, LinkDir::Outbound);
                 }
-                spawn_link(&shared, &hub, s, hint.transport, LinkDir::Outbound);
+                Ok(Err(e)) => debug!("lan: dial {addr}: {e}"),
+                Err(_) => debug!("lan: dial {addr}: connect timeout"),
             }
-            Ok(Err(e)) => debug!("lan: dial {addr}: {e}"),
-            Err(_) => debug!("lan: dial {addr}: connect timeout"),
-        }
+        });
     }
 }
 
@@ -425,7 +438,7 @@ async fn redial_loop(shared: Arc<Shared>) {
                 .collect()
         };
         let roster = shared.roster.lock().unwrap().clone();
-        for (peer, addr) in shared.lan_addrs() {
+        for (peer, addrs) in shared.lan_addrs() {
             if linked.contains(&peer) {
                 continue;
             }
@@ -438,14 +451,18 @@ async fn redial_loop(shared: Arc<Shared>) {
                 Some(m) => m.kind,
                 None => continue,
             };
-            let _ = shared.lan_dial.send(DialHint {
-                peer: Some(peer),
-                addr: addr.ip(),
-                port: addr.port(),
-                kind,
-                trusted: true,
-                transport: Transport::Lan,
-            });
+            // Every remembered candidate gets a slot — transports are
+            // raced in parallel, first validated socket wins.
+            for addr in addrs {
+                let _ = shared.lan_dial.send(DialHint {
+                    peer: Some(peer),
+                    addr: addr.ip(),
+                    port: addr.port(),
+                    kind,
+                    trusted: true,
+                    transport: Transport::Lan,
+                });
+            }
         }
     }
 }

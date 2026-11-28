@@ -31,6 +31,7 @@ mod tests {
         Arc<Shared>,
         tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         tokio::sync::mpsc::UnboundedReceiver<(u64, Envelope)>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::lan::DialHint>,
     ) {
         let identity = PairKey::generate();
         let secrets = Secrets {
@@ -57,9 +58,9 @@ mod tests {
         };
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lo_tx, lo_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (lan_tx, _lan_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (lan_tx, lan_rx) = tokio::sync::mpsc::unbounded_channel();
         let shared = Shared::new(cfg, secrets, out_tx, lo_tx, lan_tx).unwrap();
-        (Arc::new(shared), out_rx, lo_rx)
+        (Arc::new(shared), out_rx, lo_rx, lan_rx)
     }
 
     fn with_env<R>(f: impl FnOnce() -> R) -> R {
@@ -85,8 +86,8 @@ mod tests {
     fn duplex_delivery_and_dual_path_dedup() {
         with_env(|| {
             let family = FamilyKey::random();
-            let (a, mut a_out, mut a_lo) = node(1, &family);
-            let (b, mut _b_out, mut _b_lo) = node(2, &family);
+            let (a, mut a_out, mut a_lo, _a_lan) = node(1, &family);
+            let (b, mut _b_out, mut _b_lo, _b_lan) = node(2, &family);
 
             // B's feature tap: a hub sink capturing everything
             let hub = Hub::new();
@@ -125,8 +126,8 @@ mod tests {
         with_env(|| {
             use murmur_proto::DeviceKind;
             let family = FamilyKey::random();
-            let (a, mut a_out, mut a_lo) = node(1, &family);
-            let (b, _b_out, _b_lo) = node(2, &family);
+            let (a, mut a_out, mut a_lo, _a_lan) = node(1, &family);
+            let (b, _b_out, _b_lo, _b_lan) = node(2, &family);
 
             // both nodes pin each other — in production Identity frames
             // do this; here we seed the same roster state directly
@@ -185,8 +186,8 @@ mod tests {
         with_env(|| {
             let fam_a = FamilyKey::random();
             let fam_b = FamilyKey::random();
-            let (a, mut a_out, mut a_lo) = node(1, &fam_a);
-            let (b, _b_out, _b_lo) = node(2, &fam_b);
+            let (a, mut a_out, mut a_lo, _a_lan) = node(1, &fam_a);
+            let (b, _b_out, _b_lo, _b_lan) = node(2, &fam_b);
             a.send(Route::All, &Message::Presence { state: PresenceState::Active, ts: 1 })
                 .unwrap();
             let env = pump_one(&mut a_out, &mut a_lo).unwrap();
@@ -206,7 +207,7 @@ mod tests {
         with_env(|| {
             let family = FamilyKey::random();
             // me = 0x10; peer_big = 0x20 (I am smaller), peer_small = 0x01.
-            let (shared, _o, _l) = node(0x10, &family);
+            let (shared, _o, _l, _lan_rx) = node(0x10, &family);
             let peer_big = DeviceId([0x20; 8]);
             let peer_small = DeviceId([0x01; 8]);
 
@@ -266,7 +267,7 @@ mod tests {
         // — keeping both ghosts it forever.
         use murmur_proto::DeviceKind;
         let family = FamilyKey::random();
-        let (a, _a_out, _a_lo) = node(1, &family);
+        let (a, _a_out, _a_lo, _a_lan) = node(1, &family);
         let phone_key = murmur_proto::PairKey::generate();
         let pub_b64 = phone_key.public_b64();
 
@@ -285,5 +286,143 @@ mod tests {
         a.pin(DeviceId([11; 8]), &other.public_b64(), DeviceKind::Phone, None, &[]);
         let r = a.roster.lock().unwrap();
         assert!(r.contains_key(&DeviceId([9; 8])) && r.contains_key(&DeviceId([11; 8])));
+    }
+
+    // ---- transport failover (F-10/F-11 in FLOWS.md) ------------------
+
+    #[test]
+    fn hint_appends_alternate_set_promotes_to_front() {
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (n, _o, _l, _d) = node(1, &family);
+            let peer = DeviceId([9; 8]);
+            let sa = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+            let (advert, usb) = (sa("192.168.31.46:17894"), sa("127.0.0.1:27894"));
+
+            // a beacon advert learned before any link lands as a candidate…
+            n.lan_addr_hint(peer, advert);
+            // …then the validated usb link's addr becomes the proven front,
+            // advert demoted to alternate — failover material, not noise.
+            n.lan_addr_set(peer, usb);
+            assert_eq!(n.lan_addrs()[&peer], vec![usb, advert]);
+
+            // later adverts can't displace the proven front — the dead
+            // .46 wifi addr the phone kept advertising on the real mesh.
+            n.lan_addr_hint(peer, sa("192.168.31.46:17895"));
+            assert_eq!(n.lan_addrs()[&peer][0], usb);
+
+            // re-proving the same addr is a no-op, not a dup…
+            n.lan_addr_set(peer, usb);
+            assert_eq!(n.lan_addrs()[&peer].len(), 3);
+            // …and proving an alternate promotes it to front.
+            n.lan_addr_set(peer, advert);
+            assert_eq!(n.lan_addrs()[&peer][0], advert);
+            assert_eq!(n.lan_addrs()[&peer][1], usb);
+        });
+    }
+
+    #[test]
+    fn candidate_set_capped_and_proven_never_evicts() {
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (n, _o, _l, _d) = node(1, &family);
+            let peer = DeviceId([9; 8]);
+            let proven: std::net::SocketAddr = "10.0.0.1:17894".parse().unwrap();
+            n.lan_addr_set(peer, proven);
+            for i in 0..6u8 {
+                n.lan_addr_hint(peer, format!("10.0.1.{i}:17894").parse().unwrap());
+            }
+            let v = &n.lan_addrs()[&peer];
+            assert_eq!(v.len(), 4, "candidate set stays bounded (LAN_ADDR_CAP)");
+            assert_eq!(v[0], proven, "eviction never touches the proven front");
+        });
+    }
+
+    #[test]
+    fn link_drop_dials_every_candidate_front_first() {
+        use crate::lan::{LinkDir, Transport};
+        use murmur_proto::DeviceKind;
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (n, _o, _l, mut dial) = node(0x10, &family);
+            let peer = DeviceId([0x20; 8]);
+            n.pin(peer, &PairKey::generate().public_b64(), DeviceKind::Laptop, None, &[]);
+            let sa = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+            let (proven, alt1, alt2) =
+                (sa("10.0.0.9:17894"), sa("10.0.0.9:27894"), sa("192.168.31.46:17894"));
+            n.lan_addr_set(peer, proven);
+            n.lan_addr_hint(peer, alt1);
+            n.lan_addr_hint(peer, alt2);
+
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            n.lan_adopt(peer, tx.clone(), Transport::Lan, LinkDir::Outbound);
+            assert_eq!(n.lan_peers(), vec![peer]);
+            n.lan_clear(&tx);
+            assert!(n.lan_peers().is_empty());
+
+            // A drop must not wait for the next redial tick — every
+            // candidate goes out immediately, proven first so the
+            // rate-limit exemption lands on the most likely transport.
+            let mut got = Vec::new();
+            while let Ok(h) = dial.try_recv() {
+                got.push(h);
+            }
+            let addrs: Vec<_> = got
+                .iter()
+                .map(|h| std::net::SocketAddr::new(h.addr, h.port))
+                .collect();
+            assert_eq!(addrs, vec![proven, alt1, alt2]);
+            assert!(got.iter().all(|h| h.trusted && h.peer == Some(peer)));
+
+            // the dropped marker is one-shot: the first dial skips the
+            // rate limit, later ones pace per (peer, addr)
+            assert!(n.lan_redial_pending(&peer));
+            assert!(!n.lan_redial_pending(&peer));
+        });
+    }
+
+    #[test]
+    fn lan_addrs_file_loads_flat_and_list_forms() {
+        with_env(|| {
+            // The pre-candidates on-disk form was {"id": "addr"} — it
+            // must still load or every rendezvous dies on upgrade.
+            let p = crate::config::data_path("lan_addrs.json");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let (flat, list) = (DeviceId([3; 8]), DeviceId([4; 8]));
+            std::fs::write(
+                &p,
+                format!(
+                    r#"{{"{flat}": "127.0.0.1:27894", "{list}": ["10.1.1.1:17894", "10.1.1.2:17894"]}}"#
+                ),
+            )
+            .unwrap();
+            let m = crate::links::load_lan_addrs();
+            assert_eq!(m[&flat], vec!["127.0.0.1:27894".parse::<std::net::SocketAddr>().unwrap()]);
+            assert_eq!(m[&list].len(), 2);
+            let _ = std::fs::remove_file(&p);
+        });
+    }
+
+    #[test]
+    fn transit_frames_mark_member_heard() {
+        with_env(|| {
+            // F-8/F-18: a member reachable only through another node's
+            // link stays "online" by any valid frame — phones emit no
+            // Presence, their flooded pings are the liveness signal.
+            let family = FamilyKey::random();
+            let (a, mut a_out, mut a_lo, _d1) = node(1, &family);
+            let (b, _o, _l, _d2) = node(2, &family);
+            let hub = Hub::new();
+            a.send(Route::All, &Message::Presence { state: PresenceState::Active, ts: 1 })
+                .unwrap();
+            let env = pump_one(&mut a_out, &mut a_lo).unwrap();
+            let key = b.keys.read().unwrap().current.clone();
+            let msg = env.open(&key).unwrap();
+            assert!(!b.heard_recently(&env.from, std::time::Duration::from_secs(30)));
+            assert!(b.ingest(&hub, env.from, env.seq, &msg));
+            assert!(b.heard_recently(&env.from, std::time::Duration::from_secs(30)));
+            // a frame never seen (another family member entirely) is not heard
+            assert!(!b.heard_recently(&DeviceId([77; 8]), std::time::Duration::from_secs(30)));
+        });
     }
 }

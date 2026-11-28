@@ -9,32 +9,50 @@ use murmur_proto::{DeviceId, Envelope, Route};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-/// `lan_addrs.json` — remembered peer dial addresses, keyed by hex id.
-/// Both directions stay stringly: DeviceId/SocketAddr parse cleanly
-/// and a hand-editable file beats a schema for two fields.
-pub(crate) fn load_lan_addrs() -> HashMap<DeviceId, std::net::SocketAddr> {
+/// `lan_addrs.json` — remembered dial *candidates* per peer, ordered:
+/// front is the address a validated link last proved, the rest are
+/// alternates gathered from hints (beacon adverts, pair seeds).
+/// Transport switching needs the whole set remembered — betting on a
+/// single rendezvous means a dead one strands the peer.
+/// Back-compat: the old `{id: "addr"}` flat form loads as a one-entry
+/// list.
+pub(crate) fn load_lan_addrs() -> HashMap<DeviceId, Vec<std::net::SocketAddr>> {
     std::fs::read_to_string(crate::config::data_path("lan_addrs.json"))
         .ok()
-        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+        .and_then(|s| serde_json::from_str::<HashMap<String, serde_json::Value>>(&s).ok())
         .map(|m| {
             m.iter()
-                .filter_map(|(id, a)| {
-                    Some((id.parse::<DeviceId>().ok()?, a.parse::<std::net::SocketAddr>().ok()?))
+                .filter_map(|(id, v)| {
+                    let id = id.parse::<DeviceId>().ok()?;
+                    let one = |s: &str| s.parse::<std::net::SocketAddr>().ok();
+                    let addrs = match v {
+                        serde_json::Value::String(a) => one(a).into_iter().collect(),
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|a| a.as_str().and_then(one))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (!addrs.is_empty()).then_some((id, addrs))
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn save_lan_addrs(m: &HashMap<DeviceId, std::net::SocketAddr>) {
-    let flat: HashMap<String, String> = m
+fn save_lan_addrs(m: &HashMap<DeviceId, Vec<std::net::SocketAddr>>) {
+    let flat: HashMap<String, Vec<String>> = m
         .iter()
-        .map(|(id, a)| (id.to_string(), a.to_string()))
+        .map(|(id, a)| (id.to_string(), a.iter().map(|x| x.to_string()).collect()))
         .collect();
     if let Ok(j) = serde_json::to_string(&flat) {
         let _ = std::fs::write(crate::config::data_path("lan_addrs.json"), j);
     }
 }
+
+/// Candidates per peer — enough for proven + a few alternates without
+/// the set growing into a dial storm.
+const LAN_ADDR_CAP: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdoptOutcome {
@@ -142,6 +160,24 @@ impl Shared {
             let mut d = self.lan_dropped.lock().unwrap();
             for p in removed {
                 d.insert(p, now);
+                // A lost link re-dials NOW, not on the next 10s tick —
+                // the whole candidate set goes out front-first so the
+                // proven transport gets the rate-limit exemption and
+                // alternates race it in parallel. Transport switching
+                // is only seamless if the fallback starts immediately.
+                if let Some(kind) = self.roster.lock().unwrap().get(&p).map(|m| m.kind) {
+                    for a in self.lan_addrs.lock().unwrap().get(&p).cloned().unwrap_or_default()
+                    {
+                        let _ = self.lan_dial.send(crate::lan::DialHint {
+                            peer: Some(p),
+                            addr: a.ip(),
+                            port: a.port(),
+                            kind,
+                            trusted: true,
+                            transport: crate::lan::Transport::Lan,
+                        });
+                    }
+                }
             }
             d.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(60));
         }
@@ -154,35 +190,46 @@ impl Shared {
         self.lan_dropped.lock().unwrap().remove(peer).is_some()
     }
 
-    /// Remember where this peer was last reachable — refreshed on
-    /// every validated link and beacon-advertised `lan_addr`.
+    /// A proven rendezvous — a validated link's real remote addr.
+    /// Moves to the front of the candidate list; alternates survive
+    /// behind it for transport failover.
     /// Persisted: a daemon restart on a broadcast-filtered network
-    /// would otherwise lose the only rendezvous it has.
+    /// would otherwise lose every rendezvous it has.
     pub fn lan_addr_set(&self, peer: DeviceId, addr: std::net::SocketAddr) {
         {
             let mut m = self.lan_addrs.lock().unwrap();
-            if m.get(&peer) == Some(&addr) {
+            if m.get(&peer).and_then(|v| v.first()) == Some(&addr) {
                 return;
             }
-            m.insert(peer, addr);
+            let v = m.entry(peer).or_default();
+            v.retain(|a| *a != addr);
+            v.insert(0, addr);
+            v.truncate(LAN_ADDR_CAP);
+            save_lan_addrs(&m);
         }
-        save_lan_addrs(&self.lan_addrs.lock().unwrap());
     }
 
     /// A tentative rendezvous — a beacon's advertised addr or a
-    /// pair-time seed. Fills in while the peer is unlinked (the
-    /// remembered addr may be stale and needs replacing anyway), but
-    /// must not clobber the address a *live* link already proved: a
-    /// usb-linked phone still advertises its unreachable wifi addr.
+    /// pair-time seed. Appends as an alternate: never reorders the
+    /// proven front (a usb-linked phone still advertises its wifi
+    /// addr — correct to learn as a fallback, wrong to promote).
     pub fn lan_addr_hint(&self, peer: DeviceId, addr: std::net::SocketAddr) {
-        if self.lan_peers().contains(&peer) {
+        let mut m = self.lan_addrs.lock().unwrap();
+        let v = m.entry(peer).or_default();
+        if v.contains(&addr) {
             return;
         }
-        self.lan_addr_set(peer, addr);
+        if v.len() < LAN_ADDR_CAP {
+            v.push(addr);
+        } else {
+            *v.last_mut().unwrap() = addr; // freshest hint evicts the oldest alternate
+        }
+        save_lan_addrs(&m);
     }
 
-    /// Snapshot for the redial loop and `murmurctl status`.
-    pub fn lan_addrs(&self) -> HashMap<DeviceId, std::net::SocketAddr> {
+    /// Snapshot for the redial loop and `murmurctl status` — ordered,
+    /// proven addr first.
+    pub fn lan_addrs(&self) -> HashMap<DeviceId, Vec<std::net::SocketAddr>> {
         self.lan_addrs.lock().unwrap().clone()
     }
 

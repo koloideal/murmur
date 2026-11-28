@@ -56,12 +56,12 @@ pub struct Shared {
     /// Peers whose link just died — one-shot redial markers for the
     /// dialer (bounded by peer count, entries expire after a minute).
     pub(crate) lan_dropped: Mutex<HashMap<DeviceId, std::time::Instant>>,
-    /// Last-proven dial address per peer — learned when a link
-    /// validates (socket remote addr / the peer's advertised
-    /// `lan_addr`). On broadcast-filtered networks no fresh beacon
-    /// ever arrives, so `lan::redial_loop` uses this map to bring a
-    /// dead link back without discovery.
-    pub(crate) lan_addrs: Mutex<HashMap<DeviceId, std::net::SocketAddr>>,
+    /// Remembered dial candidates per peer, ordered: front is the
+    /// address a validated link last proved, the rest are alternates
+    /// gathered from hints (beacon adverts, pair seeds). On
+    /// broadcast-filtered networks no fresh beacon ever arrives, so
+    /// `lan::redial_loop` brings a dead link back by racing this set.
+    pub(crate) lan_addrs: Mutex<HashMap<DeviceId, Vec<std::net::SocketAddr>>>,
     /// Dial requests for the LAN fast-path — fed by UDP beacons and
     /// relay-delivered `LanBeacon`s; `lan::dial_loop` rate-limits,
     /// subnet-checks and connects.

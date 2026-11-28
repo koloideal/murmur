@@ -74,6 +74,13 @@ class MurmurService : Service() {
     private val seenSeq = LinkedHashSet<Pair<String, Long>>()
     private val lastSeq = HashMap<String, Long>()
 
+    /** device id → last accepted frame, direct or mesh-forwarded.
+     *  A transit-reachable member — a laptop we only reach through a
+     *  sibling's link — never holds a socket here, but its pings flood
+     *  through: "heard lately" is the honest online signal, the mirror
+     *  of murmurd's heard_recently. */
+    private val lastHeard = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** ElapsedRealtimeNanos of the in-flight ListDevices — its reply RTT
      *  is the "ping" the dashboard shows. */
     private val listSentAt = java.util.concurrent.atomic.AtomicLong()
@@ -96,12 +103,16 @@ class MurmurService : Service() {
         val ros = secrets.roster
         val names = secrets.peerNames
         val selfId = secrets.deviceId
+        val now = System.currentTimeMillis()
         val rows = ros.keys.map { id ->
             DeviceInfo(
                 device_id = id,
                 name = names[id] ?: id,
                 revoked = false,
-                online = peers.containsKey(id),
+                // Reachable = live link, or the mesh heard them within
+                // the window — transit members never hold a socket here.
+                online = peers.containsKey(id) ||
+                    (lastHeard[id]?.let { now - it < HEARD_MS } == true),
                 rtt_ms = peers[id],
             )
         }
@@ -499,6 +510,13 @@ class MurmurService : Service() {
             if (!seenSeq.add(env.from to env.seq)) return
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
+        lastHeard[env.from] = System.currentTimeMillis()
+        // A transit member's liveness just refreshed — the roster row
+        // can't wait for the next peersFlow emission (its socket set
+        // didn't change), so re-render now.
+        if (serverless && !lan.peersFlow.value.containsKey(env.from)) {
+            status.update { it.copy(devices = localDevices(lan.peersFlow.value)) }
+        }
 
         // First-seen LAN frame — flood it onward to our other links:
         // the serverless mesh is multi-hop, another member may only be
@@ -610,6 +628,9 @@ class MurmurService : Service() {
          *  in-flight duplicate — the LAN early copy is never that late;
          *  it's a peer restart (seq resets to 1). */
         private const val RESTART_GAP = 64L
+        /** Links ping every 5s; 6 windows of silence = truly gone. The
+         *  same value murmurd uses for heard_recently. */
+        private const val HEARD_MS = 30_000L
 
         /** The dashboard is on screen — gates the device-list poller. */
         val uiVisible = MutableStateFlow(false)
