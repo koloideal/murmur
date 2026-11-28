@@ -47,6 +47,12 @@
 - Ожидание: pending-сессия умирает по TTL; в roster фантом не попадает;
   никаких линков и редиалов на несостоявшегося пира. Повторный invite —
   новый код, старый инвалидирован.
+- Известный зазор (зафиксирован 2026-11-28): если joiner завершил SAS,
+  но упал на локальной записи (config уже существовал), повторный join
+  **с тем же кодом** молча висит — инвайтер уже потребил сессию.
+  Рекавери — свежий invite; wipe'd-устройство перепарится под новым id,
+  а «same identity key re-pairs» подменяет старый id, только если ключ
+  не был утерян вместе с secrets.
 
 ---
 
@@ -82,11 +88,15 @@
   клиенты изолированы → прямой comp⇄phone невозможен.
 - Ожидание: фреймы флудятся — комп видит телефон `online` по
   `heard_recently` (любой валидный фрейм за 30с, в т.ч. периодический
-  LanPing телефона каждые 5с — pong link-local, сам пинг едет мешем),
-  а не по прямому линку. `rtt_ms` транзитного члена = `now − ping.ts`
-  (one-way латентность доставки), fallback к прямому RTT. Notification,
-  media, clipboard работают транзитом без конфигурации. UI телефона
-  симметрично помечает комп online+ms по `lastHeard`/`heardRtt`.
+  LanPing каждые 5с — пинг едет мешем как Route::All трафик).
+  RTT — ICMP-семантика: каждый член отвечает на чужой пинг понгом,
+  **адресованным** пингеру (`to = Route::Device`), меш маршрутизирует
+  его назад; пингер меряет `now − ts` **на своих часах** от своего же
+  эха — честно для прямого и транзитного пути, никакой зависимости от
+  синхронизации часов. Понг в транзите не стампится нигде (его ts —
+  чужие часы). `rtt_ms` = прямой RTT линка ‖ mesh-RTT с понга.
+  Notification, media, clipboard работают транзитом без конфигурации.
+  UI телефона симметрично помечает комп online+ms по `lastHeard`/`heardRtt`.
 
 ### F-9. ADB-forward как транспорт (тестовая среда / dev)
 
@@ -234,8 +244,8 @@ fast path (beacon'ы доезжают и через релей → `LanBeacon` �
 | Линки | только LAN/Usb транспорты | LAN fast path + relay fallback: конверты идут через релей, даже если прямого пути нет |
 | Discovery | UDP-beacon + redial + manual dial | то же + LanBeacon внутри relay-конвертов (cross-LAN discovery) |
 | Обрыв всего LAN | offline через 30с | связность сохраняется через релей — online не гаснет |
-| Паринг | pair-сокет :17895 (или adb reverse) | инвайт-бандл несёт server_url — новичок сразу говорит с релеем |
-| Revoke/rotate | по живым линкам | сервер убивает сессию revoked мгновенно (`to="@server"` control-plane) |
+| Паринг | pair-сокет :17895 (или adb reverse) | весь SAS-хендшейк идёт через релей — LAN не нужен вообще; инвайтер минтит свежий device id на каждый паринг |
+| Revoke | `murmurctl revoke <id>` — ревок едет по семейному проводу | `murmurs revoke --id <id>` **на хосте релея** — wire-ревока чужих нет («can only revoke self»); сервер мгновенно рвёт сессию, демон видит `auth rejected: revoked` при реконнекте |
 | Мобила+2 ноута | телефон транзитен через ближайший линк | телефон может держать собственную relay-сессию с любой сети |
 
 Детерминированный инвариант serverful: **доставка конверта не зависит
@@ -244,26 +254,44 @@ fast path (beacon'ы доезжают и через релей → `LanBeacon` �
 
 ---
 
-## 7. Матрица живого прогона
+## 7. Матрица живого прогона (2026-11-28, коммиты 8015577+)
+
+### Serverless (продакшн-меш comp ⇄ laptop ⇄ phone/USB)
 
 | Флоу | Как гоняли | Результат |
 |---|---|---|
 | F-1 паринг телефона | invite + adb reverse :17895 | OK (SAS match, регистрация) |
+| F-3 паринг ноут→ноут | invite + join по LAN | OK |
 | F-5 beacon discovery | comp⇄laptop wifi | OK |
 | F-6 redial без broadcast | форвард как единственный путь | OK |
 | F-7 tie-break | двойные адопции при dial | settle на winner, флапов нет |
-| F-8 транзит online | comp видит phone через laptop | OK (heard_recently) |
+| F-8 транзит online+rtt | comp⇄phone через laptop | OK: online + RTT (ICMP-pon­ger semantics) |
 | F-9 adb-forward | dial 127.0.0.1:27894 | OK, порт сокета запомнен |
-| F-10 фейловер | `adb kill-server` → вернуть forward | OK: дроп мгновенный (`peer closed`), instant-redial по всем кандидатам; релинк через 5с после возврата транспорта (`dialed 127.0.0.1:27894` → `link up`), без участия юзера |
-| F-11 advert не ломает rendezvous | phone beacon .46:17894 | proven 127.0.0.1:27894 в начале |
-| F-14 clip laptop→phone | wl-copy + `activeDevice()` gate | OK |
-| F-15 clip phone→laptop | share-intent push | OK (`last_clip=in@phone`) |
-| F-16 notifications | `cmd notification post` | OK, Notify на обеих шинах |
-| F-17 media | playerctl state + seek/pause | OK |
+| F-10 фейловер | `adb kill-server` → вернуть forward | OK: дроп мгновенный, instant-redial по всем кандидатам; релинк 5с после возврата транспорта, hands-free |
+| F-11 advert не ломает rendezvous | phone beacon .46:17894 | proven 127.0.0.1:27894 в начале, .46 альтернативой |
+| F-13 элекция | рестарт comp → обе ноды elect comp | OK, конвергенция за heartbeat |
+| F-14 clip laptop→phone | wl-copy на active + гейт | OK + доказательство гейта: клип от неактивного дропнут (`clip from 4a57 active=13f1` без applied), от активного — `applied 13B` |
+| F-15 clip phone→laptop | share-intent push | OK (`last_clip=in, origin=phone` на clip-target) |
+| F-16 notifications | `cmd notification post` | OK: Notify ×1 на laptop + ×1 на comp (транзит), дедуп не дублирует |
+| F-17 media | playerctl state+control | OK: `Paused Day Night` на обоих (транзит), play/pause с comp меняют состояние телефона |
 | F-18 online-семантика | transit member | OK |
-| F-21 рестарт демона | systemctl restart | OK, релинк сам |
+| F-20 rotate serverless | `murmurctl rotate` на живом мэше | OK: epoch 1 на обоих ноутах, линки не дропнулись, транзит жив |
+| F-21 рестарт демона | systemctl restart ×N за сессию | OK, релинк+кандидаты персистентны |
+| F-22 uninstall | — | не гоняли (деструктивно, тривиальный путь) |
 
-Закодировано в `cargo test`: кандидатный порядок/promotion/cap F-11,
-dropped-маркер и мгновенный редиал F-10, per-addr rate-limit F-6,
-tie-break F-7, heard_recently F-8/F-18, self-guard I-1, revoked-guard
-I-2, анти-echo F-15, ротация F-20, wire-векторы proto.
+### Serverful (throwaway-семья через релей `home`/murmur.kolo.ink, LAN fast-path отключён — порт занят → чистый relay-путь)
+
+| Флоу | Как гоняли | Результат |
+|---|---|---|
+| Релей обновлён | murmurs пересобран на aarch64-хосте из текущего дерева, заменён в /usr/local/bin | active, 101 на WS-handshake, murmurd authed через Cloudflare |
+| Паринг через релей | invite на test-node-a + `murmurd join` на свежей test-node-b | OK: SAS-хендшейк целиком через wss, без LAN; инвайтер заминтил свежий id `cebded…` |
+| Доставка не зависит от LAN | оба тестовых демона без LAN-порта | OK: взаимная видимость online, RTT 84ms чистым релеем |
+| Rotate serverful | `murmurctl rotate` на node-a | OK: epoch 1 доехал до node-b через релей за ~1с |
+| Revoke serverful | `murmurs revoke --id` на релее против живой node-b | OK: сессия мгновенно сброшена; реконнект → `auth rejected: revoked` → «re-pair it» |
+| Wire-revoke чужого | `murmurctl revoke` на node-a | отказ по дизайну: «can only revoke self» — зафиксировано в §6 |
+
+Закодировано в `cargo test` (27/27): кандидатный порядок/promotion/cap
+F-11, dropped-маркер и мгновенный редиал F-10, per-addr rate-limit F-6,
+tie-break F-7, heard_recently F-8/F-18, адресная маршрутизация флуда
+(pong-инвариант: транзит да, self/@server нет), self-guard I-1,
+revoked-guard I-2, анти-echo F-15, ротация e2e F-20, wire-векторы proto.

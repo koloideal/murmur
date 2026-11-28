@@ -39,12 +39,15 @@ commits that shipped in each release.
   for serverless and serverful families, with the live-run matrix.
 
 ### Fixed
-- Transit members now carry a latency reading too: a forwarded
-  LanPing keeps traveling the mesh (only the pong reply stays
-  link-local), and `now - ts` on arrival lands as the transit
-  counterpart of the per-link RTT — `murmurctl devices` and the
-  phone's family card show ms for members reachable only through a
-  sibling.
+- Mesh latency is honest ICMP semantics now: every member answers a
+  flooded LanPing with a LanPong *addressed* to the pinger
+  (`to = Route::Device`), the mesh routes it back transit or direct,
+  and only the pinger measures — `now - ts` off its own echoed ts on
+  its own clock, no cross-clock subtraction (the first attempt stamped
+  `now - ping.ts` and NTP skew floored it to a bogus 0 ms). Pongs in
+  transit are never stamped. `murmurctl devices` and the phone's
+  family card show ms for members reachable only through a sibling —
+  verified live: phone→comp transit 19 ms, comp→phone transit 16 ms.
 - Android: transit-reachable members no longer show as offline in
   the device list — `lastHeard` marks any valid frame within 30 s
   (the phone's flooded pings), same rule the daemon's `devices`

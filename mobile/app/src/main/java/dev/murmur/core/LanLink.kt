@@ -46,6 +46,9 @@ class LanLink(
      *  a killswitch VPN the tunnel table has no LAN route and every
      *  dial dies EHOSTUNREACH while inbound still works. */
     private val ctx: android.content.Context? = null,
+    /** Family-wide monotone seq — pings/pongs flood the mesh now, so
+     *  they share the service's counter or dedupe eats them. */
+    private val nextSeq: () -> Long = { 0L },
 ) {
     /** Which end of the socket we are — the simultaneous-dial
      *  tie-break needs it. */
@@ -243,14 +246,15 @@ class LanLink(
     }
 
     /** Seal a message into the link wire shape — same envelope form
-     *  the relay carries. */
-    private fun sealedEnv(msg: Msg): Envelope {
+     *  the relay carries. seq must be real: pings/pongs now flood the
+     *  mesh, and a constant seq dies in dedupe after the first frame. */
+    private fun sealedEnv(msg: Msg, to: String = Envelope.ALL): Envelope {
         val pt = protoJson.encodeToString(Msg.serializer(), msg).encodeToByteArray()
         return Envelope(
             v = Envelope.VERSION,
             from = selfId,
-            to = Envelope.ALL,
-            seq = 0,
+            to = to,
+            seq = nextSeq(),
             payload = android.util.Base64.encodeToString(key.seal(pt), android.util.Base64.NO_WRAP),
         )
     }
@@ -499,25 +503,35 @@ class LanLink(
                 }
                 publishPeers()
             }
-            // Link-local keepalives stay in the transport — never reach
-            // the service's dispatch/dedup.
+            // Keepalive replies are shaped here in the transport, but
+            // pings/pongs themselves ride on to the service — they are
+            // mesh traffic now, not link-local chatter.
             when (msg) {
-                // The pong reply is link-local, the ping itself is
-                // not: it falls through to the service and floods
-                // onward like any Route::All frame — transit members
-                // need its origin ts for liveness and one-way latency.
-                is Msg.LanPing -> if (links.containsKey(env.from)) {
-                    val pong = sealedEnv(Msg.LanPong(msg.ts))
-                    hiQ.trySend(Write(env.from, (pong.toJson() + "\n").toByteArray()))
+                // ICMP semantics: the ping floods like any Route::All
+                // frame; the pong answers it ADDRESSED to the pinger,
+                // so the mesh routes it back — direct or transit is
+                // the same path. RTT is measured only by the pinger,
+                // on its own clock, from its own echoed ts.
+                is Msg.LanPing -> {
+                    val pong = sealedEnv(Msg.LanPong(msg.ts), to = env.from)
+                    // Back down the socket the ping arrived on — a
+                    // transit ping's env.from names no link here.
+                    val back = links.entries.firstOrNull { it.value.sock === s }?.key
+                        ?: env.from
+                    hiQ.trySend(Write(back, (pong.toJson() + "\n").toByteArray()))
                 }
-                // Pongs stay link-local — a flooded pong stamps the
-                // wrong side's ts (it echoes the ping's clock).
+                // Trust the echo only when it's addressed to us: a
+                // pong in transit answers someone else's ping, stamped
+                // on a clock we don't share. It still rides on to the
+                // service — an onward-addressed pong must reach its
+                // pinger through us.
                 is Msg.LanPong -> {
-                    links[env.from]?.let {
-                        it.rttMs = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
-                        publishPeers()
+                    if (env.to == selfId) {
+                        links[env.from]?.let {
+                            it.rttMs = (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
+                            publishPeers()
+                        }
                     }
-                    continue
                 }
                 is Msg.LanBeacon -> {
                     // A laptop's in-link beacon names where it accepts.

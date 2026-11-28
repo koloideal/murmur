@@ -76,9 +76,10 @@ pub struct Shared {
     /// candidate), so "offline" can't mean "no presence" — "the mesh
     /// heard it recently" is the honest signal.
     last_frame: Mutex<HashMap<DeviceId, u64>>,
-    /// One-way delivery latency to a member measured off its flooded
-    /// LanPing ts — the transit counterpart of `lan_rtt` (which only
-    /// direct links have).
+    /// Mesh RTT per member — measured off the pong echoing OUR ping's
+    /// ts (same-clock subtraction, valid for direct and transit alike);
+    /// the transit counterpart of `lan_rtt`, which direct links get
+    /// from the same measurement.
     last_rtt: Mutex<HashMap<DeviceId, u64>>,
     /// Cleartext control frames addressed to us: (sender, frame).
     /// Server replies (Devices, Error) and inbound pair frames.
@@ -236,14 +237,6 @@ impl Shared {
             .lock()
             .unwrap()
             .insert(from, crate::lan::now_ms());
-        // A transit peer's flooded ping carries its own send ts — the
-        // only latency signal for a member we hold no link to.
-        if let Message::LanPing { ts } = msg {
-            self.last_rtt
-                .lock()
-                .unwrap()
-                .insert(from, crate::lan::now_ms().saturating_sub(*ts));
-        }
         hub.dispatch(from, msg);
         true
     }
@@ -262,10 +255,16 @@ impl Shared {
             })
     }
 
-    /// One-way latency to a transit member off its flooded pings —
-    /// the `devices` fallback for members we hold no link RTT for.
+    /// Mesh RTT to a member off our ping's echoed ts — the `devices`
+    /// fallback for members we hold no direct-link RTT for.
     pub(crate) fn heard_rtt(&self, id: &DeviceId) -> Option<u64> {
         self.last_rtt.lock().unwrap().get(id).copied()
+    }
+
+    /// Mesh RTT measured off an addressed-to-us pong — the echo of
+    /// OUR ping's ts, so the subtraction is same-clock and honest.
+    pub(crate) fn heard_rtt_set(&self, id: DeviceId, ms: u64) {
+        self.last_rtt.lock().unwrap().insert(id, ms);
     }
 
 

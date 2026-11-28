@@ -707,31 +707,39 @@ async fn link_reader(
                 // Link-local keepalives are transport chatter — pong
                 // replies and RTT records never reach dedupe/features.
                 match &msg {
-                    // The pong reply is link-local, the ping itself is
-                    // not: it falls through to ingest+flood like any
-                    // Route::All frame, so transit members still get
-                    // its origin ts for liveness and one-way latency.
+                    // ICMP semantics: the ping floods like any
+                    // Route::All frame (liveness for transit members),
+                    // the pong answers it ADDRESSED to the pinger, so
+                    // the mesh routes it back — direct or transit, no
+                    // difference. RTT is only ever measured on the
+                    // pinger's own clock from its own echoed ts:
+                    // cross-clock subtraction is not a measurement.
                     Message::LanPing { ts } => {
-                        if owner == Some(env.from) {
-                            if let Ok(env) = Envelope::seal(
-                                shared.id,
-                                Route::All,
-                                shared.next_seq(),
-                                &shared.keys.read().unwrap().current,
-                                &Message::LanPong { ts: *ts },
-                            ) {
-                                let _ = tx_hi.send(env);
-                            }
+                        if let Ok(pong) = Envelope::seal(
+                            shared.id,
+                            Route::Device(env.from),
+                            shared.next_seq(),
+                            &shared.keys.read().unwrap().current,
+                            &Message::LanPong { ts: *ts },
+                        ) {
+                            let _ = tx_hi.send(pong);
                         }
+                        // no continue — the ping rides on to
+                        // ingest+forward below
                     }
-                    // Pongs stay link-local — a flooded pong would
-                    // stamp the wrong side's ts (it echoes the ping's
-                    // origin clock, not the pong sender's).
                     Message::LanPong { ts } => {
-                        // The peer is already adopted at this point —
-                        // the pong arrives after the beacon exchange.
-                        shared.lan_rtt_set(env.from, now_ms().saturating_sub(*ts));
-                        continue;
+                        // Trust the echo only when it's addressed to
+                        // us: a pong in transit answers someone else's
+                        // ping, stamped on a clock we don't share.
+                        if env.to == Route::Device(shared.id) {
+                            let ms = now_ms().saturating_sub(*ts);
+                            if owner == Some(env.from) {
+                                shared.lan_rtt_set(env.from, ms);
+                            }
+                            shared.heard_rtt_set(env.from, ms);
+                        }
+                        // no continue — a pong addressed onward must
+                        // flood to its pinger through us
                     }
                     _ => {}
                 }

@@ -404,6 +404,58 @@ mod tests {
     }
 
     #[test]
+    fn addressed_frames_transit_self_and_server_do_not() {
+        // The pong-routing invariant the ICMP keepalive depends on:
+        // a frame addressed to another member floods onward, one
+        // addressed to us or @server stops here.
+        use crate::lan::{LinkDir, Transport};
+        with_env(|| {
+            let family = FamilyKey::random();
+            let (n, _o, _l, _d) = node(0x10, &family);
+            let (peer_a, peer_b) = (DeviceId([0x20; 8]), DeviceId([0x30; 8]));
+            let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+            let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+            {
+                let mut lan = n.lan.lock().unwrap();
+                lan.insert(peer_a, (tx_a.clone(), Transport::Lan, LinkDir::Outbound));
+                lan.insert(peer_b, (tx_b.clone(), Transport::Lan, LinkDir::Outbound));
+            }
+            let key = n.keys.read().unwrap().current.clone();
+            let seal = |to: Route, seq: u64| {
+                Envelope::seal(
+                    peer_a,
+                    to,
+                    seq,
+                    &key,
+                    &Message::LanPong { ts: 1 },
+                )
+                .unwrap()
+            };
+
+            // addressed to peer_b — transits onward to B, never back to A
+            let onward = seal(Route::Device(peer_b), 1);
+            n.lan_forward(&onward, &tx_a);
+            assert!(rx_b.try_recv().is_ok(), "addressed frame must transit");
+            assert!(rx_a.try_recv().is_err(), "never back down the arrival link");
+
+            // addressed to us — stops
+            let mine = seal(Route::Device(n.id), 2);
+            n.lan_forward(&mine, &tx_a);
+            assert!(rx_b.try_recv().is_err(), "self-addressed must not forward");
+
+            // @server is relay business — a LAN flood can't complete it
+            let srv = seal(Route::Server, 3);
+            n.lan_forward(&srv, &tx_a);
+            assert!(rx_b.try_recv().is_err(), "@server must not flood LAN");
+
+            // broadcast — floods to every other link
+            let all = seal(Route::All, 4);
+            n.lan_forward(&all, &tx_a);
+            assert!(rx_b.try_recv().is_ok(), "broadcast floods onward");
+        });
+    }
+
+    #[test]
     fn transit_frames_mark_member_heard() {
         with_env(|| {
             // F-8/F-18: a member reachable only through another node's

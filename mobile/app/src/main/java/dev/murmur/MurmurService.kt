@@ -190,6 +190,7 @@ class MurmurService : Service() {
             onProtoMismatch = ::noteProtoMismatch,
             ctx = this,
             sendRelay = { send(it) },
+            nextSeq = { localSeq.getAndIncrement() },
         )
         status.value = Status(
             provisioned = true,
@@ -516,10 +517,10 @@ class MurmurService : Service() {
             if (seenSeq.size > SEEN_MAX) seenSeq.remove(seenSeq.first())
         }
         lastHeard[env.from] = System.currentTimeMillis()
-        // A transit member's flooded ping is its send-time stamp —
-        // now - ts is the honest "how far" when no direct link's RTT
-        // exists.
-        if (msg is Msg.LanPing) {
+        // Mesh RTT: a pong addressed to us echoes OUR ping's ts —
+        // same-clock subtraction, honest for direct and transit alike.
+        // Anything else (ping ts, transit pong) is cross-clock noise.
+        if (msg is Msg.LanPong && env.to == secrets.deviceId) {
             heardRtt[env.from] =
                 (System.currentTimeMillis() - msg.ts).coerceAtLeast(0)
         }
